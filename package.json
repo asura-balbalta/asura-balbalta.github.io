@@ -5,6 +5,7 @@
     "main": "index.js",
     "scripts": {
         "build": "esbuild --bundle src/index.tsx --outfile=dist/index.js --minify",
+        "deploy": "firebase deploy",
         "dev": "esbuild --bundle src/index.tsx --outfile=dist/index.js --sourcemap --watch",
         "test": "echo \"Error: no test specified\" && exit 1"
     },
