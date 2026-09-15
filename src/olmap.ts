@@ -11,6 +11,8 @@ import { Coordinate } from "ol/coordinate"
 import GeoJSON from "ol/format/GeoJSON.js"
 import { MapEvent } from "ol"
 
+import { squareToolClickEventHandler, resetSquareTool } from "./squareTool"
+
 export const initOlMap = async () => {
     let center = [14136104.293764262, 4514380.225694263] // 위치정보 허용 안할 경우 기본 좌표 (녹사평역 인근)
     const map = new Map({
@@ -58,4 +60,8 @@ export const initOlMap = async () => {
         // console.log('geolocation IS NOT available')
         // map.getView().setCenter([14136104.293764262, 4514380.225694263])
     }
+
+    map.on("click", async (ev) => {
+        squareToolClickEventHandler(ev, map)
+    })
 }
