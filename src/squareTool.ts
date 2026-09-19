@@ -74,8 +74,9 @@ export const squareToolClickEventHandler = (
             const squareRangeLayer = new VectorLayer({
                 source: vectorSource,
                 style: {
-                    "fill-color": "none",
-                    "stroke-color": "red",
+                    "fill-color": "rgba(186, 230, 253, 0.1)",
+                    "stroke-color": "#BAE6FD",
+                    "stroke-width": 1.5,
                 },
             })
             squareRangeLayer.set("name", SQUARE_RANGE_LAYER_NAME)
