@@ -1,5 +1,3 @@
-/// <reference types="@webgpu/types" />
-
 /**
  * canvas 에 WebGPU 를 연결하고 렌더링에 필요한 객체를 준비한다.
  *

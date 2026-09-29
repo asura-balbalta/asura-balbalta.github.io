@@ -1,5 +1,3 @@
-/// <reference types="@webgpu/types" />
-
 import { TinMesh } from "../terrainData"
 import { OrbitCamera, orbitViewProj } from "./camera"
 import { initWebGPU } from "./device"

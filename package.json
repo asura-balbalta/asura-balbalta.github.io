@@ -7,7 +7,8 @@
         "build": "esbuild --bundle src/index.tsx --outfile=dist/index.js --minify",
         "deploy": "firebase deploy",
         "dev": "esbuild --bundle src/index.tsx --outfile=dist/index.js --sourcemap --watch",
-        "test": "echo \"Error: no test specified\" && exit 1"
+        "test": "echo \"Error: no test specified\" && exit 1",
+        "typecheck": "tsc --noEmit"
     },
     "author": "",
     "license": "ISC",
@@ -30,6 +31,7 @@
         "@types/react-dom": "^19.3.0",
         "@webgpu/types": "^0.1.74",
         "esbuild": "^0.28.2",
-        "firebase-tools": "^15.30.1"
+        "firebase-tools": "^15.30.1",
+        "typescript": "6.0.3"
     }
 }
