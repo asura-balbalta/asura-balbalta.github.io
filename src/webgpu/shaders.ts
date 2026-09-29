@@ -1,3 +1,13 @@
+/**
+ * 지형 셰이더 모듈 descriptor 를 만든다. `device.createShaderModule()` 에 그대로 넘긴다.
+ *
+ * - uniform(@group(0) @binding(0)): viewProj 행렬(64바이트) + 표고 최소·최대(vec2f)
+ * - vertexMain: 정점 위치(@location(0), vec3f)를 viewProj 로 변환하고, 월드 좌표를 fragment 로 넘긴다.
+ * - fragmentMain: 화면 미분(dpdx·dpdy)으로 면 법선을 구해 북서쪽 위의 빛으로 음영을 주고,
+ *   표고에 따라 녹색(낮음) → 베이지(높음)로 색을 섞는다. 법선 버퍼가 필요 없다.
+ *
+ * @returns `{ label, code }` 형태의 GPUShaderModuleDescriptor
+ */
 export const createTerrainShader = () => ({
     label: "terrain shader",
     code: /* wgsl */ `

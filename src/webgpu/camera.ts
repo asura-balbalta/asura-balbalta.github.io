@@ -1,20 +1,40 @@
-// 행렬은 WGSL mat4x4f 와 같은 열 우선(column-major): m[col * 4 + row]
+/**
+ * 4×4 행렬. WGSL mat4x4f 와 같은 열 우선(column-major) 배치로, m[col * 4 + row] 이다.
+ * uniform 버퍼에 그대로 writeBuffer 할 수 있다.
+ */
 export type Mat4 = Float32Array
 type Vec3 = [number, number, number]
 
+/** 벡터 뺄셈 a - b */
 const sub = (a: Vec3, b: Vec3): Vec3 => [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+
+/** 벡터 내적 a · b */
 const dot = (a: Vec3, b: Vec3) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+
+/** 벡터 외적 a × b */
 const cross = (a: Vec3, b: Vec3): Vec3 => [
     a[1] * b[2] - a[2] * b[1],
     a[2] * b[0] - a[0] * b[2],
     a[0] * b[1] - a[1] * b[0],
 ]
+
+/** 길이가 1인 벡터로 정규화 */
 const normalize = (a: Vec3): Vec3 => {
     const len = Math.hypot(a[0], a[1], a[2])
     return [a[0] / len, a[1] / len, a[2] / len]
 }
 
-// WebGPU clip 공간의 깊이는 0(near) ~ 1(far). OpenGL(-1 ~ 1)용 공식과 다르다
+/**
+ * 원근 투영 행렬을 만든다. 카메라 좌표(카메라가 -z 방향을 봄)를 clip 공간으로 옮긴다.
+ *
+ * WebGPU clip 공간의 깊이는 0(near) ~ 1(far)이라, OpenGL(-1 ~ 1)용 공식과 3열이 다르다.
+ *
+ * @param fovY 세로 시야각(라디안)
+ * @param aspect 화면 가로/세로 비율
+ * @param near 가까운 절단면까지의 거리(양수)
+ * @param far 먼 절단면까지의 거리(near 보다 큼)
+ * @returns 투영 행렬
+ */
 export const perspective = (
     fovY: number,
     aspect: number,
@@ -31,7 +51,16 @@ export const perspective = (
     ])
 }
 
-// 카메라는 자기 -z 방향을 본다
+/**
+ * 뷰 행렬을 만든다. 월드 좌표를 "eye 에서 target 을 바라보는 카메라" 기준 좌표로 옮긴다.
+ *
+ * 카메라 축: x = 화면 오른쪽, y = 화면 위, z = 카메라 뒤쪽(카메라는 자기 -z 방향을 본다).
+ *
+ * @param eye 카메라 위치
+ * @param target 바라보는 점
+ * @param up 월드의 위쪽 방향(지형은 [0, 0, 1])
+ * @returns 뷰 행렬
+ */
 export const lookAt = (eye: Vec3, target: Vec3, up: Vec3): Mat4 => {
     const z = normalize(sub(eye, target))
     const x = normalize(cross(up, z))
@@ -44,6 +73,13 @@ export const lookAt = (eye: Vec3, target: Vec3, up: Vec3): Mat4 => {
     ])
 }
 
+/**
+ * 행렬 곱 a × b. 정점에 적용하면 b 가 먼저, a 가 나중에 적용된다.
+ *
+ * @param a 나중에 적용할 행렬(예: projection)
+ * @param b 먼저 적용할 행렬(예: view)
+ * @returns 곱한 결과(새 배열)
+ */
 export const multiply = (a: Mat4, b: Mat4): Mat4 => {
     const out = new Float32Array(16)
     for (let c = 0; c < 4; c++) {
@@ -56,15 +92,33 @@ export const multiply = (a: Mat4, b: Mat4): Mat4 => {
     return out
 }
 
-// 지형 좌표계는 z-up (x=동, y=북, z=표고)
+/**
+ * target 을 중심으로 구면 좌표로 도는 궤도 카메라. 지형 좌표계는 z-up(x=동, y=북, z=표고).
+ */
 export type OrbitCamera = {
+    /** 바라보는 중심점 */
     target: Vec3
+    /** target 에서 카메라까지 거리(m) */
     distance: number
-    azimuth: number // target 에서 본 카메라 방향. 0 = 동쪽, π/2 = 북쪽
-    elevation: number // 수평선 위 각도
+    /** target 에서 본 카메라 방향(라디안). 0 = 동쪽, π/2 = 북쪽 */
+    azimuth: number
+    /** 수평선 위로 올려다본 각도(라디안) */
+    elevation: number
+    /** 세로 시야각(라디안) */
     fovY: number
 }
 
+/**
+ * 궤도 카메라 파라미터로 셰이더에 넘길 viewProj 행렬을 만든다.
+ *
+ * 1. azimuth·elevation·distance 로 카메라 위치(eye)를 구한다.
+ * 2. near/far 를 distance 에 비례시켜(0.01배 ~ 10배) 깊이 정밀도를 확보한다.
+ * 3. projection × view 를 반환한다.
+ *
+ * @param cam 궤도 카메라 상태
+ * @param aspect 화면 가로/세로 비율
+ * @returns viewProj 행렬
+ */
 export const orbitViewProj = (cam: OrbitCamera, aspect: number): Mat4 => {
     const { target, distance, azimuth, elevation } = cam
     const ce = Math.cos(elevation)
@@ -73,7 +127,6 @@ export const orbitViewProj = (cam: OrbitCamera, aspect: number): Mat4 => {
         target[1] + distance * ce * Math.sin(azimuth),
         target[2] + distance * Math.sin(elevation),
     ]
-    // near/far 를 거리에 비례시켜 깊이 정밀도를 확보
     const proj = perspective(cam.fovY, aspect, distance * 0.01, distance * 10)
     return multiply(proj, lookAt(eye, target, [0, 0, 1]))
 }

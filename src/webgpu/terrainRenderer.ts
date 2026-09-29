@@ -8,11 +8,19 @@ import { createTerrainShader } from "./shaders"
 const DEPTH_FORMAT: GPUTextureFormat = "depth24plus"
 const UNIFORM_SIZE = 80 // mat4x4f(64) + vec2f(8), 16바이트 정렬
 
+/** 메쉬 정점 좌표의 범위. 원점을 뺀 로컬 좌표(m) 기준 */
 export type MeshBounds = {
     min: [number, number, number]
     max: [number, number, number]
 }
 
+/**
+ * 배경 pass 함수를 만든다. 프레임마다 가장 먼저 실행되어 색 버퍼와 깊이 버퍼를 비운다.
+ *
+ * @param bgcolor 배경색(0 ~ 1)
+ * @param depthView 깊이 텍스처 view. 뒤이은 pass 들이 같은 view 를 load 해서 쓴다
+ * @returns `(encoder, context) => void` pass 함수
+ */
 const renderBackgroundPassFactory =
     (bgcolor: { r: number; g: number; b: number }, depthView: GPUTextureView) =>
     (encoder: GPUCommandEncoder, context: GPUCanvasContext) => {
@@ -35,6 +43,18 @@ const renderBackgroundPassFactory =
         backgroundPass.end()
     }
 
+/**
+ * 지형 pass 와 그 데이터를 바꾸는 updater 들을 만든다.
+ *
+ * 셰이더 모듈, 파이프라인(깊이 테스트 포함), uniform 버퍼, 바인드그룹은 여기서 한 번만 만든다.
+ * 메쉬와 카메라는 반환하는 updater 로 버퍼만 바꾼다.
+ *
+ * @param device GPU device
+ * @param format 캔버스 텍스처 포맷
+ * @param depthView 배경 pass 와 공유하는 깊이 텍스처 view
+ * @param aspect 화면 가로/세로 비율(카메라 투영용)
+ * @returns terrainPass, meshUpdater, cameraUpdater
+ */
 const createTerrainDrawingPassAndUpdaters = (
     device: GPUDevice,
     format: GPUTextureFormat,
@@ -87,6 +107,13 @@ const createTerrainDrawingPassAndUpdaters = (
     let indexBuffer: GPUBuffer | null = null
     let indexCount = 0
 
+    /**
+     * 그릴 메쉬를 교체한다. 이전 정점·인덱스 버퍼는 해제하고 새로 만들어 올린다.
+     * 정점 범위를 계산해 표고 최소·최대를 uniform(offset 64)에 쓴다.
+     *
+     * @param mesh 서버에서 받은 TIN 메쉬(원점을 뺀 xyz, 삼각형 인덱스)
+     * @returns 정점 범위. 카메라 초기 위치를 잡는 데 쓴다
+     */
     const meshUpdater = (mesh: TinMesh): MeshBounds => {
         vertexBuffer?.destroy()
         indexBuffer?.destroy()
@@ -123,10 +150,22 @@ const createTerrainDrawingPassAndUpdaters = (
         return { min, max }
     }
 
+    /**
+     * 카메라 상태로 viewProj 행렬을 계산해 uniform(offset 0)에 쓴다.
+     *
+     * @param camera 궤도 카메라 상태
+     */
     const cameraUpdater = (camera: OrbitCamera) => {
         device.queue.writeBuffer(uniformBuffer, 0, orbitViewProj(camera, aspect))
     }
 
+    /**
+     * 지형을 그리는 pass. 배경 pass 가 비운 색·깊이 버퍼를 load 해서 그 위에 그린다.
+     * 아직 meshUpdater 로 메쉬가 들어오지 않았으면 아무것도 하지 않는다.
+     *
+     * @param encoder 이번 프레임의 command encoder
+     * @param context 캔버스 context
+     */
     const terrainPass = (encoder: GPUCommandEncoder, context: GPUCanvasContext) => {
         if (!vertexBuffer || !indexBuffer) return
 
@@ -155,6 +194,19 @@ const createTerrainDrawingPassAndUpdaters = (
     return { terrainPass, meshUpdater, cameraUpdater }
 }
 
+/**
+ * 3D 지형 렌더러를 조립한다. (Doe 의 createAe12RenderFunctionAndUpdateFunctions 와 같은 구조)
+ *
+ * 1. initWebGPU 로 device·context 준비
+ * 2. 캔버스 크기의 깊이 텍스처 생성
+ * 3. 배경 pass, 지형 pass·updater 생성
+ *
+ * @param options.canvasId 대상 canvas 요소의 id
+ * @param options.width 캔버스 실제 픽셀 너비(canvas width 속성과 같아야 한다)
+ * @param options.height 캔버스 실제 픽셀 높이
+ * @param options.backgroundColor 배경색(0 ~ 1)
+ * @returns render(한 프레임 그리기), updaters(meshUpdater, cameraUpdater), destroy(device 해제)
+ */
 export const createTerrainRenderFunctionAndUpdateFunctions = async ({
     canvasId,
     width,
@@ -180,6 +232,7 @@ export const createTerrainRenderFunctionAndUpdateFunctions = async ({
     const { terrainPass, meshUpdater, cameraUpdater } =
         createTerrainDrawingPassAndUpdaters(device, format, depthView, width / height)
 
+    /** 한 프레임을 그린다: 배경 pass → 지형 pass 순으로 기록해 제출한다 */
     const render = () => {
         const encoder = device.createCommandEncoder()
         backgroundPass(encoder, context)
@@ -188,6 +241,8 @@ export const createTerrainRenderFunctionAndUpdateFunctions = async ({
     }
 
     const updaters = { meshUpdater, cameraUpdater }
+
+    /** GPU device 와 그에 속한 버퍼·텍스처를 모두 해제한다. 컴포넌트 언마운트 때 호출 */
     const destroy = () => device.destroy()
 
     return { render, updaters, destroy }
