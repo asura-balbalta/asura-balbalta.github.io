@@ -4,8 +4,7 @@ import { Extent } from "ol/extent"
 
 import { firebaseApp } from "./fb"
 import { initOlMap } from "./olmap"
-import { TinMesh } from "./terrainData"
-import { fetchMergedMeshDev } from "./terrainDataDev"
+import { loadTerrainTtm, TinMesh } from "./terrainData"
 import { TerrainViewCanvas } from "./components/TerrainViewCanvas"
 
 const fullMapStyle: CSSProperties = { width: "100%", height: "100vh" }
@@ -31,8 +30,8 @@ export default function App() {
     useEffect(() => {
         initOlMap((bbox) => {
             setSelection(bbox)
-            // 개발용: 로컬 서버의 /mesh.bin 으로 받은 메쉬를 3D 로 표시
-            fetchMergedMeshDev(bbox)
+            // 서버에서 바로 합친 메쉬로 확인하려면 fetchMergedMeshDev(./terrainDataDev) 로 바꾼다
+            loadTerrainTtm(bbox)
                 .then(setMesh)
                 .catch((err) => console.error(err))
         }).then((map) => (mapRef.current = map))
