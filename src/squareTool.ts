@@ -4,9 +4,7 @@ import { createBoxFeature, createFeatureCollectionData } from "./featureUtil"
 import VectorSource from "ol/source/Vector"
 import VectorLayer from "ol/layer/Vector"
 import { unByKey } from "ol/Observable"
-import { getTilesInBbox } from "./terrainData"
-import { fetchMergedMeshDev } from "./terrainDataDev"
-import { drawMeshPoints, drawTileOutlines } from "./tileOverlay"
+import { Extent } from "ol/extent"
 
 const squareToolHelper: {
     clickCount: number
@@ -47,6 +45,7 @@ export const resetSquareTool = (map: Map, parent?: Window) => {
 export const squareToolClickEventHandler = (
     ev: MapBrowserEvent,
     map: Map,
+    onSquareConfirmed?: (bbox: Extent) => void,
     parent?: Window,
 ) => {
     squareToolHelper.ptCoords = squareToolHelper.ptCoords.concat(ev.coordinate)
@@ -98,15 +97,7 @@ export const squareToolClickEventHandler = (
 
         const bbox = boxFeature.getGeometry()?.getExtent()
         console.log(bbox)
-        if (bbox) {
-            getTilesInBbox(bbox)
-                .then(({ tiles }) => drawTileOutlines(map, tiles))
-                .catch((err) => console.error(err))
-            // 개발용: 로컬 서버의 /mesh.bin 으로 표고 데이터 확인
-            fetchMergedMeshDev(bbox)
-                .then((mesh) => drawMeshPoints(map, mesh))
-                .catch((err) => console.error(err))
-        }
+        if (bbox) onSquareConfirmed?.(bbox)
 
         // const toParentSetSquareRequestData: messageDataToParent = {
         //     requestType: toParentRequestType.SET_SQUARE,

@@ -11,9 +11,15 @@ import { Coordinate } from "ol/coordinate"
 import GeoJSON from "ol/format/GeoJSON.js"
 import { MapEvent } from "ol"
 
-import { squareToolClickEventHandler, resetSquareTool } from "./squareTool"
+import { Extent } from "ol/extent"
 
-export const initOlMap = async () => {
+import { squareToolClickEventHandler, resetSquareTool } from "./squareTool"
+import { getTilesInBbox } from "./terrainData"
+import { drawTileOutlines } from "./tileOverlay"
+
+export const initOlMap = async (
+    onSquareConfirmed: (bbox: Extent) => void,
+) => {
     let center = [14136104.293764262, 4514380.225694263] // 위치정보 허용 안할 경우 기본 좌표 (녹사평역 인근)
     const map = new Map({
         target: "map",
@@ -62,6 +68,13 @@ export const initOlMap = async () => {
     }
 
     map.on("click", async (ev) => {
-        squareToolClickEventHandler(ev, map)
+        squareToolClickEventHandler(ev, map, (bbox) => {
+            getTilesInBbox(bbox)
+                .then(({ tiles }) => drawTileOutlines(map, tiles))
+                .catch((err) => console.error(err))
+            onSquareConfirmed(bbox)
+        })
     })
+
+    return map
 }
