@@ -4,7 +4,9 @@ import { createBoxFeature, createFeatureCollectionData } from "./featureUtil"
 import VectorSource from "ol/source/Vector"
 import VectorLayer from "ol/layer/Vector"
 import { unByKey } from "ol/Observable"
-import { showTerrainMesh, showTerrainTiles } from "./tileOverlay"
+import { getTilesInBbox } from "./terrainData"
+import { fetchMergedMeshDev } from "./terrainDataDev"
+import { drawMeshPoints, drawTileOutlines } from "./tileOverlay"
 
 const squareToolHelper: {
     clickCount: number
@@ -97,8 +99,13 @@ export const squareToolClickEventHandler = (
         const bbox = boxFeature.getGeometry()?.getExtent()
         console.log(bbox)
         if (bbox) {
-            showTerrainTiles(map, bbox).catch((err) => console.error(err))
-            showTerrainMesh(map, bbox).catch((err) => console.error(err))
+            getTilesInBbox(bbox)
+                .then(({ tiles }) => drawTileOutlines(map, tiles))
+                .catch((err) => console.error(err))
+            // 개발용: 로컬 서버의 /mesh.bin 으로 표고 데이터 확인
+            fetchMergedMeshDev(bbox)
+                .then((mesh) => drawMeshPoints(map, mesh))
+                .catch((err) => console.error(err))
         }
 
         // const toParentSetSquareRequestData: messageDataToParent = {
