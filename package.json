@@ -19,6 +19,7 @@
     "dependencies": {
         "firebase": "^12.19.0",
         "ol": "^10.10.0",
+        "proj4": "^2.22.0",
         "react": "^19.3.0",
         "react-dom": "^19.3.0",
         "styled-components": "^6.5.3",

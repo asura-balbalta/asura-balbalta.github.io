@@ -4,6 +4,7 @@ import { createBoxFeature, createFeatureCollectionData } from "./featureUtil"
 import VectorSource from "ol/source/Vector"
 import VectorLayer from "ol/layer/Vector"
 import { unByKey } from "ol/Observable"
+import { showTerrainMesh, showTerrainTiles } from "./tileOverlay"
 
 const squareToolHelper: {
     clickCount: number
@@ -95,6 +96,10 @@ export const squareToolClickEventHandler = (
 
         const bbox = boxFeature.getGeometry()?.getExtent()
         console.log(bbox)
+        if (bbox) {
+            showTerrainTiles(map, bbox).catch((err) => console.error(err))
+            showTerrainMesh(map, bbox).catch((err) => console.error(err))
+        }
 
         // const toParentSetSquareRequestData: messageDataToParent = {
         //     requestType: toParentRequestType.SET_SQUARE,
