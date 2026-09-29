@@ -109,9 +109,25 @@ export type OrbitCamera = {
 }
 
 /**
+ * 궤도 카메라의 위치(eye)를 구한다. target 에서 azimuth·elevation 방향으로 distance 만큼 떨어진 점.
+ *
+ * @param cam 궤도 카메라 상태
+ * @returns 카메라 위치(지형 로컬 좌표, m)
+ */
+export const orbitEye = (cam: OrbitCamera): Vec3 => {
+    const { target, distance, azimuth, elevation } = cam
+    const ce = Math.cos(elevation)
+    return [
+        target[0] + distance * ce * Math.cos(azimuth),
+        target[1] + distance * ce * Math.sin(azimuth),
+        target[2] + distance * Math.sin(elevation),
+    ]
+}
+
+/**
  * 궤도 카메라 파라미터로 셰이더에 넘길 viewProj 행렬을 만든다.
  *
- * 1. azimuth·elevation·distance 로 카메라 위치(eye)를 구한다.
+ * 1. orbitEye 로 카메라 위치를 구한다.
  * 2. near/far 를 distance 에 비례시켜(0.01배 ~ 10배) 깊이 정밀도를 확보한다.
  * 3. projection × view 를 반환한다.
  *
@@ -120,13 +136,7 @@ export type OrbitCamera = {
  * @returns viewProj 행렬
  */
 export const orbitViewProj = (cam: OrbitCamera, aspect: number): Mat4 => {
-    const { target, distance, azimuth, elevation } = cam
-    const ce = Math.cos(elevation)
-    const eye: Vec3 = [
-        target[0] + distance * ce * Math.cos(azimuth),
-        target[1] + distance * ce * Math.sin(azimuth),
-        target[2] + distance * Math.sin(elevation),
-    ]
+    const { distance } = cam
     const proj = perspective(cam.fovY, aspect, distance * 0.01, distance * 10)
-    return multiply(proj, lookAt(eye, target, [0, 0, 1]))
+    return multiply(proj, lookAt(orbitEye(cam), cam.target, [0, 0, 1]))
 }
