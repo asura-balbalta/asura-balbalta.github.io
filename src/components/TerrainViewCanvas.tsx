@@ -35,9 +35,16 @@ const initialCamera = ({ min, max }: MeshBounds): OrbitCamera => ({
  * - 드래그: 회전(좌우 = azimuth, 상하 = elevation), 휠: 확대·축소(distance)
  * - 1차 구현이라 캔버스 크기는 마운트 시점 창 크기로 고정된다.
  *
- * @param props.mesh 그릴 TIN 메쉬
+ * @param props.mesh 그릴 메쉬
+ * @param props.monochrome true 면 표고 그라데이션 대신 단색으로 칠한다
  */
-export const TerrainViewCanvas = ({ mesh }: { mesh: TinMesh }) => {
+export const TerrainViewCanvas = ({
+    mesh,
+    monochrome = false,
+}: {
+    mesh: TinMesh
+    monochrome?: boolean
+}) => {
     const canvasId = `terrain-canvas-${useId()}`
     // canvas 속성은 실제 픽셀 수(× devicePixelRatio), style 은 화면에 보이는 크기
     const [size] = useState(() => ({
@@ -81,10 +88,10 @@ export const TerrainViewCanvas = ({ mesh }: { mesh: TinMesh }) => {
 
     useEffect(() => {
         if (!renderer) return
-        const bounds = renderer.updaters.meshUpdater(mesh)
+        const bounds = renderer.updaters.meshUpdater(mesh, { monochrome })
         cameraRef.current = initialCamera(bounds)
         renderer.updaters.cameraUpdater(cameraRef.current)
-    }, [renderer, mesh])
+    }, [renderer, mesh, monochrome])
 
     /**
      * 현재 카메라에 변경을 적용하고 GPU uniform 에 반영한다.

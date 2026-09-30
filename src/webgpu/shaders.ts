@@ -1,10 +1,11 @@
 /**
  * 지형 셰이더 모듈 descriptor 를 만든다. `device.createShaderModule()` 에 그대로 넘긴다.
  *
- * - uniform(@group(0) @binding(0)): viewProj 행렬(offset 0) + 표고 최소·최대(offset 64) + 카메라 위치(offset 80), 총 96바이트
+ * - uniform(@group(0) @binding(0)): viewProj 행렬(offset 0) + 표고 최소·최대(offset 64) + 카메라 위치(offset 80)
+ *   + 단색 여부(offset 92), 총 96바이트
  * - vertexMain: 정점 위치(@location(0))를 viewProj 로 변환하고, 월드 좌표와 정점 법선(@location(1))을 fragment 로 넘긴다.
- * - fragmentMain: 삼각형 안에서 보간된 법선으로 픽셀마다 Blinn-Phong 조명(주변광 + 난반사 + 정반사)을 계산하고,
- *   표고에 따라 녹색(낮음) → 베이지(높음)로 색을 섞는다.
+ * - fragmentMain: 삼각형 안에서 보간된 법선으로 픽셀마다 Blinn-Phong 조명(주변광 + 난반사 + 정반사)을 계산한다.
+ *   바탕색은 표고에 따라 녹색(낮음) → 베이지(높음) 그라데이션이며, monochrome 이 1이면 모형 보드 같은 회백색 단색.
  *
  * @returns `{ label, code }` 형태의 GPUShaderModuleDescriptor
  */
@@ -15,6 +16,7 @@ export const createTerrainShader = () => ({
         viewProj: mat4x4f,
         zRange: vec2f, // 색 그라데이션용 표고 최소, 최대
         eye: vec3f, // 카메라 위치 (정반사 계산용)
+        monochrome: f32, // 1 이면 단색
     };
     @group(0) @binding(0) var<uniform> u: Uniforms;
 
@@ -45,7 +47,10 @@ export const createTerrainShader = () => ({
         let specular = pow(max(dot(n, h), 0.0), 32.0) * 0.15;
 
         let t = clamp((input.world.z - u.zRange.x) / (u.zRange.y - u.zRange.x), 0.0, 1.0);
-        let base = mix(vec3f(0.36, 0.52, 0.36), vec3f(0.86, 0.80, 0.66), t);
+        let gradient = mix(vec3f(0.36, 0.52, 0.36), vec3f(0.86, 0.80, 0.66), t);
+        // 단색(모형) 모드에서는 수직면을 판보다 25% 어둡게 해서, 빛을 받는 방향의 단도 판과 구분되게 한다
+        let riserShade = 1.0 - 0.25 * (1.0 - abs(n.z)) * u.monochrome;
+        let base = mix(gradient, vec3f(0.88, 0.86, 0.80), u.monochrome) * riserShade;
         return vec4f(base * (0.35 + 0.65 * diffuse) + vec3f(specular), 1);
     }
     `,

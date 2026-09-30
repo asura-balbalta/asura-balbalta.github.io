@@ -5,7 +5,7 @@ import { createTerrainShader } from "./shaders"
 
 const DEPTH_FORMAT: GPUTextureFormat = "depth24plus"
 const NORMAL_SMOOTH_ITERATIONS = 2
-const UNIFORM_SIZE = 96 // viewProj mat4x4f(0~64) + zRange vec2f(64~72) + eye vec3f(80~92, vec3f 는 16바이트 정렬), 전체 16바이트 정렬
+const UNIFORM_SIZE = 96 // viewProj mat4x4f(0~64) + zRange vec2f(64~72) + eye vec3f(80~92, vec3f 는 16바이트 정렬) + monochrome f32(92~96)
 
 /** 메쉬 정점 좌표의 범위. 원점을 뺀 로컬 좌표(m) 기준 */
 export type MeshBounds = {
@@ -206,13 +206,17 @@ const createTerrainDrawingPassAndUpdaters = (
 
     /**
      * 그릴 메쉬를 교체한다. 이전 정점·법선·인덱스 버퍼는 해제하고 새로 만들어 올린다.
-     * 정점 법선은 computeVertexNormals 로 계산하고 smoothVertexNormals 로 부드럽게 한 뒤 올린다(메쉬마다 한 번).
-     * 정점 범위를 계산해 표고 최소·최대를 uniform(offset 64)에 쓴다.
+     * 정점 법선은 mesh.normals 가 있으면 그대로 쓰고, 없으면 computeVertexNormals 로 계산해 smoothVertexNormals 로 부드럽게 한다.
+     * 정점 범위를 계산해 표고 최소·최대를 uniform(offset 64)에, 단색 여부를 uniform(offset 92)에 쓴다.
      *
-     * @param mesh 서버에서 받은 TIN 메쉬(원점을 뺀 xyz, 삼각형 인덱스)
+     * @param mesh 그릴 메쉬(원점을 뺀 xyz, 삼각형 인덱스, 선택적으로 정점 법선)
+     * @param options.monochrome true 면 표고 그라데이션 대신 단색으로 칠한다
      * @returns 정점 범위. 카메라 초기 위치를 잡는 데 쓴다
      */
-    const meshUpdater = (mesh: TinMesh): MeshBounds => {
+    const meshUpdater = (
+        mesh: TinMesh,
+        { monochrome = false }: { monochrome?: boolean } = {},
+    ): MeshBounds => {
         vertexBuffer?.destroy()
         normalBuffer?.destroy()
         indexBuffer?.destroy()
@@ -224,11 +228,13 @@ const createTerrainDrawingPassAndUpdaters = (
         })
         device.queue.writeBuffer(vertexBuffer, 0, mesh.positions)
 
-        const normals = smoothVertexNormals(
-            computeVertexNormals(mesh.positions, mesh.indices),
-            mesh.indices,
-            NORMAL_SMOOTH_ITERATIONS,
-        )
+        const normals =
+            mesh.normals ??
+            smoothVertexNormals(
+                computeVertexNormals(mesh.positions, mesh.indices),
+                mesh.indices,
+                NORMAL_SMOOTH_ITERATIONS,
+            )
         normalBuffer = device.createBuffer({
             label: "terrain normals",
             size: normals.byteLength,
@@ -257,6 +263,11 @@ const createTerrainDrawingPassAndUpdaters = (
             uniformBuffer,
             64,
             new Float32Array([min[2], max[2]]),
+        )
+        device.queue.writeBuffer(
+            uniformBuffer,
+            92,
+            new Float32Array([monochrome ? 1 : 0]),
         )
         return { min, max }
     }

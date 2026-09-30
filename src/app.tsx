@@ -5,7 +5,13 @@ import { Extent } from "ol/extent"
 import { firebaseApp } from "./fb"
 import { initOlMap } from "./olmap"
 import { loadTerrainTtm, TinMesh } from "./terrainData"
+import { buildSteppedMesh } from "./terrainSteps"
 import { TerrainViewCanvas } from "./components/TerrainViewCanvas"
+
+/** 지형 표현 방식. "tin": 삼각형 메쉬 그대로, "stepped": 등고선 모형처럼 계단형 */
+const TERRAIN_MODE: "tin" | "stepped" = "stepped"
+/** 계단형일 때 층 간격(m). 0.1 ~ 5 정도로 조정 */
+const STEP_INTERVAL = 1
 
 const fullMapStyle: CSSProperties = { width: "100%", height: "100vh" }
 
@@ -32,7 +38,13 @@ export default function App() {
             setSelection(bbox)
             // 서버에서 바로 합친 메쉬로 확인하려면 fetchMergedMeshDev(./terrainDataDev) 로 바꾼다
             loadTerrainTtm(bbox)
-                .then(setMesh)
+                .then((mesh) =>
+                    setMesh(
+                        TERRAIN_MODE === "stepped"
+                            ? buildSteppedMesh(mesh, STEP_INTERVAL)
+                            : mesh,
+                    ),
+                )
                 .catch((err) => console.error(err))
         }).then((map) => (mapRef.current = map))
     }, [])
@@ -51,7 +63,12 @@ export default function App() {
 
     return (
         <>
-            {mesh && <TerrainViewCanvas mesh={mesh} />}
+            {mesh && (
+                <TerrainViewCanvas
+                    mesh={mesh}
+                    monochrome={TERRAIN_MODE === "stepped"}
+                />
+            )}
             <div id="map" style={isMiniMap ? miniMapStyle : fullMapStyle}></div>
         </>
     )

@@ -22,6 +22,8 @@ export type TinMesh = {
     origin: [number, number]
     positions: Float32Array
     indices: Uint32Array
+    /** 정점 법선. 있으면 렌더러가 계산·스무딩을 건너뛰고 그대로 쓴다 (계단형 메쉬처럼 모서리를 살려야 할 때) */
+    normals?: Float32Array
 }
 
 export const getTilesInBbox = async (
