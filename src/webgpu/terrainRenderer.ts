@@ -1,11 +1,14 @@
 import { TinMesh } from "../terrainData"
 import { OrbitCamera, orbitEye, orbitViewProj } from "./camera"
 import { initWebGPU } from "./device"
-import { createTerrainShader } from "./shaders"
+import { createSmoothTerrainShader, createSteppedTerrainShader } from "./shaders"
 
 const DEPTH_FORMAT: GPUTextureFormat = "depth24plus"
 const NORMAL_SMOOTH_ITERATIONS = 2
-const UNIFORM_SIZE = 96 // viewProj mat4x4f(0~64) + zRange vec2f(64~72) + eye vec3f(80~92, vec3f 는 16바이트 정렬) + monochrome f32(92~96)
+const UNIFORM_SIZE = 96 // viewProj mat4x4f(0~64) + zRange vec2f(64~72) + eye vec3f(80~92, vec3f 는 16바이트 정렬), 전체 16바이트 정렬
+
+/** 지형 표현 방식. tin: 정점 법선으로 부드럽게, stepped: 계단형(면 법선, 법선 버퍼 없음) */
+export type TerrainMode = "tin" | "stepped"
 
 /** 메쉬 정점 좌표의 범위. 원점을 뺀 로컬 좌표(m) 기준 */
 export type MeshBounds = {
@@ -133,10 +136,18 @@ const smoothVertexNormals = (
     return current
 }
 
+/** 정점 버퍼 하나에 float32x3 하나가 들어가는 레이아웃 */
+const float32x3Layout = (shaderLocation: number): GPUVertexBufferLayout => ({
+    arrayStride: 12,
+    attributes: [{ format: "float32x3", offset: 0, shaderLocation }],
+})
+
 /**
  * 지형 pass 와 그 데이터를 바꾸는 updater 들을 만든다.
  *
  * 셰이더 모듈, 파이프라인(깊이 테스트 포함), uniform 버퍼, 바인드그룹은 여기서 한 번만 만든다.
+ * 파이프라인은 모드별로 둘이다: tin(좌표 + 정점 법선, 부드러운 음영), stepped(좌표만, 셰이더에서 면 법선).
+ * uniform 버퍼는 둘이 같이 쓰고, 바인드그룹만 파이프라인마다 만든다(layout "auto" 라서).
  * 메쉬와 카메라는 반환하는 updater 로 버퍼만 바꾼다.
  *
  * @param device GPU device
@@ -151,54 +162,54 @@ const createTerrainDrawingPassAndUpdaters = (
     depthView: GPUTextureView,
     aspect: number,
 ) => {
-    const shaderModule = device.createShaderModule(createTerrainShader())
-
-    const pipeline = device.createRenderPipeline({
-        label: "terrain pipeline",
-        layout: "auto",
-        vertex: {
-            module: shaderModule,
-            entryPoint: "vertexMain",
-            buffers: [
-                {
-                    arrayStride: 12,
-                    attributes: [
-                        { format: "float32x3", offset: 0, shaderLocation: 0 },
-                    ],
-                },
-                {
-                    arrayStride: 12,
-                    attributes: [
-                        { format: "float32x3", offset: 0, shaderLocation: 1 },
-                    ],
-                },
-            ],
-        },
-        fragment: {
-            module: shaderModule,
-            entryPoint: "fragmentMain",
-            targets: [{ format }],
-        },
-        primitive: { topology: "triangle-list", cullMode: "none" },
-        depthStencil: {
-            format: DEPTH_FORMAT,
-            depthWriteEnabled: true,
-            depthCompare: "less",
-        },
-    })
-
     const uniformBuffer = device.createBuffer({
         label: "terrain uniforms",
         size: UNIFORM_SIZE,
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     })
 
-    const bindGroup = device.createBindGroup({
-        label: "terrain bind group",
-        layout: pipeline.getBindGroupLayout(0),
-        entries: [{ binding: 0, resource: { buffer: uniformBuffer } }],
-    })
+    /** 모드별 파이프라인과 그 바인드그룹을 만든다 */
+    const createPipelineSet = (
+        mode: TerrainMode,
+        shader: GPUShaderModuleDescriptor,
+        buffers: GPUVertexBufferLayout[],
+    ) => {
+        const shaderModule = device.createShaderModule(shader)
+        const pipeline = device.createRenderPipeline({
+            label: `terrain pipeline (${mode})`,
+            layout: "auto",
+            vertex: { module: shaderModule, entryPoint: "vertexMain", buffers },
+            fragment: {
+                module: shaderModule,
+                entryPoint: "fragmentMain",
+                targets: [{ format }],
+            },
+            primitive: { topology: "triangle-list", cullMode: "none" },
+            depthStencil: {
+                format: DEPTH_FORMAT,
+                depthWriteEnabled: true,
+                depthCompare: "less",
+            },
+        })
+        const bindGroup = device.createBindGroup({
+            label: `terrain bind group (${mode})`,
+            layout: pipeline.getBindGroupLayout(0),
+            entries: [{ binding: 0, resource: { buffer: uniformBuffer } }],
+        })
+        return { pipeline, bindGroup }
+    }
 
+    const pipelines: Record<TerrainMode, ReturnType<typeof createPipelineSet>> = {
+        tin: createPipelineSet("tin", createSmoothTerrainShader(), [
+            float32x3Layout(0),
+            float32x3Layout(1),
+        ]),
+        stepped: createPipelineSet("stepped", createSteppedTerrainShader(), [
+            float32x3Layout(0),
+        ]),
+    }
+
+    let mode: TerrainMode = "tin"
     let vertexBuffer: GPUBuffer | null = null
     let normalBuffer: GPUBuffer | null = null
     let indexBuffer: GPUBuffer | null = null
@@ -206,20 +217,23 @@ const createTerrainDrawingPassAndUpdaters = (
 
     /**
      * 그릴 메쉬를 교체한다. 이전 정점·법선·인덱스 버퍼는 해제하고 새로 만들어 올린다.
-     * 정점 법선은 mesh.normals 가 있으면 그대로 쓰고, 없으면 computeVertexNormals 로 계산해 smoothVertexNormals 로 부드럽게 한다.
-     * 정점 범위를 계산해 표고 최소·최대를 uniform(offset 64)에, 단색 여부를 uniform(offset 92)에 쓴다.
+     * tin 모드에서는 정점 법선을 computeVertexNormals 로 계산해 smoothVertexNormals 로 부드럽게 한 뒤 올리고,
+     * stepped 모드에서는 법선 버퍼를 만들지 않는다(셰이더가 면 법선을 구한다).
+     * 정점 범위를 계산해 표고 최소·최대를 uniform(offset 64)에 쓴다.
      *
-     * @param mesh 그릴 메쉬(원점을 뺀 xyz, 삼각형 인덱스, 선택적으로 정점 법선)
-     * @param options.monochrome true 면 표고 그라데이션 대신 단색으로 칠한다
+     * @param mesh 그릴 메쉬(원점을 뺀 xyz, 삼각형 인덱스)
+     * @param options.mode 지형 표현 방식. 기본 "tin"
      * @returns 정점 범위. 카메라 초기 위치를 잡는 데 쓴다
      */
     const meshUpdater = (
         mesh: TinMesh,
-        { monochrome = false }: { monochrome?: boolean } = {},
+        options: { mode?: TerrainMode } = {},
     ): MeshBounds => {
+        mode = options.mode ?? "tin"
         vertexBuffer?.destroy()
         normalBuffer?.destroy()
         indexBuffer?.destroy()
+        normalBuffer = null
 
         vertexBuffer = device.createBuffer({
             label: "terrain vertices",
@@ -228,19 +242,19 @@ const createTerrainDrawingPassAndUpdaters = (
         })
         device.queue.writeBuffer(vertexBuffer, 0, mesh.positions)
 
-        const normals =
-            mesh.normals ??
-            smoothVertexNormals(
+        if (mode === "tin") {
+            const normals = smoothVertexNormals(
                 computeVertexNormals(mesh.positions, mesh.indices),
                 mesh.indices,
                 NORMAL_SMOOTH_ITERATIONS,
             )
-        normalBuffer = device.createBuffer({
-            label: "terrain normals",
-            size: normals.byteLength,
-            usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
-        })
-        device.queue.writeBuffer(normalBuffer, 0, normals)
+            normalBuffer = device.createBuffer({
+                label: "terrain normals",
+                size: normals.byteLength,
+                usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+            })
+            device.queue.writeBuffer(normalBuffer, 0, normals)
+        }
 
         indexBuffer = device.createBuffer({
             label: "terrain indices",
@@ -264,11 +278,6 @@ const createTerrainDrawingPassAndUpdaters = (
             64,
             new Float32Array([min[2], max[2]]),
         )
-        device.queue.writeBuffer(
-            uniformBuffer,
-            92,
-            new Float32Array([monochrome ? 1 : 0]),
-        )
         return { min, max }
     }
 
@@ -284,13 +293,16 @@ const createTerrainDrawingPassAndUpdaters = (
 
     /**
      * 지형을 그리는 pass. 배경 pass 가 비운 색·깊이 버퍼를 load 해서 그 위에 그린다.
+     * meshUpdater 가 정한 모드의 파이프라인으로 그리며, tin 모드에서만 법선 버퍼를 바인딩한다.
      * 아직 meshUpdater 로 메쉬가 들어오지 않았으면 아무것도 하지 않는다.
      *
      * @param encoder 이번 프레임의 command encoder
      * @param context 캔버스 context
      */
     const terrainPass = (encoder: GPUCommandEncoder, context: GPUCanvasContext) => {
-        if (!vertexBuffer || !normalBuffer || !indexBuffer) return
+        if (!vertexBuffer || !indexBuffer) return
+        if (mode === "tin" && !normalBuffer) return
+        const { pipeline, bindGroup } = pipelines[mode]
 
         const pass = encoder.beginRenderPass({
             colorAttachments: [
@@ -309,7 +321,7 @@ const createTerrainDrawingPassAndUpdaters = (
         pass.setPipeline(pipeline)
         pass.setBindGroup(0, bindGroup)
         pass.setVertexBuffer(0, vertexBuffer)
-        pass.setVertexBuffer(1, normalBuffer)
+        if (normalBuffer) pass.setVertexBuffer(1, normalBuffer)
         pass.setIndexBuffer(indexBuffer, "uint32")
         pass.drawIndexed(indexCount)
         pass.end()

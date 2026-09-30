@@ -5,6 +5,7 @@ import { OrbitCamera } from "../webgpu/camera"
 import {
     createTerrainRenderFunctionAndUpdateFunctions,
     MeshBounds,
+    TerrainMode,
 } from "../webgpu/terrainRenderer"
 
 type TRenderer = Awaited<
@@ -36,14 +37,14 @@ const initialCamera = ({ min, max }: MeshBounds): OrbitCamera => ({
  * - 1차 구현이라 캔버스 크기는 마운트 시점 창 크기로 고정된다.
  *
  * @param props.mesh 그릴 메쉬
- * @param props.monochrome true 면 표고 그라데이션 대신 단색으로 칠한다
+ * @param props.mode 지형 표현 방식. "tin"(부드러운 음영, 표고 색) 또는 "stepped"(계단형, 단색)
  */
 export const TerrainViewCanvas = ({
     mesh,
-    monochrome = false,
+    mode = "tin",
 }: {
     mesh: TinMesh
-    monochrome?: boolean
+    mode?: TerrainMode
 }) => {
     const canvasId = `terrain-canvas-${useId()}`
     // canvas 속성은 실제 픽셀 수(× devicePixelRatio), style 은 화면에 보이는 크기
@@ -88,10 +89,10 @@ export const TerrainViewCanvas = ({
 
     useEffect(() => {
         if (!renderer) return
-        const bounds = renderer.updaters.meshUpdater(mesh, { monochrome })
+        const bounds = renderer.updaters.meshUpdater(mesh, { mode })
         cameraRef.current = initialCamera(bounds)
         renderer.updaters.cameraUpdater(cameraRef.current)
-    }, [renderer, mesh, monochrome])
+    }, [renderer, mesh, mode])
 
     /**
      * 현재 카메라에 변경을 적용하고 GPU uniform 에 반영한다.

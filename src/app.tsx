@@ -7,9 +7,10 @@ import { initOlMap } from "./olmap"
 import { loadTerrainTtm, TinMesh } from "./terrainData"
 import { buildSteppedMesh } from "./terrainSteps"
 import { TerrainViewCanvas } from "./components/TerrainViewCanvas"
+import { TerrainMode } from "./webgpu/terrainRenderer"
 
 /** 지형 표현 방식. "tin": 삼각형 메쉬 그대로, "stepped": 등고선 모형처럼 계단형 */
-const TERRAIN_MODE: "tin" | "stepped" = "stepped"
+const TERRAIN_MODE: TerrainMode = "stepped"
 /** 계단형일 때 층 간격(m). 0.1 ~ 5 정도로 조정 */
 const STEP_INTERVAL = 1
 
@@ -64,10 +65,7 @@ export default function App() {
     return (
         <>
             {mesh && (
-                <TerrainViewCanvas
-                    mesh={mesh}
-                    monochrome={TERRAIN_MODE === "stepped"}
-                />
+                <TerrainViewCanvas mesh={mesh} mode={TERRAIN_MODE} />
             )}
             <div id="map" style={isMiniMap ? miniMapStyle : fullMapStyle}></div>
         </>
