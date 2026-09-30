@@ -136,6 +136,83 @@ const smoothVertexNormals = (
     return current
 }
 
+/** GPU 에 올릴 메쉬 조각. 정점은 조각 안에서 0부터 다시 번호를 매긴 것 */
+type MeshChunk = {
+    positions: Float32Array
+    normals?: Float32Array
+    indices: Uint32Array
+}
+
+/**
+ * 메쉬를 "버퍼 하나가 maxBytes 를 넘지 않는" 조각들로 나눈다. 넓은 범위에서 정점·인덱스 버퍼가
+ * WebGPU 기본 한도(maxBufferSize, 보통 256MB)를 넘어도 한도를 올리지 않고 그릴 수 있게 하기 위한 것.
+ *
+ * 삼각형을 순서대로 조각에 담다가, 조각의 정점 수나 인덱스 수가 한도에 닿으면 조각을 끊는다.
+ * 조각마다 그 조각이 쓰는 정점만 모아 0부터 다시 번호를 매기므로(globalToLocal), 조각 사이에 정점이 중복될 수 있지만
+ * 삼각형은 그대로라 그리는 결과는 같다. 조각은 generator 로 하나씩 만들어 메모리를 한 조각 분량만 더 쓴다.
+ * 메쉬 전체가 한도 안이면 복사 없이 그대로 하나의 조각으로 돌려준다.
+ *
+ * @param positions 정점 좌표 (x, y, z) 연속 배열
+ * @param indices 삼각형 인덱스 (3개씩)
+ * @param normals 정점 법선(선택). 있으면 조각마다 같이 나눈다
+ * @param maxBytes 버퍼 하나의 최대 바이트 수 (device.limits.maxBufferSize)
+ */
+function* splitMeshIntoChunks(
+    positions: Float32Array,
+    indices: Uint32Array,
+    normals: Float32Array | undefined,
+    maxBytes: number,
+): Generator<MeshChunk> {
+    if (positions.byteLength <= maxBytes && indices.byteLength <= maxBytes) {
+        yield { positions, normals, indices }
+        return
+    }
+
+    const vertexCount = positions.length / 3
+    const maxVerts = Math.floor(maxBytes / 12)
+    const maxIndices = Math.floor(maxBytes / 4) - (Math.floor(maxBytes / 4) % 3)
+    const globalToLocal = new Int32Array(vertexCount).fill(-1)
+    const localToGlobal = new Uint32Array(Math.min(maxVerts, vertexCount))
+
+    let start = 0
+    while (start < indices.length) {
+        const capacity = Math.min(maxIndices, indices.length - start)
+        const chunkIndices = new Uint32Array(capacity)
+        let localCount = 0
+        let n = 0
+        // 삼각형 하나가 새 정점을 최대 3개 만들므로, 그만큼 여유가 있을 때만 담는다
+        while (n + 3 <= capacity && localCount + 3 <= maxVerts) {
+            for (let k = 0; k < 3; k++) {
+                const g = indices[start + n + k]
+                let l = globalToLocal[g]
+                if (l < 0) {
+                    l = localCount++
+                    globalToLocal[g] = l
+                    localToGlobal[l] = g
+                }
+                chunkIndices[n + k] = l
+            }
+            n += 3
+        }
+        if (n === 0) throw new Error("버퍼 한도가 너무 작아 삼각형 하나도 담을 수 없음")
+
+        const chunkPositions = new Float32Array(localCount * 3)
+        const chunkNormals = normals ? new Float32Array(localCount * 3) : undefined
+        for (let l = 0; l < localCount; l++) {
+            const g = localToGlobal[l]
+            chunkPositions.set(positions.subarray(g * 3, g * 3 + 3), l * 3)
+            chunkNormals?.set(normals!.subarray(g * 3, g * 3 + 3), l * 3)
+            globalToLocal[g] = -1
+        }
+        yield {
+            positions: chunkPositions,
+            normals: chunkNormals,
+            indices: n === capacity ? chunkIndices : chunkIndices.subarray(0, n),
+        }
+        start += n
+    }
+}
+
 /** 정점 버퍼 하나에 float32x3 하나가 들어가는 레이아웃 */
 const float32x3Layout = (shaderLocation: number): GPUVertexBufferLayout => ({
     arrayStride: 12,
@@ -210,15 +287,27 @@ const createTerrainDrawingPassAndUpdaters = (
     }
 
     let mode: TerrainMode = "tin"
-    let vertexBuffer: GPUBuffer | null = null
-    let normalBuffer: GPUBuffer | null = null
-    let indexBuffer: GPUBuffer | null = null
-    let indexCount = 0
+    /** GPU 에 올라간 메쉬 조각들. 한 프레임에 조각 수만큼 drawIndexed 한다 */
+    let gpuChunks: {
+        vertexBuffer: GPUBuffer
+        normalBuffer: GPUBuffer | null
+        indexBuffer: GPUBuffer
+        indexCount: number
+    }[] = []
+
+    /** 버퍼를 만들고 데이터를 써서 돌려준다 */
+    const uploadBuffer = (label: string, usage: GPUBufferUsageFlags, data: Float32Array | Uint32Array) => {
+        const buffer = device.createBuffer({ label, size: data.byteLength, usage: usage | GPUBufferUsage.COPY_DST })
+        device.queue.writeBuffer(buffer, 0, data)
+        return buffer
+    }
 
     /**
-     * 그릴 메쉬를 교체한다. 이전 정점·법선·인덱스 버퍼는 해제하고 새로 만들어 올린다.
+     * 그릴 메쉬를 교체한다. 이전 조각들의 버퍼는 해제하고 새로 만들어 올린다.
      * tin 모드에서는 정점 법선을 computeVertexNormals 로 계산해 smoothVertexNormals 로 부드럽게 한 뒤 올리고,
      * stepped 모드에서는 법선 버퍼를 만들지 않는다(셰이더가 면 법선을 구한다).
+     * 메쉬는 splitMeshIntoChunks 로 device.limits.maxBufferSize 안에 들어가는 조각들로 나눠 올리므로,
+     * 넓은 범위여도 버퍼 한도를 올릴 필요가 없다.
      * 정점 범위를 계산해 표고 최소·최대를 uniform(offset 64)에 쓴다.
      *
      * @param mesh 그릴 메쉬(원점을 뺀 xyz, 삼각형 인덱스)
@@ -230,39 +319,36 @@ const createTerrainDrawingPassAndUpdaters = (
         options: { mode?: TerrainMode } = {},
     ): MeshBounds => {
         mode = options.mode ?? "tin"
-        vertexBuffer?.destroy()
-        normalBuffer?.destroy()
-        indexBuffer?.destroy()
-        normalBuffer = null
-
-        vertexBuffer = device.createBuffer({
-            label: "terrain vertices",
-            size: mesh.positions.byteLength,
-            usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
-        })
-        device.queue.writeBuffer(vertexBuffer, 0, mesh.positions)
-
-        if (mode === "tin") {
-            const normals = smoothVertexNormals(
-                computeVertexNormals(mesh.positions, mesh.indices),
-                mesh.indices,
-                NORMAL_SMOOTH_ITERATIONS,
-            )
-            normalBuffer = device.createBuffer({
-                label: "terrain normals",
-                size: normals.byteLength,
-                usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
-            })
-            device.queue.writeBuffer(normalBuffer, 0, normals)
+        for (const c of gpuChunks) {
+            c.vertexBuffer.destroy()
+            c.normalBuffer?.destroy()
+            c.indexBuffer.destroy()
         }
+        gpuChunks = []
 
-        indexBuffer = device.createBuffer({
-            label: "terrain indices",
-            size: mesh.indices.byteLength,
-            usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
-        })
-        device.queue.writeBuffer(indexBuffer, 0, mesh.indices)
-        indexCount = mesh.indices.length
+        const normals =
+            mode === "tin"
+                ? smoothVertexNormals(
+                      computeVertexNormals(mesh.positions, mesh.indices),
+                      mesh.indices,
+                      NORMAL_SMOOTH_ITERATIONS,
+                  )
+                : undefined
+
+        const maxBytes = device.limits.maxBufferSize
+        for (const chunk of splitMeshIntoChunks(mesh.positions, mesh.indices, normals, maxBytes)) {
+            gpuChunks.push({
+                vertexBuffer: uploadBuffer("terrain vertices", GPUBufferUsage.VERTEX, chunk.positions),
+                normalBuffer: chunk.normals
+                    ? uploadBuffer("terrain normals", GPUBufferUsage.VERTEX, chunk.normals)
+                    : null,
+                indexBuffer: uploadBuffer("terrain indices", GPUBufferUsage.INDEX, chunk.indices),
+                indexCount: chunk.indices.length,
+            })
+        }
+        console.log(
+            `GPU 버퍼: ${gpuChunks.length}조각 (버퍼 한도 ${Math.round(maxBytes / 1048576)}MB, 정점 ${mesh.positions.length / 3}, 인덱스 ${mesh.indices.length})`,
+        )
 
         const min: [number, number, number] = [Infinity, Infinity, Infinity]
         const max: [number, number, number] = [-Infinity, -Infinity, -Infinity]
@@ -293,15 +379,14 @@ const createTerrainDrawingPassAndUpdaters = (
 
     /**
      * 지형을 그리는 pass. 배경 pass 가 비운 색·깊이 버퍼를 load 해서 그 위에 그린다.
-     * meshUpdater 가 정한 모드의 파이프라인으로 그리며, tin 모드에서만 법선 버퍼를 바인딩한다.
+     * meshUpdater 가 정한 모드의 파이프라인으로, 메쉬 조각마다 버퍼를 바꿔 가며 drawIndexed 한다(tin 모드에서만 법선 버퍼 바인딩).
      * 아직 meshUpdater 로 메쉬가 들어오지 않았으면 아무것도 하지 않는다.
      *
      * @param encoder 이번 프레임의 command encoder
      * @param context 캔버스 context
      */
     const terrainPass = (encoder: GPUCommandEncoder, context: GPUCanvasContext) => {
-        if (!vertexBuffer || !indexBuffer) return
-        if (mode === "tin" && !normalBuffer) return
+        if (gpuChunks.length === 0) return
         const { pipeline, bindGroup } = pipelines[mode]
 
         const pass = encoder.beginRenderPass({
@@ -320,10 +405,12 @@ const createTerrainDrawingPassAndUpdaters = (
         })
         pass.setPipeline(pipeline)
         pass.setBindGroup(0, bindGroup)
-        pass.setVertexBuffer(0, vertexBuffer)
-        if (normalBuffer) pass.setVertexBuffer(1, normalBuffer)
-        pass.setIndexBuffer(indexBuffer, "uint32")
-        pass.drawIndexed(indexCount)
+        for (const c of gpuChunks) {
+            pass.setVertexBuffer(0, c.vertexBuffer)
+            if (c.normalBuffer) pass.setVertexBuffer(1, c.normalBuffer)
+            pass.setIndexBuffer(c.indexBuffer, "uint32")
+            pass.drawIndexed(c.indexCount)
+        }
         pass.end()
     }
 
@@ -341,7 +428,6 @@ const createTerrainDrawingPassAndUpdaters = (
  * @param options.width 캔버스 실제 픽셀 너비(canvas width 속성과 같아야 한다)
  * @param options.height 캔버스 실제 픽셀 높이
  * @param options.backgroundColor 배경색(0 ~ 1)
- * @param options.maxBufferSize GPU 버퍼 최대 크기 요청(바이트). 생략하면 WebGPU 기본값(256MB)
  * @returns render(한 프레임 그리기), updaters(meshUpdater, cameraUpdater), destroy(device 해제)
  */
 export const createTerrainRenderFunctionAndUpdateFunctions = async ({
@@ -349,15 +435,13 @@ export const createTerrainRenderFunctionAndUpdateFunctions = async ({
     width,
     height,
     backgroundColor,
-    maxBufferSize,
 }: {
     canvasId: string
     width: number
     height: number
     backgroundColor: { r: number; g: number; b: number }
-    maxBufferSize?: number
 }) => {
-    const { context, device, format } = await initWebGPU(canvasId, { maxBufferSize })
+    const { context, device, format } = await initWebGPU(canvasId)
 
     const depthView = device
         .createTexture({
