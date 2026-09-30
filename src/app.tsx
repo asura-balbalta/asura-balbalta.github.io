@@ -61,6 +61,8 @@ export default function App() {
     const [mesh, setMesh] = useState<TinMesh | null>(null)
     /** 3D 지형이 화면에 올라간 뒤 true. 이때부터 지도를 미니맵으로 옮긴다 */
     const [terrainReady, setTerrainReady] = useState(false)
+    /** 계단형 변환 진행률(0 ~ 1). 변환이 시작되기 전(다운로드·병합 중)에는 null */
+    const [progress, setProgress] = useState<number | null>(null)
 
     const setBusyBoth = (value: boolean) => {
         busyRef.current = value
@@ -72,6 +74,7 @@ export default function App() {
             (bbox) => {
                 const generation = ++generationRef.current
                 setBusyBoth(true)
+                setProgress(null)
                 setSelection(bbox)
                 loadTerrainTtm(bbox)
                     .then((loaded) => {
@@ -119,10 +122,15 @@ export default function App() {
                     mode={TERRAIN_MODE}
                     stepInterval={STEP_INTERVAL}
                     onDone={onTerrainDone}
+                    onProgress={setProgress}
                 />
             )}
             <div id="map" style={terrainReady ? miniMapStyle : fullMapStyle}></div>
-            {busy && <div style={busyBadgeStyle}>지형 생성 중…</div>}
+            {busy && (
+                <div style={busyBadgeStyle}>
+                    지형 생성 중…{progress !== null && ` ${Math.round(progress * 100)}%`}
+                </div>
+            )}
         </>
     )
 }

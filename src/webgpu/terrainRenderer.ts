@@ -243,7 +243,7 @@ const float32x3Layout = (shaderLocation: number): GPUVertexBufferLayout => ({
  * @param format 캔버스 텍스처 포맷
  * @param depthView 배경 pass 와 공유하는 깊이 텍스처 view
  * @param aspect 화면 가로/세로 비율(카메라 투영용)
- * @returns terrainPass, meshUpdater, streamedMeshUpdater, cameraUpdater
+ * @returns terrainPass, meshUpdater, meshStreamStarter, streamedMeshUpdater, cameraUpdater
  */
 const createTerrainDrawingPassAndUpdaters = (
     device: GPUDevice,
@@ -315,22 +315,20 @@ const createTerrainDrawingPassAndUpdaters = (
     }
 
     /**
-     * 조각 단위로 메쉬를 교체한다. 이전 조각들의 버퍼를 해제하고, 모드와 표고 범위(uniform offset 64)를 기록한 뒤,
-     * chunks 가 내보내는 조각을 받는 즉시 GPU 에 올린다. 조각은 device.limits.maxBufferSize 안이어야 하므로
-     * 그 값을 chunks 함수에 넘겨 준다. 받는 즉시 올리고 버리므로 브라우저 메모리는 조각 하나 분량만 쓴다.
+     * 조각 단위 메쉬 교체를 시작한다. 이전 조각들의 버퍼를 해제하고, 모드와 표고 범위(uniform offset 64)를 기록한 뒤,
+     * 조각을 하나씩 받아 올리는 함수들을 돌려준다. 조각이 나중에(Worker 메시지 등으로) 하나씩 도착해도 되고,
+     * 올라간 조각은 다음 프레임부터 바로 그려진다.
      *
      * @param options.mode 지형 표현 방식. tin 이면 조각에 normals 가 있어야 한다
      * @param options.bounds 메쉬 전체의 정점 범위(표고 색 범위용)
-     * @param options.chunks 버퍼 최대 바이트 수를 받아 조각을 차례로 내보내는 함수
+     * @returns maxBytes(조각의 버퍼 하나가 넘으면 안 되는 바이트 수), addChunk(조각 하나를 GPU 에 올림), finish(끝났음을 기록)
      */
-    const streamedMeshUpdater = ({
+    const meshStreamStarter = ({
         mode: newMode,
         bounds,
-        chunks,
     }: {
         mode: TerrainMode
         bounds: MeshBounds
-        chunks: (maxBytes: number) => Iterable<MeshChunk>
     }) => {
         mode = newMode
         for (const c of gpuChunks) {
@@ -348,7 +346,7 @@ const createTerrainDrawingPassAndUpdaters = (
         const maxBytes = device.limits.maxBufferSize
         let vertices = 0
         let indices = 0
-        for (const chunk of chunks(maxBytes)) {
+        const addChunk = (chunk: MeshChunk) => {
             if (mode === "tin" && !chunk.normals) throw new Error("tin 모드 조각에는 normals 가 필요함")
             gpuChunks.push({
                 vertexBuffer: uploadBuffer("terrain vertices", GPUBufferUsage.VERTEX, chunk.positions),
@@ -361,9 +359,35 @@ const createTerrainDrawingPassAndUpdaters = (
             vertices += chunk.positions.length / 3
             indices += chunk.indices.length
         }
-        console.log(
-            `GPU 버퍼: ${gpuChunks.length}조각 (버퍼 한도 ${Math.round(maxBytes / 1048576)}MB, 정점 ${vertices}, 인덱스 ${indices})`,
-        )
+        const finish = () => {
+            console.log(
+                `GPU 버퍼: ${gpuChunks.length}조각 (버퍼 한도 ${Math.round(maxBytes / 1048576)}MB, 정점 ${vertices}, 인덱스 ${indices})`,
+            )
+        }
+        return { maxBytes, addChunk, finish }
+    }
+
+    /**
+     * 조각을 동기로 내보내는 함수를 받아 메쉬를 교체한다(meshStreamStarter 를 한 번에 끝까지 돌리는 형태).
+     * 조각은 device.limits.maxBufferSize 안이어야 하므로 그 값을 chunks 함수에 넘겨 준다.
+     * 받는 즉시 올리고 버리므로 브라우저 메모리는 조각 하나 분량만 쓴다.
+     *
+     * @param options.mode 지형 표현 방식. tin 이면 조각에 normals 가 있어야 한다
+     * @param options.bounds 메쉬 전체의 정점 범위(표고 색 범위용)
+     * @param options.chunks 버퍼 최대 바이트 수를 받아 조각을 차례로 내보내는 함수
+     */
+    const streamedMeshUpdater = ({
+        mode,
+        bounds,
+        chunks,
+    }: {
+        mode: TerrainMode
+        bounds: MeshBounds
+        chunks: (maxBytes: number) => Iterable<MeshChunk>
+    }) => {
+        const stream = meshStreamStarter({ mode, bounds })
+        for (const chunk of chunks(stream.maxBytes)) stream.addChunk(chunk)
+        stream.finish()
     }
 
     /**
@@ -444,7 +468,7 @@ const createTerrainDrawingPassAndUpdaters = (
         pass.end()
     }
 
-    return { terrainPass, meshUpdater, streamedMeshUpdater, cameraUpdater }
+    return { terrainPass, meshUpdater, meshStreamStarter, streamedMeshUpdater, cameraUpdater }
 }
 
 /**
@@ -458,7 +482,7 @@ const createTerrainDrawingPassAndUpdaters = (
  * @param options.width 캔버스 실제 픽셀 너비(canvas width 속성과 같아야 한다)
  * @param options.height 캔버스 실제 픽셀 높이
  * @param options.backgroundColor 배경색(0 ~ 1)
- * @returns render(한 프레임 그리기), updaters(meshUpdater, streamedMeshUpdater, cameraUpdater), destroy(device 해제)
+ * @returns render(한 프레임 그리기), updaters(meshUpdater, meshStreamStarter, streamedMeshUpdater, cameraUpdater), destroy(device 해제)
  */
 export const createTerrainRenderFunctionAndUpdateFunctions = async ({
     canvasId,
@@ -482,7 +506,7 @@ export const createTerrainRenderFunctionAndUpdateFunctions = async ({
         .createView()
 
     const backgroundPass = renderBackgroundPassFactory(backgroundColor, depthView)
-    const { terrainPass, meshUpdater, streamedMeshUpdater, cameraUpdater } =
+    const { terrainPass, meshUpdater, meshStreamStarter, streamedMeshUpdater, cameraUpdater } =
         createTerrainDrawingPassAndUpdaters(device, format, depthView, width / height)
 
     /** 한 프레임을 그린다: 배경 pass → 지형 pass 순으로 기록해 제출한다 */
@@ -493,7 +517,7 @@ export const createTerrainRenderFunctionAndUpdateFunctions = async ({
         device.queue.submit([encoder.finish()])
     }
 
-    const updaters = { meshUpdater, streamedMeshUpdater, cameraUpdater }
+    const updaters = { meshUpdater, meshStreamStarter, streamedMeshUpdater, cameraUpdater }
 
     /** GPU device 와 그에 속한 버퍼·텍스처를 모두 해제한다. 컴포넌트 언마운트 때 호출 */
     const destroy = () => device.destroy()

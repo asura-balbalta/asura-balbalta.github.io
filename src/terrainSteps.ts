@@ -2,6 +2,11 @@ import { MeshChunk, TinMesh } from "./terrainData"
 
 type P = [number, number, number]
 
+/** 진행률을 알리는 최소 간격(ms) */
+const PROGRESS_INTERVAL_MS = 100
+/** 진행률 시각을 확인하는 주기(인덱스 수 = 삼각형 4096개 × 3) */
+const PROGRESS_CHECK_INDICES = 4096 * 3
+
 /** z 를 step 으로 나눈 층 번호. 정수 높이 정점이 부동소수점 오차로 아래 층에 떨어지지 않게 작은 값을 더한다 */
 const bandOf = (z: number, step: number) => Math.floor(z / step + 1e-6)
 
@@ -117,14 +122,17 @@ const levelSegment = (poly: P[], level: number): [P, P] | null => {
  * @param mesh 원본 TIN 메쉬(원점 기준 좌표)
  * @param step 층 간격(m). 1이면 1m 마다 한 층
  * @param maxBytes 조각의 정점 버퍼·인덱스 버퍼 각각의 최대 바이트 수 (device.limits.maxBufferSize)
+ * @param onProgress 진행률 알림(선택). 처리한 원본 삼각형 수와 전체 수를 약 PROGRESS_INTERVAL_MS 간격으로 받는다
  * @yields 판·벽으로 이루어진 인덱스 메쉬 조각
  */
 export function* buildSteppedMeshChunks(
     mesh: TinMesh,
     step: number,
     maxBytes: number,
+    onProgress?: (done: number, total: number) => void,
 ): Generator<MeshChunk> {
     const started = performance.now()
+    let lastProgress = started
     const { positions: P0, indices: I0 } = mesh
     const maxVerts = Math.floor(maxBytes / 12)
     const maxIndices = Math.floor(maxBytes / 4)
@@ -232,6 +240,15 @@ export function* buildSteppedMeshChunks(
     }
 
     for (let t = 0; t < I0.length; t += 3) {
+        // 시계를 매번 읽지 않도록 삼각형 4096개마다 한 번만 확인한다
+        if (onProgress && t % PROGRESS_CHECK_INDICES === 0) {
+            const now = performance.now()
+            if (now - lastProgress >= PROGRESS_INTERVAL_MS) {
+                lastProgress = now
+                onProgress(t / 3, I0.length / 3)
+            }
+        }
+
         const tri: P[] = [0, 1, 2].map((k) => {
             const i = I0[t + k] * 3
             return [P0[i], P0[i + 1], P0[i + 2]] as P
