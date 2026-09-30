@@ -1,4 +1,4 @@
-import { TinMesh } from "../terrainData"
+import { MeshChunk, TinMesh } from "../terrainData"
 import { OrbitCamera, orbitEye, orbitViewProj } from "./camera"
 import { initWebGPU } from "./device"
 import { createSmoothTerrainShader, createSteppedTerrainShader } from "./shaders"
@@ -136,11 +136,23 @@ const smoothVertexNormals = (
     return current
 }
 
-/** GPU 에 올릴 메쉬 조각. 정점은 조각 안에서 0부터 다시 번호를 매긴 것 */
-type MeshChunk = {
-    positions: Float32Array
-    normals?: Float32Array
-    indices: Uint32Array
+/**
+ * 메쉬 정점 좌표의 범위를 구한다. 카메라 초기 위치와 표고 색 범위에 쓴다.
+ *
+ * @param mesh 원점 기준 좌표의 메쉬
+ * @returns 각 축의 최소·최대
+ */
+export const meshBounds = (mesh: TinMesh): MeshBounds => {
+    const min: [number, number, number] = [Infinity, Infinity, Infinity]
+    const max: [number, number, number] = [-Infinity, -Infinity, -Infinity]
+    const p = mesh.positions
+    for (let i = 0; i < p.length; i += 3) {
+        for (let k = 0; k < 3; k++) {
+            if (p[i + k] < min[k]) min[k] = p[i + k]
+            if (p[i + k] > max[k]) max[k] = p[i + k]
+        }
+    }
+    return { min, max }
 }
 
 /**
@@ -231,7 +243,7 @@ const float32x3Layout = (shaderLocation: number): GPUVertexBufferLayout => ({
  * @param format 캔버스 텍스처 포맷
  * @param depthView 배경 pass 와 공유하는 깊이 텍스처 view
  * @param aspect 화면 가로/세로 비율(카메라 투영용)
- * @returns terrainPass, meshUpdater, cameraUpdater
+ * @returns terrainPass, meshUpdater, streamedMeshUpdater, cameraUpdater
  */
 const createTerrainDrawingPassAndUpdaters = (
     device: GPUDevice,
@@ -303,12 +315,61 @@ const createTerrainDrawingPassAndUpdaters = (
     }
 
     /**
-     * 그릴 메쉬를 교체한다. 이전 조각들의 버퍼는 해제하고 새로 만들어 올린다.
-     * tin 모드에서는 정점 법선을 computeVertexNormals 로 계산해 smoothVertexNormals 로 부드럽게 한 뒤 올리고,
-     * stepped 모드에서는 법선 버퍼를 만들지 않는다(셰이더가 면 법선을 구한다).
-     * 메쉬는 splitMeshIntoChunks 로 device.limits.maxBufferSize 안에 들어가는 조각들로 나눠 올리므로,
-     * 넓은 범위여도 버퍼 한도를 올릴 필요가 없다.
-     * 정점 범위를 계산해 표고 최소·최대를 uniform(offset 64)에 쓴다.
+     * 조각 단위로 메쉬를 교체한다. 이전 조각들의 버퍼를 해제하고, 모드와 표고 범위(uniform offset 64)를 기록한 뒤,
+     * chunks 가 내보내는 조각을 받는 즉시 GPU 에 올린다. 조각은 device.limits.maxBufferSize 안이어야 하므로
+     * 그 값을 chunks 함수에 넘겨 준다. 받는 즉시 올리고 버리므로 브라우저 메모리는 조각 하나 분량만 쓴다.
+     *
+     * @param options.mode 지형 표현 방식. tin 이면 조각에 normals 가 있어야 한다
+     * @param options.bounds 메쉬 전체의 정점 범위(표고 색 범위용)
+     * @param options.chunks 버퍼 최대 바이트 수를 받아 조각을 차례로 내보내는 함수
+     */
+    const streamedMeshUpdater = ({
+        mode: newMode,
+        bounds,
+        chunks,
+    }: {
+        mode: TerrainMode
+        bounds: MeshBounds
+        chunks: (maxBytes: number) => Iterable<MeshChunk>
+    }) => {
+        mode = newMode
+        for (const c of gpuChunks) {
+            c.vertexBuffer.destroy()
+            c.normalBuffer?.destroy()
+            c.indexBuffer.destroy()
+        }
+        gpuChunks = []
+        device.queue.writeBuffer(
+            uniformBuffer,
+            64,
+            new Float32Array([bounds.min[2], bounds.max[2]]),
+        )
+
+        const maxBytes = device.limits.maxBufferSize
+        let vertices = 0
+        let indices = 0
+        for (const chunk of chunks(maxBytes)) {
+            if (mode === "tin" && !chunk.normals) throw new Error("tin 모드 조각에는 normals 가 필요함")
+            gpuChunks.push({
+                vertexBuffer: uploadBuffer("terrain vertices", GPUBufferUsage.VERTEX, chunk.positions),
+                normalBuffer: chunk.normals
+                    ? uploadBuffer("terrain normals", GPUBufferUsage.VERTEX, chunk.normals)
+                    : null,
+                indexBuffer: uploadBuffer("terrain indices", GPUBufferUsage.INDEX, chunk.indices),
+                indexCount: chunk.indices.length,
+            })
+            vertices += chunk.positions.length / 3
+            indices += chunk.indices.length
+        }
+        console.log(
+            `GPU 버퍼: ${gpuChunks.length}조각 (버퍼 한도 ${Math.round(maxBytes / 1048576)}MB, 정점 ${vertices}, 인덱스 ${indices})`,
+        )
+    }
+
+    /**
+     * 메쉬 하나를 통째로 받아 교체한다. tin 모드에서는 정점 법선을 computeVertexNormals 로 계산해
+     * smoothVertexNormals 로 부드럽게 한 뒤(전체 인접 관계가 필요해서 통째로 한다), splitMeshIntoChunks 로
+     * 버퍼 한도 안의 조각들로 나눠 streamedMeshUpdater 에 넘긴다.
      *
      * @param mesh 그릴 메쉬(원점을 뺀 xyz, 삼각형 인덱스)
      * @param options.mode 지형 표현 방식. 기본 "tin"
@@ -318,53 +379,22 @@ const createTerrainDrawingPassAndUpdaters = (
         mesh: TinMesh,
         options: { mode?: TerrainMode } = {},
     ): MeshBounds => {
-        mode = options.mode ?? "tin"
-        for (const c of gpuChunks) {
-            c.vertexBuffer.destroy()
-            c.normalBuffer?.destroy()
-            c.indexBuffer.destroy()
-        }
-        gpuChunks = []
-
+        const newMode = options.mode ?? "tin"
         const normals =
-            mode === "tin"
+            newMode === "tin"
                 ? smoothVertexNormals(
                       computeVertexNormals(mesh.positions, mesh.indices),
                       mesh.indices,
                       NORMAL_SMOOTH_ITERATIONS,
                   )
                 : undefined
-
-        const maxBytes = device.limits.maxBufferSize
-        for (const chunk of splitMeshIntoChunks(mesh.positions, mesh.indices, normals, maxBytes)) {
-            gpuChunks.push({
-                vertexBuffer: uploadBuffer("terrain vertices", GPUBufferUsage.VERTEX, chunk.positions),
-                normalBuffer: chunk.normals
-                    ? uploadBuffer("terrain normals", GPUBufferUsage.VERTEX, chunk.normals)
-                    : null,
-                indexBuffer: uploadBuffer("terrain indices", GPUBufferUsage.INDEX, chunk.indices),
-                indexCount: chunk.indices.length,
-            })
-        }
-        console.log(
-            `GPU 버퍼: ${gpuChunks.length}조각 (버퍼 한도 ${Math.round(maxBytes / 1048576)}MB, 정점 ${mesh.positions.length / 3}, 인덱스 ${mesh.indices.length})`,
-        )
-
-        const min: [number, number, number] = [Infinity, Infinity, Infinity]
-        const max: [number, number, number] = [-Infinity, -Infinity, -Infinity]
-        const p = mesh.positions
-        for (let i = 0; i < p.length; i += 3) {
-            for (let k = 0; k < 3; k++) {
-                if (p[i + k] < min[k]) min[k] = p[i + k]
-                if (p[i + k] > max[k]) max[k] = p[i + k]
-            }
-        }
-        device.queue.writeBuffer(
-            uniformBuffer,
-            64,
-            new Float32Array([min[2], max[2]]),
-        )
-        return { min, max }
+        const bounds = meshBounds(mesh)
+        streamedMeshUpdater({
+            mode: newMode,
+            bounds,
+            chunks: (maxBytes) => splitMeshIntoChunks(mesh.positions, mesh.indices, normals, maxBytes),
+        })
+        return bounds
     }
 
     /**
@@ -414,7 +444,7 @@ const createTerrainDrawingPassAndUpdaters = (
         pass.end()
     }
 
-    return { terrainPass, meshUpdater, cameraUpdater }
+    return { terrainPass, meshUpdater, streamedMeshUpdater, cameraUpdater }
 }
 
 /**
@@ -428,7 +458,7 @@ const createTerrainDrawingPassAndUpdaters = (
  * @param options.width 캔버스 실제 픽셀 너비(canvas width 속성과 같아야 한다)
  * @param options.height 캔버스 실제 픽셀 높이
  * @param options.backgroundColor 배경색(0 ~ 1)
- * @returns render(한 프레임 그리기), updaters(meshUpdater, cameraUpdater), destroy(device 해제)
+ * @returns render(한 프레임 그리기), updaters(meshUpdater, streamedMeshUpdater, cameraUpdater), destroy(device 해제)
  */
 export const createTerrainRenderFunctionAndUpdateFunctions = async ({
     canvasId,
@@ -452,7 +482,7 @@ export const createTerrainRenderFunctionAndUpdateFunctions = async ({
         .createView()
 
     const backgroundPass = renderBackgroundPassFactory(backgroundColor, depthView)
-    const { terrainPass, meshUpdater, cameraUpdater } =
+    const { terrainPass, meshUpdater, streamedMeshUpdater, cameraUpdater } =
         createTerrainDrawingPassAndUpdaters(device, format, depthView, width / height)
 
     /** 한 프레임을 그린다: 배경 pass → 지형 pass 순으로 기록해 제출한다 */
@@ -463,7 +493,7 @@ export const createTerrainRenderFunctionAndUpdateFunctions = async ({
         device.queue.submit([encoder.finish()])
     }
 
-    const updaters = { meshUpdater, cameraUpdater }
+    const updaters = { meshUpdater, streamedMeshUpdater, cameraUpdater }
 
     /** GPU device 와 그에 속한 버퍼·텍스처를 모두 해제한다. 컴포넌트 언마운트 때 호출 */
     const destroy = () => device.destroy()

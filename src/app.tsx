@@ -5,7 +5,6 @@ import { Extent } from "ol/extent"
 import { firebaseApp } from "./fb"
 import { initOlMap } from "./olmap"
 import { loadTerrainTtm, TinMesh } from "./terrainData"
-import { buildSteppedMesh } from "./terrainSteps"
 import { TerrainViewCanvas } from "./components/TerrainViewCanvas"
 import { TerrainMode } from "./webgpu/terrainRenderer"
 
@@ -39,13 +38,7 @@ export default function App() {
             setSelection(bbox)
             // 서버에서 바로 합친 메쉬로 확인하려면 fetchMergedMeshDev(./terrainDataDev) 로 바꾼다
             loadTerrainTtm(bbox)
-                .then((mesh) =>
-                    setMesh(
-                        TERRAIN_MODE === "stepped"
-                            ? buildSteppedMesh(mesh, STEP_INTERVAL)
-                            : mesh,
-                    ),
-                )
+                .then(setMesh)
                 .catch((err) => console.error(err))
         }).then((map) => (mapRef.current = map))
     }, [])
@@ -65,7 +58,11 @@ export default function App() {
     return (
         <>
             {mesh && (
-                <TerrainViewCanvas mesh={mesh} mode={TERRAIN_MODE} />
+                <TerrainViewCanvas
+                    mesh={mesh}
+                    mode={TERRAIN_MODE}
+                    stepInterval={STEP_INTERVAL}
+                />
             )}
             <div id="map" style={isMiniMap ? miniMapStyle : fullMapStyle}></div>
         </>

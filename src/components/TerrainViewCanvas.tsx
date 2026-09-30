@@ -1,10 +1,12 @@
 import React, { useEffect, useId, useRef, useState } from "react"
 
 import { TinMesh } from "../terrainData"
+import { buildSteppedMeshChunks } from "../terrainSteps"
 import { OrbitCamera } from "../webgpu/camera"
 import {
     createTerrainRenderFunctionAndUpdateFunctions,
     MeshBounds,
+    meshBounds,
     TerrainMode,
 } from "../webgpu/terrainRenderer"
 
@@ -32,19 +34,24 @@ const initialCamera = ({ min, max }: MeshBounds): OrbitCamera => ({
  *
  * - 마운트할 때 렌더러(WebGPU device, 파이프라인)를 한 번 만들고 requestAnimationFrame 루프를 돌린다.
  *   언마운트하면 루프를 멈추고 device 를 해제한다.
- * - mesh 가 바뀌면 meshUpdater 로 버퍼만 교체하고 카메라를 초기 위치로 되돌린다.
+ * - mesh 가 바뀌면 GPU 버퍼만 교체하고 카메라를 초기 위치로 되돌린다.
+ *   tin 모드는 메쉬를 통째로 넘기고(meshUpdater), stepped 모드는 buildSteppedMeshChunks 가 만드는 조각을
+ *   받는 즉시 올린다(streamedMeshUpdater). 계단형 메쉬 전체를 메모리에 두지 않는다.
  * - 드래그: 회전(좌우 = azimuth, 상하 = elevation), 휠: 확대·축소(distance)
  * - 1차 구현이라 캔버스 크기는 마운트 시점 창 크기로 고정된다.
  *
- * @param props.mesh 그릴 메쉬
+ * @param props.mesh 원본 TIN 메쉬
  * @param props.mode 지형 표현 방식. "tin"(부드러운 음영, 표고 색) 또는 "stepped"(계단형, 단색)
+ * @param props.stepInterval stepped 모드의 층 간격(m)
  */
 export const TerrainViewCanvas = ({
     mesh,
     mode = "tin",
+    stepInterval = 1,
 }: {
     mesh: TinMesh
     mode?: TerrainMode
+    stepInterval?: number
 }) => {
     const canvasId = `terrain-canvas-${useId()}`
     // canvas 속성은 실제 픽셀 수(× devicePixelRatio), style 은 화면에 보이는 크기
@@ -89,10 +96,21 @@ export const TerrainViewCanvas = ({
 
     useEffect(() => {
         if (!renderer) return
-        const bounds = renderer.updaters.meshUpdater(mesh, { mode })
+        let bounds: MeshBounds
+        if (mode === "stepped") {
+            // 계단형은 x·y·z 범위가 원본 TIN 과 같으므로(층 바닥으로 누르기만 함) 원본 범위를 그대로 쓴다
+            bounds = meshBounds(mesh)
+            renderer.updaters.streamedMeshUpdater({
+                mode,
+                bounds,
+                chunks: (maxBytes) => buildSteppedMeshChunks(mesh, stepInterval, maxBytes),
+            })
+        } else {
+            bounds = renderer.updaters.meshUpdater(mesh, { mode })
+        }
         cameraRef.current = initialCamera(bounds)
         renderer.updaters.cameraUpdater(cameraRef.current)
-    }, [renderer, mesh, mode])
+    }, [renderer, mesh, mode, stepInterval])
 
     /**
      * 현재 카메라에 변경을 적용하고 GPU uniform 에 반영한다.

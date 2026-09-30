@@ -1,4 +1,4 @@
-import { TinMesh } from "./terrainData"
+import { MeshChunk, TinMesh } from "./terrainData"
 
 type P = [number, number, number]
 
@@ -28,6 +28,11 @@ const growable = <T extends Float32Array | Uint32Array>(make: (n: number) => T) 
         push3,
         length: () => length,
         result: () => buf.slice(0, length) as T,
+        /** 비우고 작은 버퍼로 돌아간다(큰 버퍼를 붙들고 있지 않게) */
+        reset: () => {
+            buf = make(1 << 16)
+            length = 0
+        },
     }
 }
 
@@ -103,16 +108,32 @@ const levelSegment = (poly: P[], level: number): [P, P] | null => {
  * 그 덕에 좌표가 같은 정점(판 모서리 = 벽 모서리 = 이웃 판 모서리)을 mm 단위로 비교해 하나로 공유한다.
  * 판·벽의 z 는 항상 층 높이라서, 층 번호별 Map 에 (x, y) 숫자 키로 정점을 찾는다.
  *
+ * 결과는 메쉬 하나가 아니라 GPU 버퍼 한도(maxBytes) 안에 들어가는 조각들이다. 원본 삼각형을 처리하기 전에
+ * 그 삼각형이 최악의 경우 만들 수 있는 정점·인덱스 수만큼 여유가 없으면 지금까지 쌓인 것을 조각으로 내보내고(yield)
+ * 새 조각을 시작한다. 그래서 배열 하나가 한도를 넘는 일이 없고, 받는 쪽이 조각을 바로 GPU 에 올리고 버리면
+ * 브라우저 메모리도 조각 하나 분량만 쓴다. 정점 합치기 Map 은 조각마다 새로 시작하므로 조각 경계의 정점은 양쪽에 중복되고,
+ * 벽 중복 제거는 전체에서 유지한다.
+ *
  * @param mesh 원본 TIN 메쉬(원점 기준 좌표)
  * @param step 층 간격(m). 1이면 1m 마다 한 층
- * @returns 판·벽으로 이루어진 인덱스 메쉬
+ * @param maxBytes 조각의 정점 버퍼·인덱스 버퍼 각각의 최대 바이트 수 (device.limits.maxBufferSize)
+ * @yields 판·벽으로 이루어진 인덱스 메쉬 조각
  */
-export const buildSteppedMesh = (mesh: TinMesh, step: number): TinMesh => {
+export function* buildSteppedMeshChunks(
+    mesh: TinMesh,
+    step: number,
+    maxBytes: number,
+): Generator<MeshChunk> {
     const started = performance.now()
     const { positions: P0, indices: I0 } = mesh
+    const maxVerts = Math.floor(maxBytes / 12)
+    const maxIndices = Math.floor(maxBytes / 4)
     const positions = growable((n) => new Float32Array(n))
     const indices = growable((n) => new Uint32Array(n))
-    /** 층 번호 → ((x, y) 키 → 정점 인덱스) */
+    let chunkCount = 0
+    let totalTriangles = 0
+    let totalVertices = 0
+    /** 층 번호 → ((x, y) 키 → 정점 인덱스). 조각마다 비운다 */
     const vertexMaps = new Map<number, Map<number, number>>()
     /** 벽 윗면 층 번호 → (작은 끝점 키 → 큰 끝점 키 집합) */
     const wallSets = new Map<number, Map<number, Set<number>>>()
@@ -198,6 +219,18 @@ export const buildSteppedMesh = (mesh: TinMesh, step: number): TinMesh => {
         pushTri(p0, p2, p3)
     }
 
+    /** 쌓인 것을 조각으로 만들고 새 조각을 시작한다 */
+    const flush = (): MeshChunk => {
+        const chunk = { positions: positions.result(), indices: indices.result() }
+        chunkCount++
+        totalTriangles += chunk.indices.length / 3
+        totalVertices += chunk.positions.length / 3
+        positions.reset()
+        indices.reset()
+        vertexMaps.clear()
+        return chunk
+    }
+
     for (let t = 0; t < I0.length; t += 3) {
         const tri: P[] = [0, 1, 2].map((k) => {
             const i = I0[t + k] * 3
@@ -206,6 +239,17 @@ export const buildSteppedMesh = (mesh: TinMesh, step: number): TinMesh => {
         const zs = tri.map((p) => p[2])
         const kMin = bandOf(Math.min(...zs), step)
         const kMax = bandOf(Math.max(...zs), step)
+
+        // 이 삼각형이 만들 수 있는 최대 출력: 층을 L번 지나면 판 조각 L+1개(각 ≤ 3 삼각형) + 벽 L개 + 변 벽 3개(각 2 삼각형)
+        // = 5L + 9 삼각형, 정점은 그 3배. 이만큼 여유가 없으면 조각을 끊는다
+        const worstTriangles = 5 * (kMax - kMin) + 9
+        if (
+            indices.length() > 0 &&
+            (indices.length() + worstTriangles * 3 > maxIndices ||
+                positions.length() + worstTriangles * 9 > maxVerts * 3)
+        ) {
+            yield flush()
+        }
 
         // 정점이 정확히 층 높이에 놓인 변(등고선 위 정점끼리 이은 변)은 자르기로 생기지 않으므로 여기서 벽을 세운다.
         // 옆 삼각형이 더 낮으면 이 벽이 보이고, 같은 높이면 판 아래 숨는다
@@ -238,14 +282,9 @@ export const buildSteppedMesh = (mesh: TinMesh, step: number): TinMesh => {
         }
         if (poly.length >= 3) pushPlate(poly, kMax * step)
     }
+    if (indices.length() > 0) yield flush()
 
-    const stepped: TinMesh = {
-        origin: mesh.origin,
-        positions: positions.result(),
-        indices: indices.result(),
-    }
     console.log(
-        `계단형(${step}m): 원본 삼각형 ${I0.length / 3} → ${indices.length() / 3}, 정점 ${positions.length() / 3}, ${Math.round(performance.now() - started)}ms`,
+        `계단형(${step}m): 원본 삼각형 ${I0.length / 3} → ${totalTriangles}, 정점 ${totalVertices}, ${chunkCount}조각, ${Math.round(performance.now() - started)}ms (받는 쪽 처리 시간 포함)`,
     )
-    return stepped
 }

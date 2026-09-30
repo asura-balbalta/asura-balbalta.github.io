@@ -24,6 +24,16 @@ export type TinMesh = {
     indices: Uint32Array
 }
 
+/**
+ * GPU 버퍼 한도 안에 들어가는 메쉬 조각. 정점은 조각 안에서 0부터 번호를 매긴 것이며,
+ * 조각 사이에 같은 정점이 중복될 수 있다. 렌더러는 조각마다 버퍼를 만들어 차례로 그린다.
+ */
+export type MeshChunk = {
+    positions: Float32Array
+    indices: Uint32Array
+    normals?: Float32Array
+}
+
 export const getTilesInBbox = async (
     bbox3857: Extent,
 ): Promise<TilesInBbox> => {
