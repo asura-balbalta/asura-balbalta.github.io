@@ -9,7 +9,7 @@ import VectorLayer from "ol/layer/Vector"
 import VectorSource from "ol/source/Vector"
 import { Coordinate } from "ol/coordinate"
 import GeoJSON from "ol/format/GeoJSON.js"
-import { MapEvent } from "ol"
+import { MapBrowserEvent, MapEvent } from "ol"
 
 import { Extent } from "ol/extent"
 
@@ -19,6 +19,8 @@ import { drawTileOutlines } from "./tileOverlay"
 
 export const initOlMap = async (
     onSquareConfirmed: (bbox: Extent) => void,
+    /** true 를 돌려주면 그 클릭은 사각형 도구에 넘기지 않는다 (지형 생성 중 잠금) */
+    shouldIgnoreClick: (ev: MapBrowserEvent) => boolean = () => false,
 ) => {
     let center = [14136104.293764262, 4514380.225694263] // 위치정보 허용 안할 경우 기본 좌표 (녹사평역 인근)
     const map = new Map({
@@ -68,6 +70,7 @@ export const initOlMap = async (
     }
 
     map.on("click", async (ev) => {
+        if (shouldIgnoreClick(ev)) return
         squareToolClickEventHandler(ev, map, (bbox) => {
             getTilesInBbox(bbox)
                 .then(({ tiles }) => drawTileOutlines(map, tiles))

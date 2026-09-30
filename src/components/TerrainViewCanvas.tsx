@@ -43,16 +43,22 @@ const initialCamera = ({ min, max }: MeshBounds): OrbitCamera => ({
  * @param props.mesh 원본 TIN 메쉬
  * @param props.mode 지형 표현 방식. "tin"(부드러운 음영, 표고 색) 또는 "stepped"(계단형, 단색)
  * @param props.stepInterval stepped 모드의 층 간격(m)
+ * @param props.onDone 메쉬를 GPU 에 올리는 작업이 끝났을 때(성공 true, 실패 false). 부모가 레이아웃 전환·잠금 해제에 쓴다
  */
 export const TerrainViewCanvas = ({
     mesh,
     mode = "tin",
     stepInterval = 1,
+    onDone,
 }: {
     mesh: TinMesh
     mode?: TerrainMode
     stepInterval?: number
+    onDone?: (ok: boolean) => void
 }) => {
+    // 콜백이 렌더마다 새로 만들어져도 메쉬 effect 를 다시 돌리지 않도록 ref 로 받는다
+    const onDoneRef = useRef(onDone)
+    onDoneRef.current = onDone
     const canvasId = `terrain-canvas-${useId()}`
     // canvas 속성은 실제 픽셀 수(× devicePixelRatio), style 은 화면에 보이는 크기
     const [size] = useState(() => ({
@@ -96,20 +102,27 @@ export const TerrainViewCanvas = ({
 
     useEffect(() => {
         if (!renderer) return
-        let bounds: MeshBounds
-        if (mode === "stepped") {
-            // 계단형은 x·y·z 범위가 원본 TIN 과 같으므로(층 바닥으로 누르기만 함) 원본 범위를 그대로 쓴다
-            bounds = meshBounds(mesh)
-            renderer.updaters.streamedMeshUpdater({
-                mode,
-                bounds,
-                chunks: (maxBytes) => buildSteppedMeshChunks(mesh, stepInterval, maxBytes),
-            })
-        } else {
-            bounds = renderer.updaters.meshUpdater(mesh, { mode })
+        let ok = true
+        try {
+            let bounds: MeshBounds
+            if (mode === "stepped") {
+                // 계단형은 x·y·z 범위가 원본 TIN 과 같으므로(층 바닥으로 누르기만 함) 원본 범위를 그대로 쓴다
+                bounds = meshBounds(mesh)
+                renderer.updaters.streamedMeshUpdater({
+                    mode,
+                    bounds,
+                    chunks: (maxBytes) => buildSteppedMeshChunks(mesh, stepInterval, maxBytes),
+                })
+            } else {
+                bounds = renderer.updaters.meshUpdater(mesh, { mode })
+            }
+            cameraRef.current = initialCamera(bounds)
+            renderer.updaters.cameraUpdater(cameraRef.current)
+        } catch (err) {
+            console.error(err)
+            ok = false
         }
-        cameraRef.current = initialCamera(bounds)
-        renderer.updaters.cameraUpdater(cameraRef.current)
+        onDoneRef.current?.(ok)
     }, [renderer, mesh, mode, stepInterval])
 
     /**
