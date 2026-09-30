@@ -38,13 +38,16 @@ const initialCamera = ({ min, max }: MeshBounds): OrbitCamera => ({
  *
  * @param props.mesh 그릴 메쉬
  * @param props.mode 지형 표현 방식. "tin"(부드러운 음영, 표고 색) 또는 "stepped"(계단형, 단색)
+ * @param props.maxBufferSize GPU 버퍼 최대 크기 요청(바이트). 생략하면 WebGPU 기본값(256MB)
  */
 export const TerrainViewCanvas = ({
     mesh,
     mode = "tin",
+    maxBufferSize,
 }: {
     mesh: TinMesh
     mode?: TerrainMode
+    maxBufferSize?: number
 }) => {
     const canvasId = `terrain-canvas-${useId()}`
     // canvas 속성은 실제 픽셀 수(× devicePixelRatio), style 은 화면에 보이는 크기
@@ -67,6 +70,7 @@ export const TerrainViewCanvas = ({
             width: Math.round(size.width * size.dpr),
             height: Math.round(size.height * size.dpr),
             backgroundColor: { r: 0.12, g: 0.13, b: 0.15 },
+            maxBufferSize,
         })
             .then((r) => {
                 if (cancelled) return r.destroy()

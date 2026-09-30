@@ -6,6 +6,40 @@ type P = [number, number, number]
 const bandOf = (z: number, step: number) => Math.floor(z / step + 1e-6)
 
 /**
+ * 꽉 차면 2배로 늘리는 typed array. JS 일반 배열의 최대 길이(약 1억 개) 한계를 피하고 메모리도 절반이다.
+ *
+ * @param make 길이를 받아 typed array 를 만드는 함수
+ * @returns push3(값 3개 추가), length(현재 길이), result(꼭 맞는 길이로 복사한 배열)
+ */
+const growable = <T extends Float32Array | Uint32Array>(make: (n: number) => T) => {
+    let buf = make(1 << 16)
+    let length = 0
+    const push3 = (a: number, b: number, c: number) => {
+        if (length + 3 > buf.length) {
+            const next = make(buf.length * 2)
+            next.set(buf)
+            buf = next
+        }
+        buf[length++] = a
+        buf[length++] = b
+        buf[length++] = c
+    }
+    return {
+        push3,
+        length: () => length,
+        result: () => buf.slice(0, length) as T,
+    }
+}
+
+/**
+ * (x, y) 를 mm 로 반올림해 53비트 안전 정수 하나로 만든다. 문자열 키보다 Map 이 가볍다.
+ * 원점 기준 ±33km 범위까지 표현할 수 있다.
+ */
+const XY_OFFSET = 1 << 25 // 33,554,432 mm
+const xyKey = (x: number, y: number) =>
+    (Math.round(x * 1000) + XY_OFFSET) * 67108864 + (Math.round(y * 1000) + XY_OFFSET) // 2^26
+
+/**
  * 볼록 다각형을 평면 z = level 로 잘라 아래쪽(z ≤ level)과 위쪽(z ≥ level)으로 나눈다.
  * 평면 위에 놓인 정점과 교차점은 양쪽에 모두 들어간다.
  *
@@ -63,32 +97,42 @@ const levelSegment = (poly: P[], level: number): [P, P] | null => {
  *
  * 법선은 넣지 않는다. 판·벽이 모두 평면이라 셰이더가 화면 미분으로 면 법선을 구하며(stepped 모드),
  * 그 덕에 좌표가 같은 정점(판 모서리 = 벽 모서리 = 이웃 판 모서리)을 mm 단위로 비교해 하나로 공유한다.
+ * 판·벽의 z 는 항상 층 높이라서, 층 번호별 Map 에 (x, y) 숫자 키로 정점을 찾는다.
  *
  * @param mesh 원본 TIN 메쉬(원점 기준 좌표)
  * @param step 층 간격(m). 1이면 1m 마다 한 층
  * @returns 판·벽으로 이루어진 인덱스 메쉬
  */
 export const buildSteppedMesh = (mesh: TinMesh, step: number): TinMesh => {
+    const started = performance.now()
     const { positions: P0, indices: I0 } = mesh
-    const positions: number[] = []
-    const indices: number[] = []
-    const vertexIndex = new Map<string, number>()
-    const wallKeys = new Set<string>()
+    const positions = growable((n) => new Float32Array(n))
+    const indices = growable((n) => new Uint32Array(n))
+    /** 층 번호 → ((x, y) 키 → 정점 인덱스) */
+    const vertexMaps = new Map<number, Map<number, number>>()
+    /** 벽 윗면 층 번호 → (작은 끝점 키 → 큰 끝점 키 집합) */
+    const wallSets = new Map<number, Map<number, Set<number>>>()
 
     /** 좌표가 같은(mm 단위) 정점은 한 번만 넣고 그 인덱스를 돌려준다 */
-    const vertexOf = (p: P) => {
-        const key = `${Math.round(p[0] * 1000)},${Math.round(p[1] * 1000)},${Math.round(p[2] * 1000)}`
-        let idx = vertexIndex.get(key)
+    const vertexOf = (x: number, y: number, z: number) => {
+        const k = Math.round(z / step)
+        let byXy = vertexMaps.get(k)
+        if (!byXy) {
+            byXy = new Map()
+            vertexMaps.set(k, byXy)
+        }
+        const key = xyKey(x, y)
+        let idx = byXy.get(key)
         if (idx === undefined) {
-            idx = positions.length / 3
-            vertexIndex.set(key, idx)
-            positions.push(p[0], p[1], p[2])
+            idx = positions.length() / 3
+            byXy.set(key, idx)
+            positions.push3(x, y, z)
         }
         return idx
     }
 
     const pushTri = (a: P, b: P, c: P) => {
-        indices.push(vertexOf(a), vertexOf(b), vertexOf(c))
+        indices.push3(vertexOf(...a), vertexOf(...b), vertexOf(...c))
     }
 
     /** 볼록 다각형을 부채꼴로 삼각 분할해 높이 z 의 판으로 넣는다. 넓이가 0에 가까운 삼각형은 뺀다 */
@@ -106,13 +150,22 @@ export const buildSteppedMesh = (mesh: TinMesh, step: number): TinMesh => {
     /** 선분 s 를 zBottom~zTop 으로 세운 벽(삼각형 2개). 같은 자리에 같은 높이의 벽은 한 번만 넣는다 */
     const pushWall = (s: [P, P], zBottom: number, zTop: number) => {
         const [p, q] = s
-        const key =
-            [p[0], p[1], q[0], q[1]]
-                .map((v) => Math.round(v * 1000))
-                .sort((x, y) => x - y)
-                .join(",") + `@${zTop}`
-        if (wallKeys.has(key)) return
-        wallKeys.add(key)
+        let keyP = xyKey(p[0], p[1])
+        let keyQ = xyKey(q[0], q[1])
+        if (keyP > keyQ) [keyP, keyQ] = [keyQ, keyP]
+        const kTop = Math.round(zTop / step)
+        let byP = wallSets.get(kTop)
+        if (!byP) {
+            byP = new Map()
+            wallSets.set(kTop, byP)
+        }
+        let qs = byP.get(keyP)
+        if (!qs) {
+            qs = new Set()
+            byP.set(keyP, qs)
+        }
+        if (qs.has(keyQ)) return
+        qs.add(keyQ)
 
         const p0: P = [p[0], p[1], zBottom]
         const p1: P = [q[0], q[1], zBottom]
@@ -164,11 +217,11 @@ export const buildSteppedMesh = (mesh: TinMesh, step: number): TinMesh => {
 
     const stepped: TinMesh = {
         origin: mesh.origin,
-        positions: new Float32Array(positions),
-        indices: new Uint32Array(indices),
+        positions: positions.result(),
+        indices: indices.result(),
     }
     console.log(
-        `계단형(${step}m): 원본 삼각형 ${I0.length / 3} → ${indices.length / 3}, 정점 ${positions.length / 3}`,
+        `계단형(${step}m): 원본 삼각형 ${I0.length / 3} → ${indices.length() / 3}, 정점 ${positions.length() / 3}, ${Math.round(performance.now() - started)}ms`,
     )
     return stepped
 }

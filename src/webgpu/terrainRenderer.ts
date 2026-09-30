@@ -341,6 +341,7 @@ const createTerrainDrawingPassAndUpdaters = (
  * @param options.width 캔버스 실제 픽셀 너비(canvas width 속성과 같아야 한다)
  * @param options.height 캔버스 실제 픽셀 높이
  * @param options.backgroundColor 배경색(0 ~ 1)
+ * @param options.maxBufferSize GPU 버퍼 최대 크기 요청(바이트). 생략하면 WebGPU 기본값(256MB)
  * @returns render(한 프레임 그리기), updaters(meshUpdater, cameraUpdater), destroy(device 해제)
  */
 export const createTerrainRenderFunctionAndUpdateFunctions = async ({
@@ -348,13 +349,15 @@ export const createTerrainRenderFunctionAndUpdateFunctions = async ({
     width,
     height,
     backgroundColor,
+    maxBufferSize,
 }: {
     canvasId: string
     width: number
     height: number
     backgroundColor: { r: number; g: number; b: number }
+    maxBufferSize?: number
 }) => {
-    const { context, device, format } = await initWebGPU(canvasId)
+    const { context, device, format } = await initWebGPU(canvasId, { maxBufferSize })
 
     const depthView = device
         .createTexture({

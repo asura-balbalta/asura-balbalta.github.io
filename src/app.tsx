@@ -13,6 +13,8 @@ import { TerrainMode } from "./webgpu/terrainRenderer"
 const TERRAIN_MODE: TerrainMode = "stepped"
 /** 계단형일 때 층 간격(m). 0.1 ~ 5 정도로 조정 */
 const STEP_INTERVAL = 1
+/** GPU 버퍼 최대 크기 요청(MB). WebGPU 기본값은 256. 넓은 범위의 인덱스 버퍼가 이를 넘으면 올린다 */
+const GPU_MAX_BUFFER_MB = 256
 
 const fullMapStyle: CSSProperties = { width: "100%", height: "100vh" }
 
@@ -65,7 +67,11 @@ export default function App() {
     return (
         <>
             {mesh && (
-                <TerrainViewCanvas mesh={mesh} mode={TERRAIN_MODE} />
+                <TerrainViewCanvas
+                    mesh={mesh}
+                    mode={TERRAIN_MODE}
+                    maxBufferSize={GPU_MAX_BUFFER_MB * 1048576}
+                />
             )}
             <div id="map" style={isMiniMap ? miniMapStyle : fullMapStyle}></div>
         </>
