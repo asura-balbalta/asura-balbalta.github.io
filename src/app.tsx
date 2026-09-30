@@ -12,6 +12,8 @@ import { TerrainMode } from "./webgpu/terrainRenderer"
 const TERRAIN_MODE: TerrainMode = "stepped"
 /** 계단형일 때 층 간격(m). 0.1 ~ 5 정도로 조정 */
 const STEP_INTERVAL = 1
+/** 지형 생성 완료 후 지도 클릭을 계속 무시하는 시간(ms). OpenLayers 가 클릭을 250ms 늦게 발생시키는 것보다 넉넉하게 */
+const CLICK_LOCK_AFTER_DONE_MS = 1000
 
 // 3D 캔버스(position: fixed)가 준비되기 전까지 지도가 그 위에 보이도록 지도에 z-index 를 준다
 const fullMapStyle: CSSProperties = {
@@ -50,9 +52,9 @@ export default function App() {
     const mapRef = useRef<Map | null>(null)
     /** 사각형 확정마다 1씩 오르는 번호. 늦게 돌아온 이전 선택의 결과를 버리는 데 쓴다 */
     const generationRef = useRef(0)
-    /** 다운로드~3D 업로드 완료까지 true. 그동안 지도 클릭을 무시한다 */
+    /** 다운로드~3D 업로드 완료 + 잠시(CLICK_LOCK_AFTER_DONE_MS) 동안 true. 그동안 지도 클릭을 무시한다 */
     const busyRef = useRef(false)
-    /** 이 시각보다 먼저 발생한 클릭은 무시한다. 계산으로 멈춰 있던 동안 큐에 쌓인 클릭을 걸러내는 용도 */
+    /** 이 시각보다 먼저 발생한 클릭은 무시한다. 계산으로 멈춰 있던 동안 큐에 쌓인 클릭을 걸러내는 보조 장치 */
     const ignoreClicksBeforeRef = useRef(0)
     const [busy, setBusy] = useState(false)
     const [selection, setSelection] = useState<Extent | null>(null)
@@ -99,8 +101,14 @@ export default function App() {
 
     const onTerrainDone = (ok: boolean) => {
         ignoreClicksBeforeRef.current = performance.now()
-        setBusyBoth(false)
+        setBusy(false)
         if (ok) setTerrainReady(true)
+        // 계산으로 멈춰 있던 동안 큐에 쌓인 클릭은 멈춤이 풀린 직후(타이머보다 먼저) 처리되므로,
+        // 잠금을 바로 풀지 않고 잠시 유지해서 그 클릭들이 걸러지게 한다.
+        // (이벤트 timeStamp 로 거르는 방법은 브라우저마다 달라 Chrome 에서 통하지 않았다)
+        setTimeout(() => {
+            busyRef.current = false
+        }, CLICK_LOCK_AFTER_DONE_MS)
     }
 
     return (
