@@ -1,7 +1,7 @@
 import { MeshChunk, TinMesh } from "./terrainData"
 import { buildSteppedMeshChunks } from "./terrainSteps"
 
-/** 메인 → Worker: 계단형 변환 요청. mesh 의 배열은 transfer 로 넘겨받는다 */
+/** 메인 → Worker: 계단형 변환 요청. mesh 는 메인이 slice() 로 만든 사본이며 그 배열을 transfer 로 넘겨받는다 */
 export type SteppedMeshRequest = {
     mesh: TinMesh
     step: number

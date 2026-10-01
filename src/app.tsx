@@ -61,7 +61,7 @@ export default function App() {
     const [mesh, setMesh] = useState<TinMesh | null>(null)
     /** 3D 지형이 화면에 올라간 뒤 true. 이때부터 지도를 미니맵으로 옮긴다 */
     const [terrainReady, setTerrainReady] = useState(false)
-    /** 계단형 변환 진행률(0 ~ 1). 변환이 시작되기 전(다운로드·병합 중)에는 null */
+    /** 계단형 변환 진행률(0 ~ 1). 변환 중이 아니면(다운로드·병합 중, 완료 후) null */
     const [progress, setProgress] = useState<number | null>(null)
 
     const setBusyBoth = (value: boolean) => {
@@ -105,6 +105,8 @@ export default function App() {
     const onTerrainDone = (ok: boolean) => {
         ignoreClicksBeforeRef.current = performance.now()
         setBusy(false)
+        setProgress(null)
+        // stepped 모드는 첫 조각에서 이미 전환됐고(onFirstChunk), tin 모드는 여기서 전환한다
         if (ok) setTerrainReady(true)
         // 계산으로 멈춰 있던 동안 큐에 쌓인 클릭은 멈춤이 풀린 직후(타이머보다 먼저) 처리되므로,
         // 잠금을 바로 풀지 않고 잠시 유지해서 그 클릭들이 걸러지게 한다.
@@ -123,12 +125,13 @@ export default function App() {
                     stepInterval={STEP_INTERVAL}
                     onDone={onTerrainDone}
                     onProgress={setProgress}
+                    onFirstChunk={() => setTerrainReady(true)}
                 />
             )}
             <div id="map" style={terrainReady ? miniMapStyle : fullMapStyle}></div>
             {busy && (
                 <div style={busyBadgeStyle}>
-                    지형 생성 중…{progress !== null && ` ${Math.round(progress * 100)}%`}
+                    지형 생성 중…{progress !== null && ` ${Math.floor(progress * 100)}%`}
                 </div>
             )}
         </>

@@ -315,9 +315,11 @@ const createTerrainDrawingPassAndUpdaters = (
     }
 
     /**
-     * 조각 단위 메쉬 교체를 시작한다. 이전 조각들의 버퍼를 해제하고, 모드와 표고 범위(uniform offset 64)를 기록한 뒤,
-     * 조각을 하나씩 받아 올리는 함수들을 돌려준다. 조각이 나중에(Worker 메시지 등으로) 하나씩 도착해도 되고,
-     * 올라간 조각은 다음 프레임부터 바로 그려진다.
+     * 조각 단위 메쉬 교체를 시작한다. 조각을 하나씩 받아 올리는 함수들을 돌려주며, 조각이 나중에(Worker 메시지 등으로)
+     * 하나씩 도착해도 된다. 올라간 조각은 다음 프레임부터 바로 그려지므로 조각이 쌓이는 과정이 화면에 보인다.
+     *
+     * 이전 메쉬는 첫 조각이 올라갈 때(조각이 하나도 없으면 finish 때) 교체한다. 그때까지는 이전 지형이 그대로 보인다.
+     * 교체할 때 이전 조각들의 버퍼를 해제하고, 모드와 표고 범위(uniform offset 64)를 기록한다.
      *
      * @param options.mode 지형 표현 방식. tin 이면 조각에 normals 가 있어야 한다
      * @param options.bounds 메쉬 전체의 정점 범위(표고 색 범위용)
@@ -330,23 +332,30 @@ const createTerrainDrawingPassAndUpdaters = (
         mode: TerrainMode
         bounds: MeshBounds
     }) => {
-        mode = newMode
-        for (const c of gpuChunks) {
-            c.vertexBuffer.destroy()
-            c.normalBuffer?.destroy()
-            c.indexBuffer.destroy()
-        }
-        gpuChunks = []
-        device.queue.writeBuffer(
-            uniformBuffer,
-            64,
-            new Float32Array([bounds.min[2], bounds.max[2]]),
-        )
-
         const maxBytes = device.limits.maxBufferSize
+        let started = false
         let vertices = 0
         let indices = 0
+
+        /** 이전 메쉬를 버리고 새 메쉬의 모드·표고 범위로 바꾼다. 첫 조각(또는 finish)에서 한 번만 실행된다 */
+        const start = () => {
+            started = true
+            mode = newMode
+            for (const c of gpuChunks) {
+                c.vertexBuffer.destroy()
+                c.normalBuffer?.destroy()
+                c.indexBuffer.destroy()
+            }
+            gpuChunks = []
+            device.queue.writeBuffer(
+                uniformBuffer,
+                64,
+                new Float32Array([bounds.min[2], bounds.max[2]]),
+            )
+        }
+
         const addChunk = (chunk: MeshChunk) => {
+            if (!started) start()
             if (mode === "tin" && !chunk.normals) throw new Error("tin 모드 조각에는 normals 가 필요함")
             gpuChunks.push({
                 vertexBuffer: uploadBuffer("terrain vertices", GPUBufferUsage.VERTEX, chunk.positions),
@@ -360,6 +369,7 @@ const createTerrainDrawingPassAndUpdaters = (
             indices += chunk.indices.length
         }
         const finish = () => {
+            if (!started) start()
             console.log(
                 `GPU 버퍼: ${gpuChunks.length}조각 (버퍼 한도 ${Math.round(maxBytes / 1048576)}MB, 정점 ${vertices}, 인덱스 ${indices})`,
             )

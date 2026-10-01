@@ -116,13 +116,16 @@ const levelSegment = (poly: P[], level: number): [P, P] | null => {
  * 결과는 메쉬 하나가 아니라 GPU 버퍼 한도(maxBytes) 안에 들어가는 조각들이다. 원본 삼각형을 처리하기 전에
  * 그 삼각형이 최악의 경우 만들 수 있는 정점·인덱스 수만큼 여유가 없으면 지금까지 쌓인 것을 조각으로 내보내고(yield)
  * 새 조각을 시작한다. 그래서 배열 하나가 한도를 넘는 일이 없고, 받는 쪽이 조각을 바로 GPU 에 올리고 버리면
- * 브라우저 메모리도 조각 하나 분량만 쓴다. 정점 합치기 Map 은 조각마다 새로 시작하므로 조각 경계의 정점은 양쪽에 중복되고,
- * 벽 중복 제거는 전체에서 유지한다.
+ * 브라우저 메모리도 조각 하나 분량만 쓴다. 정점 합치기 Map 과 벽 중복 제거 집합은 조각마다 새로 시작한다. 그래서 조각 경계의
+ * 정점은 양쪽에 중복되고, 조각 경계를 넘는 벽도 중복될 수 있다. 중복되는 벽은 "양쪽 판이 같은 높이인 등고선 위의 변"에 세운
+ * 것뿐이라 판 아래에 숨어 보이지 않으므로 그리는 결과는 같다. (벽 집합을 전체에서 유지하면 벽 시작점마다 Set 객체가 남아
+ * 넓은 범위에서 수 GB 로 자라 Worker 가 메모리 부족으로 죽는다)
  *
  * @param mesh 원본 TIN 메쉬(원점 기준 좌표)
  * @param step 층 간격(m). 1이면 1m 마다 한 층
  * @param maxBytes 조각의 정점 버퍼·인덱스 버퍼 각각의 최대 바이트 수 (device.limits.maxBufferSize)
- * @param onProgress 진행률 알림(선택). 처리한 원본 삼각형 수와 전체 수를 약 PROGRESS_INTERVAL_MS 간격으로 받는다
+ * @param onProgress 진행률 알림(선택). 처리한 원본 삼각형 수와 전체 수를 약 PROGRESS_INTERVAL_MS 간격으로 받고,
+ *   끝나면 (전체, 전체)를 한 번 더 받는다(간격 때문에 100% 가 빠지지 않게)
  * @yields 판·벽으로 이루어진 인덱스 메쉬 조각
  */
 export function* buildSteppedMeshChunks(
@@ -143,7 +146,7 @@ export function* buildSteppedMeshChunks(
     let totalVertices = 0
     /** 층 번호 → ((x, y) 키 → 정점 인덱스). 조각마다 비운다 */
     const vertexMaps = new Map<number, Map<number, number>>()
-    /** 벽 윗면 층 번호 → (작은 끝점 키 → 큰 끝점 키 집합) */
+    /** 벽 윗면 층 번호 → (작은 끝점 키 → 큰 끝점 키 집합). 조각마다 비운다 */
     const wallSets = new Map<number, Map<number, Set<number>>>()
 
     /** 좌표가 같은(mm 단위) 정점은 한 번만 넣고 그 인덱스를 돌려준다 */
@@ -236,6 +239,7 @@ export function* buildSteppedMeshChunks(
         positions.reset()
         indices.reset()
         vertexMaps.clear()
+        wallSets.clear()
         return chunk
     }
 
@@ -300,8 +304,9 @@ export function* buildSteppedMeshChunks(
         if (poly.length >= 3) pushPlate(poly, kMax * step)
     }
     if (indices.length() > 0) yield flush()
+    onProgress?.(I0.length / 3, I0.length / 3)
 
     console.log(
-        `계단형(${step}m): 원본 삼각형 ${I0.length / 3} → ${totalTriangles}, 정점 ${totalVertices}, ${chunkCount}조각, ${Math.round(performance.now() - started)}ms (받는 쪽 처리 시간 포함)`,
+        `계단형(${step}m): 원본 삼각형 ${I0.length / 3} → ${totalTriangles}, 정점 ${totalVertices}, ${chunkCount}조각, ${Math.round(performance.now() - started)}ms (yield 한 뒤 받는 쪽이 조각을 처리하는 시간 포함. Worker 에서는 postMessage 시간)`,
     )
 }
