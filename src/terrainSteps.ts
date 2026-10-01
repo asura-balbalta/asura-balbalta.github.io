@@ -42,12 +42,46 @@ const growable = <T extends Float32Array | Uint32Array>(make: (n: number) => T) 
 }
 
 /**
- * (x, y) 를 mm 로 반올림해 53비트 안전 정수 하나로 만든다. 문자열 키보다 Map 이 가볍다.
- * 원점 기준 ±33km 범위까지 표현할 수 있다.
+ * (x, y) 를 mm 로 반올림해 53비트 안전 정수 하나로 만드는 키 함수를 만든다. 문자열 키보다 Map 이 가볍다.
+ *
+ * 기준점은 서버 원점이 아니라 메쉬 자체의 최소 x·y 다. 그래서 키 값은 항상 0 이상이고, 서버 원점이 범위의 어느 모서리든
+ * 음수 좌표가 있든 상관없다. y 는 아래 KEY_Y_BITS 비트(67.1km), x 는 그 위 27비트(134.2km)를 써서 합이 정확히 53비트다.
+ * 키는 정점을 "같은 점인지" 찾는 데만 쓰고 출력 좌표에는 들어가지 않는다.
+ *
+ * @param minX 메쉬 x 최소(m). 자르기 교차점이 부동소수점 오차로 이보다 조금 작을 수 있어 KEY_MARGIN_MM 만큼 여유를 둔다
+ * @param minY 메쉬 y 최소(m)
+ * @returns (x, y) → 키
  */
-const XY_OFFSET = 1 << 25 // 33,554,432 mm
-const xyKey = (x: number, y: number) =>
-    (Math.round(x * 1000) + XY_OFFSET) * 67108864 + (Math.round(y * 1000) + XY_OFFSET) // 2^26
+const KEY_Y_BITS = 26
+/** y 키 범위(mm). 2^26 = 67,108,864 */
+const KEY_Y_SPAN = 2 ** KEY_Y_BITS
+/** x 키 범위(mm). 53 − 26 = 27비트, 2^27 = 134,217,728 */
+const KEY_X_SPAN = 2 ** (53 - KEY_Y_BITS)
+/** 최소값 아래로 허용하는 여유(mm) */
+const KEY_MARGIN_MM = 1000
+const makeXyKey = (minX: number, minY: number) => {
+    const ox = Math.round(minX * 1000) - KEY_MARGIN_MM
+    const oy = Math.round(minY * 1000) - KEY_MARGIN_MM
+    return (x: number, y: number) =>
+        (Math.round(x * 1000) - ox) * KEY_Y_SPAN + (Math.round(y * 1000) - oy)
+}
+
+/**
+ * 메쉬 정점의 x·y 최소·최대(m). 키 기준점과 범위 검사에 쓴다.
+ *
+ * @param positions (x, y, z) 연속 배열
+ */
+const xyRange = (positions: Float32Array) => {
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+    for (let i = 0; i < positions.length; i += 3) {
+        const x = positions[i], y = positions[i + 1]
+        if (x < minX) minX = x
+        if (x > maxX) maxX = x
+        if (y < minY) minY = y
+        if (y > maxY) maxY = y
+    }
+    return { minX, minY, maxX, maxY }
+}
 
 /**
  * 볼록 다각형을 평면 z = level 로 잘라 아래쪽(z ≤ level)과 위쪽(z ≥ level)으로 나눈다.
@@ -111,7 +145,8 @@ const levelSegment = (poly: P[], level: number): [P, P] | null => {
  *
  * 법선은 넣지 않는다. 판·벽이 모두 평면이라 셰이더가 화면 미분으로 면 법선을 구하며(stepped 모드),
  * 그 덕에 좌표가 같은 정점(판 모서리 = 벽 모서리 = 이웃 판 모서리)을 mm 단위로 비교해 하나로 공유한다.
- * 판·벽의 z 는 항상 층 높이라서, 층 번호별 Map 에 (x, y) 숫자 키로 정점을 찾는다.
+ * 판·벽의 z 는 항상 층 높이라서, 층 번호별 Map 에 (x, y) 숫자 키(makeXyKey, 메쉬 최소 x·y 기준)로 정점을 찾는다.
+ * 그래서 메쉬 크기가 가로 134km × 세로 67km 를 넘으면 키가 겹칠 수 있어 시작 전에 오류를 던진다.
  *
  * 결과는 메쉬 하나가 아니라 GPU 버퍼 한도(maxBytes) 안에 들어가는 조각들이다. 원본 삼각형을 처리하기 전에
  * 그 삼각형이 최악의 경우 만들 수 있는 정점·인덱스 수만큼 여유가 없으면 지금까지 쌓인 것을 조각으로 내보내고(yield)
@@ -137,6 +172,17 @@ export function* buildSteppedMeshChunks(
     const started = performance.now()
     let lastProgress = started
     const { positions: P0, indices: I0 } = mesh
+
+    const { minX, minY, maxX, maxY } = xyRange(P0)
+    const spanX = Math.round((maxX - minX) * 1000) + 2 * KEY_MARGIN_MM
+    const spanY = Math.round((maxY - minY) * 1000) + 2 * KEY_MARGIN_MM
+    if (spanX >= KEY_X_SPAN || spanY >= KEY_Y_SPAN) {
+        throw new Error(
+            `계단형 변환 범위 초과: 메쉬 가로 ${(spanX / 1e6).toFixed(1)}km × 세로 ${(spanY / 1e6).toFixed(1)}km ` +
+                `(한도 가로 ${(KEY_X_SPAN / 1e6).toFixed(1)}km × 세로 ${(KEY_Y_SPAN / 1e6).toFixed(1)}km)`,
+        )
+    }
+    const xyKey = makeXyKey(minX, minY)
     const maxVerts = Math.floor(maxBytes / 12)
     const maxIndices = Math.floor(maxBytes / 4)
     const positions = growable((n) => new Float32Array(n))
