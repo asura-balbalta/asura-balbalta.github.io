@@ -115,6 +115,10 @@ const getTtmSheetsInBbox = async (bbox3857: Extent): Promise<TtmSheetsInBbox> =>
  * @param url 파일 URL ({TTM_BASE}/v1/{50K}/{5K}.ttm)
  * @returns 파일 원점과 1K 도엽 목록
  */
+/** 지형 로딩의 단계. onProgress 로 알린다 */
+export type LoadPhase = "sheets" | "download" | "merge" | "retriangulate"
+export type LoadProgress = (phase: LoadPhase, done: number, total: number) => void
+
 const fetchTtm = async (url: string) => {
     const res = await fetch(url)
     if (!res.ok || !res.body) throw new Error(`${res.status} ${url}`)
@@ -220,6 +224,7 @@ const mergeTiles = (
     tiles: TtmTile[],
     commonOrigin: [number, number],
     cornersById: Map<string, [number, number][]>,
+    onProgress?: (done: number, total: number) => void,
 ): TinMesh => {
     const keyToIdx = new Map<string, number>()
     const pos: number[] = []
@@ -229,7 +234,8 @@ const mergeTiles = (
     const zF = new Float32Array(zBits.buffer)
     let borderSegments = 0
 
-    for (const tile of tiles) {
+    for (const [tileIndex, tile] of tiles.entries()) {
+        onProgress?.(tileIndex, tiles.length)
         // 정수 mm 끼리 더하므로 공유 정점은 같은 값이 된다
         const dx = (tile.origin[0] - commonOrigin[0]) * 1000
         const dy = (tile.origin[1] - commonOrigin[1]) * 1000
@@ -287,29 +293,47 @@ const mergeTiles = (
  * 4. (선택) 도엽 경계 없이 다시 삼각분할(terrainRetri). 도엽 폴리곤을 넘겨 범위 밖 삼각형은 버린다.
  *    이 메쉬를 tin·stepped 모든 표현이 공유한다
  *
+ * 메인 스레드에서 불러도 되지만 넓은 범위에서는 합치기·재삼각분할이 수 초 걸리므로 보통 terrainLoad.worker 가 부른다.
+ *
  * @param bbox3857 지도에서 고른 범위 [minX, minY, maxX, maxY] (EPSG:3857)
  * @param options.retriangulate true 면 합친 뒤 재삼각분할한다. 기본 false
+ * @param options.onProgress 단계별 진행률. download 는 받은 파일 수, merge 는 합친 도엽 수, 나머지는 (0, 1)
  * @returns 렌더러에 넘길 메쉬
  */
 export const loadTerrainTtm = async (
     bbox3857: Extent,
-    options: { retriangulate?: boolean } = {},
+    options: { retriangulate?: boolean; onProgress?: LoadProgress } = {},
 ): Promise<TinMesh> => {
+    const { onProgress } = options
+    const t0 = performance.now()
+    onProgress?.("sheets", 0, 1)
     const q = await getTtmSheetsInBbox(bbox3857)
+    const t1 = performance.now()
+    let downloaded = 0
+    onProgress?.("download", 0, q.sheets.length)
     const files = await Promise.all(
-        q.sheets.map((s) => fetchTtm(`${TTM_BASE}/${s.path}`)),
+        q.sheets.map(async (s) => {
+            const file = await fetchTtm(`${TTM_BASE}/${s.path}`)
+            onProgress?.("download", ++downloaded, q.sheets.length)
+            return file
+        }),
     )
+    const t2 = performance.now()
     const want = new Set(q.tiles.map((t) => t.map_id))
     const allTiles = files.flatMap((f) => f.tiles)
     const merged = mergeTiles(
         allTiles.filter((t) => want.has(t.mapId)),
         q.origin,
         new Map(q.tiles.map((t) => [t.map_id, t.corners])),
+        (done, total) => onProgress?.("merge", done, total),
     )
+    const t3 = performance.now()
     console.log(
-        `TTM: 5K 파일 ${files.length}개, 1K ${want.size}/${allTiles.length}개 사용, 정점 ${merged.positions.length / 3}, 삼각형 ${merged.indices.length / 3}`,
+        `TTM: 5K 파일 ${files.length}개, 1K ${want.size}/${allTiles.length}개 사용, 정점 ${merged.positions.length / 3}, 삼각형 ${merged.indices.length / 3} ` +
+            `(조회 ${Math.round(t1 - t0)}ms, 받기 ${Math.round(t2 - t1)}ms, 합치기 ${Math.round(t3 - t2)}ms)`,
     )
     if (!options.retriangulate) return merged
+    onProgress?.("retriangulate", 0, 1)
     const [ox, oy] = q.origin
     const tilePolygons = q.tiles.map((t) => t.corners.map(([x, y]) => [x - ox, y - oy] as [number, number]))
     return retriangulate(merged, tilePolygons)
