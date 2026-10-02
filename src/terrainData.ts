@@ -23,6 +23,11 @@ export type TilesInBbox = {
 export type TinMesh = {
     origin: [number, number]
     positions: Float32Array
+    /**
+     * 삼각형 정점 인덱스(3개씩). **위에서 볼 때 반시계(CCW)** 가 규약이다(서버 TIN 과 같음).
+     * tin 모드의 정점 법선(computeVertexNormals)이 이 방향을 전제로 외적을 구하므로, 삼각형을 새로 만드는 코드는
+     * 반드시 이 방향으로 맞춰야 한다(terrainRetri 의 countClockwise 로 검사)
+     */
     indices: Uint32Array
     /**
      * 등고선 제약 선분(정점 인덱스 쌍, 2개씩). TTM 의 segments 에서 도엽 외곽 체인을 뺀 것.
