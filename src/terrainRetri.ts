@@ -84,6 +84,20 @@ class SparseEdgeSet {
     }
 }
 
+/**
+ * constrainautor 의 constrainOne 예외를 종류별 이름으로 묶는다(로그 집계용).
+ * - 끝점 없음: 선분 끝점이 삼각분할에 없음. (x, y)가 같고 z 만 다른 정점(서버의 수직 균열)을 Delaunator 가 하나만 쓴 경우
+ * - 교차: 다른 제약 선분과 가로지름. 등고선끼리 교차하거나, 변을 따라 붙어 달리는 등고선이 외곽으로 오인된 것과 충돌
+ * - 정점 통과: 선분이 다른 정점을 정확히 지남. 이웃 도엽의 변 위 정점이 이쪽 선분 위에 놓인 경우(mm 반올림)
+ */
+const constraintFailureKind = (err: unknown) => {
+    const msg = err instanceof Error ? err.message : String(err)
+    if (msg.includes("not triangulated")) return "끝점 없음"
+    if (msg.includes("already constrained")) return "교차"
+    if (msg.includes("intersects point")) return "정점 통과"
+    return `기타(${msg})`
+}
+
 export const retriangulate = (mesh: TinMesh, tilePolygons?: [number, number][][]): TinMesh => {
     if (!mesh.segments) return mesh
     const started = performance.now()
@@ -98,14 +112,18 @@ export const retriangulate = (mesh: TinMesh, tilePolygons?: [number, number][][]
     const con = new Constrainautor(del)
     con.flips = new SparseEdgeSet() as unknown as typeof con.flips
     let failed = 0
+    const failedByKind = new Map<string, number>()
     const seg = mesh.segments
     for (let s = 0; s < seg.length; s += 2) {
         try {
             con.constrainOne(seg[s], seg[s + 1])
-        } catch {
+        } catch (err) {
             failed++
+            const kind = constraintFailureKind(err)
+            failedByKind.set(kind, (failedByKind.get(kind) ?? 0) + 1)
         }
     }
+    const failedText = failed === 0 ? "실패 0" : `실패 ${failed} (${[...failedByKind].map(([k, n]) => `${k} ${n}`).join(", ")})`
     const tConstrain = performance.now()
     // 꼭 맞는 크기의 새 배열에 담으면서(del.triangles 는 큰 버퍼의 subarray) 2·3번째 정점을 바꿔 위에서 볼 때 반시계로 만든다
     const T = del.triangles
@@ -123,7 +141,7 @@ export const retriangulate = (mesh: TinMesh, tilePolygons?: [number, number][][]
     const indices = sortByMorton(mesh.positions, kept)
     const tPost = performance.now()
     console.log(
-        `재삼각분할: 정점 ${n}, 삼각형 ${mesh.indices.length / 3} → ${indices.length / 3}(도엽 밖 ${(flipped.length - kept.length) / 3} 제거), 제약 선분 ${seg.length / 2}(실패 ${failed}), Delaunay ${Math.round(tDelaunay - started)}ms + 제약 ${Math.round(tConstrain - tDelaunay)}ms + 후처리 ${Math.round(tPost - tConstrain)}ms`,
+        `재삼각분할: 정점 ${n}, 삼각형 ${mesh.indices.length / 3} → ${indices.length / 3}(도엽 밖 ${(flipped.length - kept.length) / 3} 제거), 제약 선분 ${seg.length / 2}(${failedText}), Delaunay ${Math.round(tDelaunay - started)}ms + 제약 ${Math.round(tConstrain - tDelaunay)}ms + 후처리 ${Math.round(tPost - tConstrain)}ms`,
     )
     return { origin: mesh.origin, positions: mesh.positions, indices, segments: mesh.segments }
 }
