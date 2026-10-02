@@ -56,6 +56,7 @@ const initialCamera = ({ min, max }: MeshBounds): OrbitCamera => ({
  * @param props.mesh 원본 TIN 메쉬
  * @param props.mode 지형 표현 방식. "tin"(부드러운 음영, 표고 색) 또는 "stepped"(계단형, 단색)
  * @param props.stepInterval stepped 모드의 층 간격(m)
+ * @param props.retriangulate stepped 모드에서 변환 전에 도엽 경계 없이 다시 삼각분할할지(mesh.segments 가 있을 때만 효과)
  * @param props.onDone 메쉬를 GPU 에 올리는 작업이 끝났을 때(성공 true, 실패 false). 부모가 레이아웃 전환·잠금 해제에 쓴다
  * @param props.onProgress stepped 모드의 변환 진행률(처리한 원본 삼각형 비율 0 ~ 1). 약 100ms 간격으로 불리고 끝에 1 이 온다
  * @param props.onFirstChunk stepped 모드에서 첫 조각이 화면에 올라갔을 때. 부모가 지도를 미니맵으로 옮기는 데 쓴다
@@ -64,6 +65,7 @@ export const TerrainViewCanvas = ({
     mesh,
     mode = "tin",
     stepInterval = 1,
+    retriangulate = false,
     onDone,
     onProgress,
     onFirstChunk,
@@ -71,6 +73,7 @@ export const TerrainViewCanvas = ({
     mesh: TinMesh
     mode?: TerrainMode
     stepInterval?: number
+    retriangulate?: boolean
     onDone?: (ok: boolean) => void
     onProgress?: (ratio: number) => void
     onFirstChunk?: () => void
@@ -191,23 +194,24 @@ export const TerrainViewCanvas = ({
                 origin: mesh.origin,
                 positions: mesh.positions.slice(),
                 indices: mesh.indices.slice(),
+                segments: mesh.segments?.slice(),
             }
             const request: SteppedMeshRequest = {
                 mesh: copy,
                 step: stepInterval,
                 maxBytes: Math.min(stream.maxBytes, STEPPED_CHUNK_BYTES),
+                retriangulate,
             }
-            worker.postMessage(request, [
-                copy.positions.buffer as ArrayBuffer,
-                copy.indices.buffer as ArrayBuffer,
-            ])
+            const transfer = [copy.positions.buffer, copy.indices.buffer]
+            if (copy.segments) transfer.push(copy.segments.buffer)
+            worker.postMessage(request, transfer as ArrayBuffer[])
         } catch (err) {
             console.error(err)
             stop(false)
         }
         // mesh 가 바뀌거나 언마운트되면 진행 중인 변환을 취소한다(결과는 알리지 않는다)
         return () => stop()
-    }, [renderer, mesh, mode, stepInterval])
+    }, [renderer, mesh, mode, stepInterval, retriangulate])
 
     /**
      * 현재 카메라에 변경을 적용하고 GPU uniform 에 반영한다.

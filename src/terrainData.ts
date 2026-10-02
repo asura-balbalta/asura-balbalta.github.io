@@ -22,6 +22,11 @@ export type TinMesh = {
     origin: [number, number]
     positions: Float32Array
     indices: Uint32Array
+    /**
+     * 등고선 제약 선분(정점 인덱스 쌍, 2개씩). TTM 의 segments 에서 도엽 외곽 체인을 뺀 것.
+     * 재삼각분할(terrainRetri) 때 이 선분을 삼각형 변으로 강제한다. 없으면 재삼각분할하지 않는다
+     */
+    segments?: Uint32Array
 }
 
 /**
@@ -77,6 +82,8 @@ type TtmTile = {
     z: Float32Array
     /** 삼각형: 이 1K 안의 지역 인덱스, CCW */
     triangles: Uint32Array
+    /** 제약 선분(지역 인덱스 쌍): 도엽 외곽 체인 + 등고선. 둘을 구분하는 표시는 없다(v1) */
+    segments: Uint32Array
 }
 
 /**
@@ -124,13 +131,15 @@ const parseTtm = (buf: ArrayBuffer) => {
     const K = dv.getUint32(12, true)
     const origin: [number, number] = [dv.getInt32(20, true), dv.getInt32(24, true)]
 
+    const M = dv.getUint32(16, true)
     let off = 32
-    const toc: { mapId: string; nV: number; nT: number }[] = []
+    const toc: { mapId: string; nV: number; nT: number; nS: number }[] = []
     for (let i = 0; i < nTiles; i++, off += 16) {
         toc.push({
             mapId: String(dv.getUint32(off, true)),
             nV: dv.getUint32(off + 4, true),
             nT: dv.getUint32(off + 8, true),
+            nS: dv.getUint32(off + 12, true),
         })
     }
     const xy = new Int32Array(buf, off, 2 * N)
@@ -138,9 +147,12 @@ const parseTtm = (buf: ArrayBuffer) => {
     const z = new Float32Array(buf, off, N)
     off += 4 * N
     const tri = new Uint32Array(buf, off, 3 * K)
+    off += 12 * K
+    const seg = new Uint32Array(buf, off, 2 * M)
 
     let v = 0
     let t = 0
+    let s = 0
     const tiles: TtmTile[] = toc.map((e) => {
         const tile = {
             mapId: e.mapId,
@@ -148,12 +160,38 @@ const parseTtm = (buf: ArrayBuffer) => {
             xy: xy.subarray(2 * v, 2 * (v + e.nV)),
             z: z.subarray(v, v + e.nV),
             triangles: tri.subarray(3 * t, 3 * (t + e.nT)),
+            segments: seg.subarray(2 * s, 2 * (s + e.nS)),
         }
         v += e.nV
         t += e.nT
+        s += e.nS
         return tile
     })
     return { origin, tiles }
+}
+
+/** 이 거리(mm) 안에 양 끝이 있는 segment 는 도엽 외곽 체인으로 본다. 서버의 경계 정점 허용치(2mm)와 같다 */
+const BORDER_TOL_MM = 2
+
+/**
+ * 절대좌표(mm)의 점에서 도엽 폴리곤 둘레까지의 거리(mm).
+ *
+ * @param xmm 점 x (ESRI:102080, mm)
+ * @param ymm 점 y
+ * @param corners 도엽 꼭지점(절대 m, 둘레 순서, /ttm/sheets 의 corners)
+ */
+const distToTileBorderMm = (xmm: number, ymm: number, corners: [number, number][]) => {
+    let best = Infinity
+    for (let i = 0; i < corners.length; i++) {
+        const [ax, ay] = corners[i]
+        const [bx, by] = corners[(i + 1) % corners.length]
+        const AX = ax * 1000, AY = ay * 1000
+        const dx = bx * 1000 - AX, dy = by * 1000 - AY
+        let t = ((xmm - AX) * dx + (ymm - AY) * dy) / (dx * dx + dy * dy)
+        t = Math.max(0, Math.min(1, t))
+        best = Math.min(best, Math.hypot(xmm - (AX + t * dx), ymm - (AY + t * dy)))
+    }
+    return best
 }
 
 /**
@@ -162,22 +200,36 @@ const parseTtm = (buf: ArrayBuffer) => {
  * 이웃 도엽이 공유하는 경계 정점은 절대 mm 정수와 z 가 정확히 같으므로,
  * (x mm, y mm, z 의 float32 비트)가 같은 정점을 하나로 합친다. 허용 오차 비교가 필요 없다.
  *
+ * segments 는 도엽 외곽 체인(양 끝이 그 도엽 폴리곤 변에서 BORDER_TOL_MM 안)을 빼고 등고선 선분만 모은다.
+ * TTM v1 에는 둘을 구분하는 표시가 없어 기하로 판정한다. 변을 따라 붙어 달리는 등고선은 외곽으로 오인될 수 있다.
+ * 재삼각분할(terrainRetri)이 이 등고선 선분을 제약으로 쓰면서 도엽 경계는 제약에서 빠져, 경계를 따라 생기던 골이 없어진다.
+ *
  * @param tiles 합칠 1K 도엽들
  * @param commonOrigin 공통 원점(정수 m). 한 장면의 모든 1K 에 같은 값을 써야 한다
- * @returns 렌더러에 그대로 넘길 수 있는 메쉬
+ * @param cornersById 1K 번호 → 도엽 꼭지점(절대 m). 없는 도엽의 segment 는 모두 등고선으로 본다
+ * @returns 렌더러에 그대로 넘길 수 있는 메쉬(+ 등고선 제약 선분)
  */
-const mergeTiles = (tiles: TtmTile[], commonOrigin: [number, number]): TinMesh => {
+const mergeTiles = (
+    tiles: TtmTile[],
+    commonOrigin: [number, number],
+    cornersById: Map<string, [number, number][]>,
+): TinMesh => {
     const keyToIdx = new Map<string, number>()
     const pos: number[] = []
     const indices: number[] = []
+    const segments: number[] = []
     const zBits = new Uint32Array(1)
     const zF = new Float32Array(zBits.buffer)
+    let borderSegments = 0
 
     for (const tile of tiles) {
         // 정수 mm 끼리 더하므로 공유 정점은 같은 값이 된다
         const dx = (tile.origin[0] - commonOrigin[0]) * 1000
         const dy = (tile.origin[1] - commonOrigin[1]) * 1000
+        const corners = cornersById.get(tile.mapId)
         const local = new Uint32Array(tile.z.length)
+        /** 정점이 도엽 외곽 체인 위에 있는지(외곽 segment 판정용) */
+        const onBorder = new Uint8Array(tile.z.length)
         for (let i = 0; i < tile.z.length; i++) {
             const x = tile.xy[2 * i] + dx
             const y = tile.xy[2 * i + 1] + dy
@@ -190,13 +242,32 @@ const mergeTiles = (tiles: TtmTile[], commonOrigin: [number, number]): TinMesh =
                 pos.push(x / 1000, y / 1000, tile.z[i])
             }
             local[i] = idx
+            if (corners) {
+                const d = distToTileBorderMm(
+                    tile.xy[2 * i] + tile.origin[0] * 1000,
+                    tile.xy[2 * i + 1] + tile.origin[1] * 1000,
+                    corners,
+                )
+                onBorder[i] = d <= BORDER_TOL_MM ? 1 : 0
+            }
         }
         for (const a of tile.triangles) indices.push(local[a])
+        for (let s = 0; s < tile.segments.length; s += 2) {
+            const a = tile.segments[s]
+            const b = tile.segments[s + 1]
+            if (onBorder[a] && onBorder[b]) {
+                borderSegments++
+                continue
+            }
+            segments.push(local[a], local[b])
+        }
     }
+    console.log(`segments: 등고선 ${segments.length / 2}, 도엽 외곽(제외) ${borderSegments}`)
     return {
         origin: commonOrigin,
         positions: new Float32Array(pos),
         indices: new Uint32Array(indices),
+        segments: new Uint32Array(segments),
     }
 }
 
@@ -205,7 +276,7 @@ const mergeTiles = (tiles: TtmTile[], commonOrigin: [number, number]): TinMesh =
  *
  * 1. 범위에 걸친 1K 도엽과 5K 파일 목록 조회
  * 2. 5K 파일들을 병렬로 받아 풀기
- * 3. 파일 안의 1K(보통 25개) 중 범위에 걸친 1K 만 골라 공통 원점으로 합치기
+ * 3. 파일 안의 1K(보통 25개) 중 범위에 걸친 1K 만 골라 공통 원점으로 합치기(등고선 제약 선분도 함께)
  *
  * @param bbox3857 지도에서 고른 범위 [minX, minY, maxX, maxY] (EPSG:3857)
  * @returns 렌더러에 넘길 메쉬
@@ -220,6 +291,7 @@ export const loadTerrainTtm = async (bbox3857: Extent): Promise<TinMesh> => {
     const mesh = mergeTiles(
         allTiles.filter((t) => want.has(t.mapId)),
         q.origin,
+        new Map(q.tiles.map((t) => [t.map_id, t.corners])),
     )
     console.log(
         `TTM: 5K 파일 ${files.length}개, 1K ${want.size}/${allTiles.length}개 사용, 정점 ${mesh.positions.length / 3}, 삼각형 ${mesh.indices.length / 3}`,

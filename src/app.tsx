@@ -12,6 +12,8 @@ import { TerrainMode } from "./webgpu/terrainRenderer"
 const TERRAIN_MODE: TerrainMode = "stepped"
 /** 계단형일 때 층 간격(m). 0.1 ~ 5 정도로 조정 */
 const STEP_INTERVAL = 1
+/** 계단형 변환 전에 도엽 경계 없이 다시 삼각분할할지. 도엽 경계를 따라 생기는 골을 없앤다(terrainRetri). 전후 비교용 토글 */
+const RETRIANGULATE = true
 /** 지형 생성 완료 후 지도 클릭을 계속 무시하는 시간(ms). OpenLayers 가 클릭을 250ms 늦게 발생시키는 것보다 넉넉하게 */
 const CLICK_LOCK_AFTER_DONE_MS = 1000
 
@@ -123,6 +125,7 @@ export default function App() {
                     mesh={mesh}
                     mode={TERRAIN_MODE}
                     stepInterval={STEP_INTERVAL}
+                    retriangulate={RETRIANGULATE}
                     onDone={onTerrainDone}
                     onProgress={setProgress}
                     onFirstChunk={() => setTerrainReady(true)}
