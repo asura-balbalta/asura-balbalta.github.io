@@ -336,6 +336,8 @@ const createTerrainDrawingPassAndUpdaters = (
         let started = false
         let vertices = 0
         let indices = 0
+        /** 실제로 올라간 조각 중 가장 큰 버퍼(바이트). 받는 쪽이 maxBytes 보다 작은 상한으로 끊었을 수 있어 로그에 같이 찍는다 */
+        let largestChunkBytes = 0
 
         /** 이전 메쉬를 버리고 새 메쉬의 모드·표고 범위로 바꾼다. 첫 조각(또는 finish)에서 한 번만 실행된다 */
         const start = () => {
@@ -367,11 +369,12 @@ const createTerrainDrawingPassAndUpdaters = (
             })
             vertices += chunk.positions.length / 3
             indices += chunk.indices.length
+            largestChunkBytes = Math.max(largestChunkBytes, chunk.positions.byteLength, chunk.indices.byteLength)
         }
         const finish = () => {
             if (!started) start()
             console.log(
-                `GPU 버퍼: ${gpuChunks.length}조각 (버퍼 한도 ${Math.round(maxBytes / 1048576)}MB, 정점 ${vertices}, 인덱스 ${indices})`,
+                `GPU 버퍼: ${gpuChunks.length}조각 (가장 큰 조각 ${Math.round(largestChunkBytes / 1048576)}MB, device 한도 ${Math.round(maxBytes / 1048576)}MB, 정점 ${vertices}, 인덱스 ${indices})`,
             )
         }
         return { maxBytes, addChunk, finish }

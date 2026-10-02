@@ -50,6 +50,40 @@ export const countClockwise = (positions: Float32Array, indices: Uint32Array) =>
  * @param tilePolygons 도엽 폴리곤들(원점 기준 m, 둘레 순서). 주면 합집합 밖 삼각형을 버린다
  * @returns 같은 정점에 새 삼각형. segments 가 없으면 입력을 그대로 돌려준다
  */
+/**
+ * constrainautor 의 flips(뒤집어서 Delaunay 조건을 다시 봐야 할 변) 대체용 희소 집합.
+ *
+ * 4.1.0 의 flips 는 전체 변 수 크기의 BitSet 이고, constrainOne 이 끝날 때마다 forEach 로 BitSet 전체를 훑는다(O(변 수)).
+ * 그래서 뒤집기가 필요한 선분마다 변 수에 비례한 비용이 붙어, 425도엽(변 530만, 뒤집기 필요 선분 3.8만)에서 제약에 90초가
+ * 걸렸다. 같은 인터페이스를 JS Set 으로 구현해 끼우면 forEach 가 들어 있는 것만 돌아 호출당 비용이 뒤집은 변 수에만 비례한다.
+ * 라이브러리 내부 필드(flips)에 기대므로 package.json 에서 버전을 4.1.0 으로 고정했다. 올릴 때는 이 가정을 다시 확인한다.
+ */
+class SparseEdgeSet {
+    // 이름을 set 으로 두면 인스턴스 필드가 아래 set 메서드를 가려 라이브러리의 flips.set 호출이 깨진다
+    private readonly items = new Set<number>()
+    add(idx: number) {
+        this.items.add(idx)
+        return this
+    }
+    delete(idx: number) {
+        this.items.delete(idx)
+        return this
+    }
+    set(idx: number, val: boolean) {
+        if (val) this.items.add(idx)
+        else this.items.delete(idx)
+        return val
+    }
+    has(idx: number) {
+        return this.items.has(idx)
+    }
+    /** 도는 중에 지우거나 더해도 된다(JS Set 의 forEach 규칙: 지운 것은 안 나오고, 더한 것은 나온다) */
+    forEach(fn: (idx: number) => void) {
+        this.items.forEach((idx) => fn(idx))
+        return this
+    }
+}
+
 export const retriangulate = (mesh: TinMesh, tilePolygons?: [number, number][][]): TinMesh => {
     if (!mesh.segments) return mesh
     const started = performance.now()
@@ -62,6 +96,7 @@ export const retriangulate = (mesh: TinMesh, tilePolygons?: [number, number][][]
     const del = new Delaunator(coords)
     const tDelaunay = performance.now()
     const con = new Constrainautor(del)
+    con.flips = new SparseEdgeSet() as unknown as typeof con.flips
     let failed = 0
     const seg = mesh.segments
     for (let s = 0; s < seg.length; s += 2) {
