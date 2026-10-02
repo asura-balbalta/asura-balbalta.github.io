@@ -7,49 +7,26 @@ import type { TinMesh } from "./terrainData"
  * 위에서 볼 때 시계 방향인 삼각형의 수. 부호 있는 면적(외적의 z)이 음수인 것을 센다. 넓이 0 은 세지 않는다.
  * 외부 라이브러리의 부호 규약에 기대지 않고 프로젝트 좌표계(x 동, y 북)에서 직접 계산한다.
  *
- * @param positions (x, y, z) 연속 배열
+ * 삼각분할에 쓴 좌표(coords)가 있으면 그것으로 재야 한다. float32 positions 로 재면 mm 정수로 만든 폭 1~2mm 의
+ * 얇은 삼각형이 반올림 때문에 음수 넓이로 나와 뒤집힌 것으로 오인된다.
+ *
+ * @param positions (x, y, z) 연속 배열(float32 m)
  * @param indices 삼각형 정점 인덱스(3개씩)
+ * @param coords 삼각분할에 쓴 (x, y) 연속 배열(선택). 있으면 positions 대신 쓴다
  */
-export const countClockwise = (positions: Float32Array, indices: Uint32Array) => {
+export const countClockwise = (positions: Float32Array, indices: Uint32Array, coords?: Float64Array) => {
     let clockwise = 0
     for (let t = 0; t < indices.length; t += 3) {
-        const a = indices[t] * 3, b = indices[t + 1] * 3, c = indices[t + 2] * 3
-        const area2 =
-            (positions[b] - positions[a]) * (positions[c + 1] - positions[a + 1]) -
-            (positions[b + 1] - positions[a + 1]) * (positions[c] - positions[a])
+        const a = indices[t], b = indices[t + 1], c = indices[t + 2]
+        const ax = coords ? coords[2 * a] : positions[3 * a], ay = coords ? coords[2 * a + 1] : positions[3 * a + 1]
+        const bx = coords ? coords[2 * b] : positions[3 * b], by = coords ? coords[2 * b + 1] : positions[3 * b + 1]
+        const cx = coords ? coords[2 * c] : positions[3 * c], cy = coords ? coords[2 * c + 1] : positions[3 * c + 1]
+        const area2 = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
         if (area2 < 0) clockwise++
     }
     return clockwise
 }
 
-/**
- * 합친 메쉬를 도엽 경계 없이 다시 삼각분할한다.
- *
- * 서버 TIN 은 1K 도엽마다 따로 만들어져 도엽 경계가 제약 선분이고, 그 위에는 삽입점이 없어 경계를 따라
- * 골·능선이 생긴다(서버 탐색 19). 여기서는 정점(삽입점 포함, 높이는 서버 추정값 그대로)은 두고
- * 등고선 선분(mesh.segments, 외곽 체인은 이미 제외됨)만 제약해 제약 Delaunay 를 다시 만든다.
- * 도엽 안쪽은 서버 결과와 같고(제약 Delaunay 는 네 점이 한 원 위에 있는 경우를 빼면 유일), 경계 근처만 바뀐다.
- *
- * 정점은 바뀌지 않으므로 positions 는 그대로 돌려주고 indices 만 새로 만든다.
- *
- * 삼각형 방향: Delaunator 의 삼각형은 "반시계"지만 그 기준이 y 가 아래로 커지는 화면 좌표라, 우리 좌표(x 동, y 북)에서는
- * 시계 방향이다. 서버 TIN 과 정점 법선 계산은 위에서 볼 때 반시계를 전제하므로 2·3번째 정점을 바꿔 뒤집고,
- * countClockwise 로 전수 검사해 하나라도 시계 방향이면 오류를 던진다. (처음에는 뒤집지 않아 tin 모드의 법선이 전부
- * 아래를 향해 지형이 어둡게 보였다. 계단형은 면 법선을 카메라 쪽으로 뒤집어 그리므로 드러나지 않았다)
- * (x, y)가 같고 z 만 다른 정점(서버의 수직 균열 사례)은 Delaunator 가 하나만 쓰므로 그 정점을 끝점으로 하는 선분은
- * 제약에 실패해 건너뛴다(개수를 로그에 남김).
- *
- * 결과 삼각형은 두 가지 후처리를 거친다.
- * - 도엽 합집합 밖 제거: Delaunay 는 점 전체의 볼록 껍질을 채우므로, 선택 범위가 오목한 곳(도엽이 빠진 모서리)과 범위
- *   경계선 위에 서버 TIN 에 없던 삼각형이 생긴다. 무게중심이 어느 도엽 폴리곤에도 들지 않는 삼각형을 버린다(removeOutside).
- * - 공간 순서 정렬: Delaunator 의 삼각형 순서는 중심에서 바깥으로 퍼지는 원판 모양이라, 계단형 변환이 순서대로 끊는 조각이
- *   원판 + 가장자리 fan 으로 보여 깨진 것처럼 보인다. 무게중심의 Morton 순서로 재배열해 조각이 네모난 블록 묶음이 되게 한다
- *   (sortByMorton). 조각 안 정점이 모여 있어 조각 경계의 중복 정점도 줄어든다.
- *
- * @param mesh segments 가 있는 원본 메쉬
- * @param tilePolygons 도엽 폴리곤들(원점 기준 m, 둘레 순서). 주면 합집합 밖 삼각형을 버린다
- * @returns 같은 정점에 새 삼각형. segments 가 없으면 입력을 그대로 돌려준다
- */
 /**
  * constrainautor 의 flips(뒤집어서 Delaunay 조건을 다시 봐야 할 변) 대체용 희소 집합.
  *
@@ -98,14 +75,52 @@ const constraintFailureKind = (err: unknown) => {
     return `기타(${msg})`
 }
 
-export const retriangulate = (mesh: TinMesh, tilePolygons?: [number, number][][]): TinMesh => {
+/**
+ * 합친 메쉬를 도엽 경계 없이 다시 삼각분할한다.
+ *
+ * 서버 TIN 은 1K 도엽마다 따로 만들어져 도엽 경계가 제약 선분이고, 그 위에는 삽입점이 없어 경계를 따라
+ * 골·능선이 생긴다(서버 탐색 19). 여기서는 정점(삽입점 포함, 높이는 서버 추정값 그대로)은 두고
+ * 등고선 선분(mesh.segments, 외곽 체인은 이미 제외됨)만 제약해 제약 Delaunay 를 다시 만든다.
+ * 도엽 안쪽은 서버 결과와 같고(제약 Delaunay 는 네 점이 한 원 위에 있는 경우를 빼면 유일), 경계 근처만 바뀐다.
+ *
+ * 정점은 바뀌지 않으므로 positions 는 그대로 돌려주고 indices 만 새로 만든다.
+ *
+ * 삼각형 방향: Delaunator 의 삼각형은 "반시계"지만 그 기준이 y 가 아래로 커지는 화면 좌표라, 우리 좌표(x 동, y 북)에서는
+ * 시계 방향이다. 서버 TIN 과 정점 법선 계산은 위에서 볼 때 반시계를 전제하므로 2·3번째 정점을 바꿔 뒤집고,
+ * countClockwise 로 전수 검사해 하나라도 시계 방향이면 오류를 던진다. (처음에는 뒤집지 않아 tin 모드의 법선이 전부
+ * 아래를 향해 지형이 어둡게 보였다. 계단형은 면 법선을 카메라 쪽으로 뒤집어 그리므로 드러나지 않았다)
+ * (x, y)가 같고 z 만 다른 정점(서버의 수직 균열 사례)은 Delaunator 가 하나만 쓰므로 그 정점을 끝점으로 하는 선분은
+ * 제약에 실패해 건너뛴다(개수를 로그에 남김).
+ *
+ * 결과 삼각형은 두 가지 후처리를 거친다.
+ * - 도엽 합집합 밖 제거: Delaunay 는 점 전체의 볼록 껍질을 채우므로, 선택 범위가 오목한 곳(도엽이 빠진 모서리)과 범위
+ *   경계선 위에 서버 TIN 에 없던 삼각형이 생긴다. 무게중심이 어느 도엽 폴리곤에도 들지 않는 삼각형을 버린다(removeOutside).
+ * - 공간 순서 정렬: Delaunator 의 삼각형 순서는 중심에서 바깥으로 퍼지는 원판 모양이라, 계단형 변환이 순서대로 끊는 조각이
+ *   원판 + 가장자리 fan 으로 보여 깨진 것처럼 보인다. 무게중심의 Morton 순서로 재배열해 조각이 네모난 블록 묶음이 되게 한다
+ *   (sortByMorton). 조각 안 정점이 모여 있어 조각 경계의 중복 정점도 줄어든다.
+ *
+ * @param mesh segments 가 있는 원본 메쉬
+ * @param tilePolygons 도엽 폴리곤들(원점 기준 m, 둘레 순서). 주면 합집합 밖 삼각형을 버린다
+ * @param coords 삼각분할에 쓸 (x, y) 연속 배열(선택). ttp 경로가 mm 정수를 넘긴다(float32 positions 는 원점 16km 밖에서
+ *   해상도가 2mm 라 1~2mm 쌍둥이 점이 겹친다). 없으면 positions 의 x, y 를 쓴다. 단위는 결과에 영향 없다
+ * @returns 같은 정점에 새 삼각형. segments 가 없으면 입력을 그대로 돌려준다
+ */
+export const retriangulate = (
+    mesh: TinMesh,
+    tilePolygons?: [number, number][][],
+    coords?: Float64Array,
+): TinMesh => {
     if (!mesh.segments) return mesh
     const started = performance.now()
     const n = mesh.positions.length / 3
-    const coords = new Float64Array(2 * n)
-    for (let i = 0; i < n; i++) {
-        coords[2 * i] = mesh.positions[3 * i]
-        coords[2 * i + 1] = mesh.positions[3 * i + 1]
+    if (!coords) {
+        coords = new Float64Array(2 * n)
+        for (let i = 0; i < n; i++) {
+            coords[2 * i] = mesh.positions[3 * i]
+            coords[2 * i + 1] = mesh.positions[3 * i + 1]
+        }
+    } else if (coords.length !== 2 * n) {
+        throw new Error(`coords 길이 ${coords.length} 가 정점 수 ${n} 와 맞지 않음`)
     }
     const del = new Delaunator(coords)
     const tDelaunay = performance.now()
@@ -133,7 +148,7 @@ export const retriangulate = (mesh: TinMesh, tilePolygons?: [number, number][][]
         flipped[t + 1] = T[t + 2]
         flipped[t + 2] = T[t + 1]
     }
-    const clockwise = countClockwise(mesh.positions, flipped)
+    const clockwise = countClockwise(mesh.positions, flipped, coords)
     if (clockwise > 0) {
         throw new Error(`재삼각분할 결과에 시계 방향 삼각형 ${clockwise}개 (규약: 위에서 볼 때 반시계)`)
     }

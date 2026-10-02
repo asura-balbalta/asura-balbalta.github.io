@@ -71,11 +71,11 @@ export const parseTin = (buf: ArrayBuffer): TinMesh => {
     }
 }
 
-/** /ttm/sheets 응답: 범위에 걸친 1K 목록과 받아야 할 5K 파일 */
-type TtmSheetsInBbox = {
+/** /ttm/sheets 응답: 범위에 걸친 1K 목록과 받아야 할 5K 파일. path 는 ttm v1, ttp_path 는 ttp(terrainPslg) 파일 */
+export type TtmSheetsInBbox = {
     origin: [number, number]
     tiles: (TileInfo & { id5k: string })[]
-    sheets: { id5k: string; path: string; map_ids: string[] }[]
+    sheets: { id5k: string; path: string; ttp_path: string; map_ids: string[] }[]
 }
 
 /** TTM1 파일 안의 1K 도엽 하나. 배열은 파일 버퍼를 가리키는 view 다 */
@@ -100,7 +100,7 @@ type TtmTile = {
  * @param bbox3857 지도에서 고른 범위 [minX, minY, maxX, maxY] (EPSG:3857)
  * @returns 공통 원점, 걸친 1K 목록, 5K 파일 목록
  */
-const getTtmSheetsInBbox = async (bbox3857: Extent): Promise<TtmSheetsInBbox> => {
+export const getTtmSheetsInBbox = async (bbox3857: Extent): Promise<TtmSheetsInBbox> => {
     const res = await fetch(
         `${TERRAIN_API}/ttm/sheets?bbox=${bbox3857.join(",")}&crs=3857`,
     )
@@ -119,12 +119,15 @@ const getTtmSheetsInBbox = async (bbox3857: Extent): Promise<TtmSheetsInBbox> =>
 export type LoadPhase = "sheets" | "download" | "merge" | "retriangulate"
 export type LoadProgress = (phase: LoadPhase, done: number, total: number) => void
 
-const fetchTtm = async (url: string) => {
+/** 파일 전체가 gzip 인 정적 파일을 받아 푼다(ttm·ttp 공용). 전송 압축은 브라우저가, 파일 gzip 은 여기서 푼다 */
+export const fetchGunzip = async (url: string) => {
     const res = await fetch(url)
     if (!res.ok || !res.body) throw new Error(`${res.status} ${url}`)
     const raw = res.body.pipeThrough(new DecompressionStream("gzip"))
-    return parseTtm(await new Response(raw).arrayBuffer())
+    return new Response(raw).arrayBuffer()
 }
+
+const fetchTtm = async (url: string) => parseTtm(await fetchGunzip(url))
 
 /**
  * TTM1 바이너리를 1K 도엽 단위로 나눈다. 복사 없이 버퍼의 view 로 만든다.

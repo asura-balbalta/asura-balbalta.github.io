@@ -6,6 +6,7 @@ import { firebaseApp } from "./fb"
 import { initOlMap } from "./olmap"
 import { LoadPhase, TinMesh } from "./terrainData"
 import { loadTerrainInWorker } from "./terrainLoadClient"
+import { TerrainSource } from "./terrainLoad.worker"
 import { TerrainViewCanvas } from "./components/TerrainViewCanvas"
 import { TerrainMode } from "./webgpu/terrainRenderer"
 
@@ -13,7 +14,9 @@ import { TerrainMode } from "./webgpu/terrainRenderer"
 const INITIAL_TERRAIN_MODE: TerrainMode = "stepped"
 /** 계단형일 때 층 간격(m). 0.1 ~ 5 정도로 조정 */
 const STEP_INTERVAL = 1
-/** 받은 도엽을 합친 뒤 도엽 경계 없이 다시 삼각분할할지. 도엽 경계를 따라 생기는 골을 없앤다(terrainRetri). 전후 비교용 토글 */
+/** 지형 데이터 출처. "ttp": 점·등고선 조각을 받아 프론트가 삼각분할(기본), "ttm": v1 도엽별 메쉬(비교용) */
+const TERRAIN_SOURCE: TerrainSource = "ttp"
+/** ttm 일 때, 합친 뒤 도엽 경계 없이 다시 삼각분할할지(terrainRetri). ttp 는 항상 삼각분할한다 */
 const RETRIANGULATE = true
 /** 지형 생성 완료 후 지도 클릭을 계속 무시하는 시간(ms). OpenLayers 가 클릭을 250ms 늦게 발생시키는 것보다 넉넉하게 */
 const CLICK_LOCK_AFTER_DONE_MS = 1000
@@ -106,6 +109,7 @@ export default function App() {
                 setSelection(bbox)
                 loadingRef.current?.cancel()
                 const loading = loadTerrainInWorker(bbox, {
+                    source: TERRAIN_SOURCE,
                     retriangulate: RETRIANGULATE,
                     onProgress: (phase, done, total) => {
                         if (generation === generationRef.current) setStatus(loadStatusText(phase, done, total))
