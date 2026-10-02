@@ -1,7 +1,7 @@
 import Constrainautor from "@kninnug/constrainautor"
 import Delaunator from "delaunator"
 
-import { TinMesh } from "./terrainData"
+import type { TinMesh } from "./terrainData"
 
 /**
  * 합친 메쉬를 도엽 경계 없이 다시 삼각분할한다.

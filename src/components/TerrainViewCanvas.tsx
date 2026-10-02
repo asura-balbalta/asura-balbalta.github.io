@@ -44,7 +44,8 @@ const initialCamera = ({ min, max }: MeshBounds): OrbitCamera => ({
  *
  * - 마운트할 때 렌더러(WebGPU device, 파이프라인)를 한 번 만들고 requestAnimationFrame 루프를 돌린다.
  *   언마운트하면 루프를 멈추고 device 를 해제한다.
- * - mesh 가 바뀌면 GPU 버퍼만 교체하고 카메라를 초기 위치로 되돌린다.
+ * - mesh 가 바뀌면 GPU 버퍼를 교체하고 카메라를 초기 위치로 되돌린다. mesh 는 같고 mode·stepInterval 만 바뀌면
+ *   버퍼만 교체하고 카메라는 그대로 둔다(표현 방식 전환 때 시점이 튀지 않게).
  *   tin 모드는 메쉬를 통째로 넘긴다(meshUpdater, 동기).
  *   stepped 모드는 Worker(terrainSteps.worker.ts)가 buildSteppedMeshChunks 로 만드는 조각을 메시지로 받는 즉시
  *   올린다(meshStreamStarter). 변환 중에도 메인 스레드는 멈추지 않고, 계단형 메쉬 전체를 메모리에 두지 않는다.
@@ -56,7 +57,6 @@ const initialCamera = ({ min, max }: MeshBounds): OrbitCamera => ({
  * @param props.mesh 원본 TIN 메쉬
  * @param props.mode 지형 표현 방식. "tin"(부드러운 음영, 표고 색) 또는 "stepped"(계단형, 단색)
  * @param props.stepInterval stepped 모드의 층 간격(m)
- * @param props.retriangulate stepped 모드에서 변환 전에 도엽 경계 없이 다시 삼각분할할지(mesh.segments 가 있을 때만 효과)
  * @param props.onDone 메쉬를 GPU 에 올리는 작업이 끝났을 때(성공 true, 실패 false). 부모가 레이아웃 전환·잠금 해제에 쓴다
  * @param props.onProgress stepped 모드의 변환 진행률(처리한 원본 삼각형 비율 0 ~ 1). 약 100ms 간격으로 불리고 끝에 1 이 온다
  * @param props.onFirstChunk stepped 모드에서 첫 조각이 화면에 올라갔을 때. 부모가 지도를 미니맵으로 옮기는 데 쓴다
@@ -65,7 +65,6 @@ export const TerrainViewCanvas = ({
     mesh,
     mode = "tin",
     stepInterval = 1,
-    retriangulate = false,
     onDone,
     onProgress,
     onFirstChunk,
@@ -73,7 +72,6 @@ export const TerrainViewCanvas = ({
     mesh: TinMesh
     mode?: TerrainMode
     stepInterval?: number
-    retriangulate?: boolean
     onDone?: (ok: boolean) => void
     onProgress?: (ratio: number) => void
     onFirstChunk?: () => void
@@ -94,6 +92,8 @@ export const TerrainViewCanvas = ({
     }))
     const [renderer, setRenderer] = useState<TRenderer | null>(null)
     const cameraRef = useRef<OrbitCamera | null>(null)
+    /** 직전 effect 가 올린 mesh. 같은 mesh 로 다시 돌면(mode 전환) 카메라를 유지한다 */
+    const lastMeshRef = useRef<TinMesh | null>(null)
     const dragRef = useRef<{ x: number; y: number } | null>(null)
 
     useEffect(() => {
@@ -128,12 +128,17 @@ export const TerrainViewCanvas = ({
 
     useEffect(() => {
         if (!renderer) return
+        const resetCamera = lastMeshRef.current !== mesh || !cameraRef.current
+        lastMeshRef.current = mesh
+        /** 새 mesh 면 범위에 맞춰 카메라를 초기화하고, 같은 mesh 면 현재 카메라를 유지한다 */
+        const placeCamera = (bounds: MeshBounds) => {
+            if (resetCamera) cameraRef.current = initialCamera(bounds)
+            renderer.updaters.cameraUpdater(cameraRef.current!)
+        }
         if (mode !== "stepped") {
             let ok = true
             try {
-                const bounds = renderer.updaters.meshUpdater(mesh, { mode })
-                cameraRef.current = initialCamera(bounds)
-                renderer.updaters.cameraUpdater(cameraRef.current)
+                placeCamera(renderer.updaters.meshUpdater(mesh, { mode }))
             } catch (err) {
                 console.error(err)
                 ok = false
@@ -169,8 +174,7 @@ export const TerrainViewCanvas = ({
                         stream.addChunk(msg.chunk)
                         if (first) {
                             first = false
-                            cameraRef.current = initialCamera(bounds)
-                            renderer.updaters.cameraUpdater(cameraRef.current)
+                            placeCamera(bounds)
                             onFirstChunkRef.current?.()
                         }
                     } else if (msg.type === "progress") {
@@ -200,7 +204,6 @@ export const TerrainViewCanvas = ({
                 mesh: copy,
                 step: stepInterval,
                 maxBytes: Math.min(stream.maxBytes, STEPPED_CHUNK_BYTES),
-                retriangulate,
             }
             const transfer = [copy.positions.buffer, copy.indices.buffer]
             if (copy.segments) transfer.push(copy.segments.buffer)
@@ -211,7 +214,7 @@ export const TerrainViewCanvas = ({
         }
         // mesh 가 바뀌거나 언마운트되면 진행 중인 변환을 취소한다(결과는 알리지 않는다)
         return () => stop()
-    }, [renderer, mesh, mode, stepInterval, retriangulate])
+    }, [renderer, mesh, mode, stepInterval])
 
     /**
      * 현재 카메라에 변경을 적용하고 GPU uniform 에 반영한다.

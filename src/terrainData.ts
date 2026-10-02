@@ -1,5 +1,7 @@
 import { Extent } from "ol/extent"
 
+import { retriangulate } from "./terrainRetri"
+
 export const TERRAIN_API = "http://localhost:8000"
 /** terrain_tile_mesh(5K 정적 파일) base URL. 운영에서는 R2 공개 주소로 바꾼다 */
 export const TTM_BASE = `${TERRAIN_API}/ttm`
@@ -277,24 +279,29 @@ const mergeTiles = (
  * 1. 범위에 걸친 1K 도엽과 5K 파일 목록 조회
  * 2. 5K 파일들을 병렬로 받아 풀기
  * 3. 파일 안의 1K(보통 25개) 중 범위에 걸친 1K 만 골라 공통 원점으로 합치기(등고선 제약 선분도 함께)
+ * 4. (선택) 도엽 경계 없이 다시 삼각분할(terrainRetri). 이 메쉬를 tin·stepped 모든 표현이 공유한다
  *
  * @param bbox3857 지도에서 고른 범위 [minX, minY, maxX, maxY] (EPSG:3857)
+ * @param options.retriangulate true 면 합친 뒤 재삼각분할한다. 기본 false
  * @returns 렌더러에 넘길 메쉬
  */
-export const loadTerrainTtm = async (bbox3857: Extent): Promise<TinMesh> => {
+export const loadTerrainTtm = async (
+    bbox3857: Extent,
+    options: { retriangulate?: boolean } = {},
+): Promise<TinMesh> => {
     const q = await getTtmSheetsInBbox(bbox3857)
     const files = await Promise.all(
         q.sheets.map((s) => fetchTtm(`${TTM_BASE}/${s.path}`)),
     )
     const want = new Set(q.tiles.map((t) => t.map_id))
     const allTiles = files.flatMap((f) => f.tiles)
-    const mesh = mergeTiles(
+    const merged = mergeTiles(
         allTiles.filter((t) => want.has(t.mapId)),
         q.origin,
         new Map(q.tiles.map((t) => [t.map_id, t.corners])),
     )
     console.log(
-        `TTM: 5K 파일 ${files.length}개, 1K ${want.size}/${allTiles.length}개 사용, 정점 ${mesh.positions.length / 3}, 삼각형 ${mesh.indices.length / 3}`,
+        `TTM: 5K 파일 ${files.length}개, 1K ${want.size}/${allTiles.length}개 사용, 정점 ${merged.positions.length / 3}, 삼각형 ${merged.indices.length / 3}`,
     )
-    return mesh
+    return options.retriangulate ? retriangulate(merged) : merged
 }

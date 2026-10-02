@@ -8,11 +8,11 @@ import { loadTerrainTtm, TinMesh } from "./terrainData"
 import { TerrainViewCanvas } from "./components/TerrainViewCanvas"
 import { TerrainMode } from "./webgpu/terrainRenderer"
 
-/** 지형 표현 방식. "tin": 삼각형 메쉬 그대로, "stepped": 등고선 모형처럼 계단형 */
-const TERRAIN_MODE: TerrainMode = "stepped"
+/** 처음 보여 줄 지형 표현 방식. "tin": 삼각형 메쉬 그대로, "stepped": 등고선 모형처럼 계단형. 화면의 버튼으로 바꿀 수 있다 */
+const INITIAL_TERRAIN_MODE: TerrainMode = "stepped"
 /** 계단형일 때 층 간격(m). 0.1 ~ 5 정도로 조정 */
 const STEP_INTERVAL = 1
-/** 계단형 변환 전에 도엽 경계 없이 다시 삼각분할할지. 도엽 경계를 따라 생기는 골을 없앤다(terrainRetri). 전후 비교용 토글 */
+/** 받은 도엽을 합친 뒤 도엽 경계 없이 다시 삼각분할할지. 도엽 경계를 따라 생기는 골을 없앤다(terrainRetri). 전후 비교용 토글 */
 const RETRIANGULATE = true
 /** 지형 생성 완료 후 지도 클릭을 계속 무시하는 시간(ms). OpenLayers 가 클릭을 250ms 늦게 발생시키는 것보다 넉넉하게 */
 const CLICK_LOCK_AFTER_DONE_MS = 1000
@@ -50,6 +50,13 @@ const busyBadgeStyle: CSSProperties = {
     font: "14px sans-serif",
 }
 
+/** 지형 생성이 끝난 뒤 배지 자리에 놓이는 표현 방식 전환 버튼 */
+const modeButtonStyle: CSSProperties = {
+    ...busyBadgeStyle,
+    border: "1px solid rgba(255, 255, 255, 0.35)",
+    cursor: "pointer",
+}
+
 export default function App() {
     const mapRef = useRef<Map | null>(null)
     /** 사각형 확정마다 1씩 오르는 번호. 늦게 돌아온 이전 선택의 결과를 버리는 데 쓴다 */
@@ -61,6 +68,8 @@ export default function App() {
     const [busy, setBusy] = useState(false)
     const [selection, setSelection] = useState<Extent | null>(null)
     const [mesh, setMesh] = useState<TinMesh | null>(null)
+    /** 현재 지형 표현 방식. 버튼으로 바꾸면 같은 mesh 를 다시 올린다 */
+    const [mode, setMode] = useState<TerrainMode>(INITIAL_TERRAIN_MODE)
     /** 3D 지형이 화면에 올라간 뒤 true. 이때부터 지도를 미니맵으로 옮긴다 */
     const [terrainReady, setTerrainReady] = useState(false)
     /** 계단형 변환 진행률(0 ~ 1). 변환 중이 아니면(다운로드·병합 중, 완료 후) null */
@@ -78,7 +87,7 @@ export default function App() {
                 setBusyBoth(true)
                 setProgress(null)
                 setSelection(bbox)
-                loadTerrainTtm(bbox)
+                loadTerrainTtm(bbox, { retriangulate: RETRIANGULATE })
                     .then((loaded) => {
                         if (generation !== generationRef.current) return
                         setMesh(loaded)
@@ -104,6 +113,13 @@ export default function App() {
         }
     }, [terrainReady, selection])
 
+    /** 표현 방식을 바꾼다. 다시 올리는 동안 잠그고, 끝나면 onTerrainDone 이 푼다 */
+    const toggleMode = () => {
+        setBusyBoth(true)
+        setProgress(null)
+        setMode((m) => (m === "stepped" ? "tin" : "stepped"))
+    }
+
     const onTerrainDone = (ok: boolean) => {
         ignoreClicksBeforeRef.current = performance.now()
         setBusy(false)
@@ -123,19 +139,24 @@ export default function App() {
             {mesh && (
                 <TerrainViewCanvas
                     mesh={mesh}
-                    mode={TERRAIN_MODE}
+                    mode={mode}
                     stepInterval={STEP_INTERVAL}
-                    retriangulate={RETRIANGULATE}
                     onDone={onTerrainDone}
                     onProgress={setProgress}
                     onFirstChunk={() => setTerrainReady(true)}
                 />
             )}
             <div id="map" style={terrainReady ? miniMapStyle : fullMapStyle}></div>
-            {busy && (
+            {busy ? (
                 <div style={busyBadgeStyle}>
                     지형 생성 중…{progress !== null && ` ${Math.floor(progress * 100)}%`}
                 </div>
+            ) : (
+                terrainReady && (
+                    <button style={modeButtonStyle} onClick={toggleMode}>
+                        {mode === "stepped" ? "TIN 으로 보기" : "계단형으로 보기"}
+                    </button>
+                )
             )}
         </>
     )
