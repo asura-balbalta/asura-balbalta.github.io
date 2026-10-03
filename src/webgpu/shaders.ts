@@ -5,7 +5,7 @@ import { STOP_COUNT } from "../terrainTheme"
  * - Uniforms: viewProj 행렬(offset 0) + 표고 최소·최대(offset 64, 지금은 안 씀) + 카메라 위치(offset 80)
  *   + 표고 색표 stops(offset 96, vec4f × STOP_COUNT: z, r, g, b. 높이 오름차순), 총 96 + 16·STOP_COUNT 바이트
  * - terrainColor(): 절대 표고 → 바탕색. 색표는 uniform 이라 테마 전환은 셰이더를 바꾸지 않고 uniform 만 다시 쓴다
- * - shade(): 북서쪽 위의 빛으로 난반사 조명. 지도 톤을 살리려고 주변광 60% + 난반사 40%, 정반사 없음
+ * - shade(): 남동쪽 위의 빛으로 난반사 조명. 지도 톤을 살리려고 주변광 60% + 난반사 40%, 정반사 없음
  */
 const commonWgsl = /* wgsl */ `
     const STOP_COUNT = ${STOP_COUNT}u;
@@ -32,7 +32,7 @@ const commonWgsl = /* wgsl */ `
     }
 
     fn shade(base: vec3f, n: vec3f, v: vec3f) -> vec3f {
-        let l = normalize(vec3f(-0.5, 0.5, 1.0)); // 북서쪽 위에서 비추는 빛
+        let l = normalize(vec3f(0.5, -0.5, 1.0)); // 남동쪽 위에서 비추는 빛(고도각 약 55°). 지도 음영 관례는 북서(315°)이나 비교를 위해 바꿔 봄
         let diffuse = max(dot(n, l), 0.0);
         return base * (0.6 + 0.4 * diffuse);
     }
