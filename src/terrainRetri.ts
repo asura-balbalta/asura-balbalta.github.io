@@ -95,9 +95,11 @@ const constraintFailureKind = (err: unknown) => {
  * 결과 삼각형은 두 가지 후처리를 거친다.
  * - 도엽 합집합 밖 제거: Delaunay 는 점 전체의 볼록 껍질을 채우므로, 선택 범위가 오목한 곳(도엽이 빠진 모서리)과 범위
  *   경계선 위에 서버 TIN 에 없던 삼각형이 생긴다. 무게중심이 어느 도엽 폴리곤에도 들지 않는 삼각형을 버린다(removeOutside).
- * - 공간 순서 정렬: Delaunator 의 삼각형 순서는 중심에서 바깥으로 퍼지는 원판 모양이라, 계단형 변환이 순서대로 끊는 조각이
- *   원판 + 가장자리 fan 으로 보여 깨진 것처럼 보인다. 무게중심의 Morton 순서로 재배열해 조각이 네모난 블록 묶음이 되게 한다
- *   (sortByMorton). 조각 안 정점이 모여 있어 조각 경계의 중복 정점도 줄어든다.
+ * - 공간 순서 정렬: 계단형 변환은 삼각형 배열을 앞에서부터 순서대로 끊어 조각을 만들므로, 이 순서가 조각이 화면에 올라오는
+ *   순서이자 조각의 모양이다. Delaunator 의 원래 순서는 범위 밖 넓이 0 삼각형까지 섞인 원판 + 가장자리 fan 이어서 깨진 것처럼
+ *   보였다(범위 밖 삼각형은 위 removeOutside 로 해결). 무게중심 셀(256m)을 중심에서 바깥으로 도는 정사각 나선 순서로 재배열해
+ *   조각이 공간적으로 뭉치고 중심부터 바깥으로 퍼지며 채워지게 한다(sortBySpiral). 조각 안 정점이 모여 있어 조각 경계의 중복
+ *   정점도 줄어든다.
  *
  * @param mesh segments 가 있는 원본 메쉬
  * @param tilePolygons 도엽 폴리곤들(원점 기준 m, 둘레 순서). 주면 합집합 밖 삼각형을 버린다
@@ -153,7 +155,7 @@ export const retriangulate = (
         throw new Error(`재삼각분할 결과에 시계 방향 삼각형 ${clockwise}개 (규약: 위에서 볼 때 반시계)`)
     }
     const kept = tilePolygons ? removeOutside(mesh.positions, flipped, tilePolygons) : flipped
-    const indices = sortByMorton(mesh.positions, kept)
+    const indices = sortBySpiral(mesh.positions, kept)
     const tPost = performance.now()
     console.log(
         `재삼각분할: 정점 ${n}, 삼각형 ${mesh.indices.length / 3} → ${indices.length / 3}(도엽 밖 ${(flipped.length - kept.length) / 3} 제거), 제약 선분 ${seg.length / 2}(${failedText}), Delaunay ${Math.round(tDelaunay - started)}ms + 제약 ${Math.round(tConstrain - tDelaunay)}ms + 후처리 ${Math.round(tPost - tConstrain)}ms`,
@@ -211,26 +213,24 @@ const removeOutside = (positions: Float32Array, indices: Uint32Array, polygons: 
     return out.subarray(0, n)
 }
 
-/** 16비트 정수의 비트를 한 칸씩 벌린다(Morton 키용) */
-const spreadBits = (v: number) => {
-    v = (v | (v << 8)) & 0x00ff00ff
-    v = (v | (v << 4)) & 0x0f0f0f0f
-    v = (v | (v << 2)) & 0x33333333
-    v = (v | (v << 1)) & 0x55555555
-    return v
-}
-
-/** Morton 정렬의 셀 크기(m). 조각이 이 셀들의 블록 묶음이 된다 */
-const MORTON_CELL_M = 256
+/** 공간 순서 정렬의 셀 크기(m). 조각이 이 셀들로 이루어진 고리와 호의 묶음이 된다 */
+const ORDER_CELL_M = 256
 
 /**
- * 삼각형을 무게중심의 Morton(Z-order) 순서로 재배열한다. 축당 최대 2^16 셀. 키별 counting sort 라 O(n) 이다.
+ * 삼각형을 무게중심 셀의 "중심에서 바깥으로 도는 정사각 나선" 순서로 재배열한다.
+ *
+ * 메쉬 범위의 중심 셀을 0으로 두고, 중심까지의 체비쇼프 거리가 r 인 셀들(한 변 2r+1 의 정사각 고리, 8r 개)을 안쪽 고리부터
+ * 차례로 늘어놓는다. 고리 안에서는 남서 모서리에서 출발해 남쪽 변을 동으로, 동쪽 변을 북으로, 북쪽 변을 서로, 서쪽 변을 남으로
+ * 한 바퀴 돈다. 셀마다 키가 하나라(고리 r 의 시작 번호 (2r−1)² + 둘레 위치) 키별 counting sort 로 O(n) 이고, counts 배열은
+ * (2R+1)² 칸이다(R: 가장 바깥 고리. 50km 범위면 약 4만). 같은 셀 안의 삼각형 순서는 입력 순서를 유지한다.
+ * 계단형 조각은 "안쪽 고리 몇 개 + 마지막 고리의 연속한 호" 가 되어 중심에서 네모 고리 모양으로 퍼지며 채워진다.
+ * (이전에는 남서 모서리 기준 Morton(Z-order) 순서였다. 남서에서 시작해 사분면 단위로 번져 보였다)
  *
  * @param positions (x, y, z) 연속 배열
  * @param indices 삼각형 정점 인덱스(3개씩)
  * @returns 재배열한 새 배열
  */
-const sortByMorton = (positions: Float32Array, indices: Uint32Array) => {
+const sortBySpiral = (positions: Float32Array, indices: Uint32Array) => {
     const nTri = indices.length / 3
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
     for (let i = 0; i < positions.length; i += 3) {
@@ -239,17 +239,30 @@ const sortByMorton = (positions: Float32Array, indices: Uint32Array) => {
         minY = Math.min(minY, positions[i + 1])
         maxY = Math.max(maxY, positions[i + 1])
     }
-    const cells = Math.max(Math.ceil((maxX - minX) / MORTON_CELL_M), Math.ceil((maxY - minY) / MORTON_CELL_M)) + 1
-    const bits = Math.min(16, Math.ceil(Math.log2(cells)))
+    const cellsX = Math.floor((maxX - minX) / ORDER_CELL_M) + 1
+    const cellsY = Math.floor((maxY - minY) / ORDER_CELL_M) + 1
+    const centerX = Math.floor(cellsX / 2), centerY = Math.floor(cellsY / 2)
+    const R = Math.max(centerX, cellsX - 1 - centerX, centerY, cellsY - 1 - centerY)
     const keys = new Uint32Array(nTri)
     for (let t = 0; t < nTri; t++) {
         const a = indices[3 * t] * 3, b = indices[3 * t + 1] * 3, c = indices[3 * t + 2] * 3
-        const cx = ((positions[a] + positions[b] + positions[c]) / 3 - minX) / MORTON_CELL_M
-        const cy = ((positions[a + 1] + positions[b + 1] + positions[c + 1]) / 3 - minY) / MORTON_CELL_M
-        keys[t] = (spreadBits(Math.floor(cx)) | (spreadBits(Math.floor(cy)) << 1)) >>> 0
+        const dx = Math.floor(((positions[a] + positions[b] + positions[c]) / 3 - minX) / ORDER_CELL_M) - centerX
+        const dy = Math.floor(((positions[a + 1] + positions[b + 1] + positions[c + 1]) / 3 - minY) / ORDER_CELL_M) - centerY
+        const r = Math.max(Math.abs(dx), Math.abs(dy))
+        if (r === 0) {
+            keys[t] = 0
+            continue
+        }
+        // 고리 둘레 위치 0 ~ 8r−1: 남쪽 변(서→동), 동쪽 변(남→북), 북쪽 변(동→서), 서쪽 변(북→남). 모서리는 앞 변에 속한다
+        const along =
+            dy === -r && dx < r ? dx + r
+            : dx === r && dy < r ? 3 * r + dy
+            : dy === r && dx > -r ? 5 * r - dx
+            : 7 * r - dy
+        keys[t] = (2 * r - 1) * (2 * r - 1) + along
     }
     // counting sort: counts[k] = 키가 k 보다 작은 삼각형 수 → 각 키의 시작 위치
-    const counts = new Uint32Array((1 << (2 * bits)) + 1)
+    const counts = new Uint32Array((2 * R + 1) * (2 * R + 1) + 1)
     for (let t = 0; t < nTri; t++) counts[keys[t] + 1]++
     for (let k = 1; k < counts.length; k++) counts[k] += counts[k - 1]
     const out = new Uint32Array(indices.length)
