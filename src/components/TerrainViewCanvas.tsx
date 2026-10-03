@@ -1,6 +1,7 @@
 import React, { useEffect, useId, useRef, useState } from "react"
 
 import { TinMesh } from "../terrainData"
+import { TERRAIN_THEMES, Theme } from "../terrainTheme"
 import type { SteppedMeshRequest, SteppedMeshResponse } from "../terrainSteps.worker"
 import { OrbitCamera } from "../webgpu/camera"
 import {
@@ -51,12 +52,14 @@ const initialCamera = ({ min, max }: MeshBounds): OrbitCamera => ({
  *   올린다(meshStreamStarter). 변환 중에도 메인 스레드는 멈추지 않고, 계단형 메쉬 전체를 메모리에 두지 않는다.
  *   Worker 에는 원본의 사본(slice)을 transfer 하므로 원본 mesh 는 부모가 계속 들고 있다가 모드·층 간격을 바꿔 다시 쓸 수 있다.
  *   첫 조각이 올라갈 때 이전 지형을 교체하고 카메라를 맞춘다(onFirstChunk). 그때까지는 이전 지형이 그대로 보인다.
+ * - theme 이 바뀌면 표고 색표와 배경색 uniform 만 다시 쓴다(셰이더·메쉬 그대로).
  * - 드래그: 회전(좌우 = azimuth, 상하 = elevation), 휠: 확대·축소(distance)
  * - 1차 구현이라 캔버스 크기는 마운트 시점 창 크기로 고정된다.
  *
  * @param props.mesh 원본 TIN 메쉬
  * @param props.mode 지형 표현 방식. "tin"(부드러운 음영, 표고 색) 또는 "stepped"(계단형, 단색)
  * @param props.stepInterval stepped 모드의 층 간격(m)
+ * @param props.theme 색 테마(terrainTheme). 기본 "light"
  * @param props.onDone 메쉬를 GPU 에 올리는 작업이 끝났을 때(성공 true, 실패 false). 부모가 레이아웃 전환·잠금 해제에 쓴다
  * @param props.onProgress stepped 모드의 변환 진행률(처리한 원본 삼각형 비율 0 ~ 1). 약 100ms 간격으로 불리고 끝에 1 이 온다
  * @param props.onFirstChunk stepped 모드에서 첫 조각이 화면에 올라갔을 때. 부모가 지도를 미니맵으로 옮기는 데 쓴다
@@ -65,6 +68,7 @@ export const TerrainViewCanvas = ({
     mesh,
     mode = "tin",
     stepInterval = 1,
+    theme = "light",
     onDone,
     onProgress,
     onFirstChunk,
@@ -72,6 +76,7 @@ export const TerrainViewCanvas = ({
     mesh: TinMesh
     mode?: TerrainMode
     stepInterval?: number
+    theme?: Theme
     onDone?: (ok: boolean) => void
     onProgress?: (ratio: number) => void
     onFirstChunk?: () => void
@@ -105,7 +110,7 @@ export const TerrainViewCanvas = ({
             canvasId,
             width: Math.round(size.width * size.dpr),
             height: Math.round(size.height * size.dpr),
-            backgroundColor: { r: 0.12, g: 0.13, b: 0.15 },
+            backgroundColor: TERRAIN_THEMES[theme].background,
         })
             .then((r) => {
                 if (cancelled) return r.destroy()
@@ -125,6 +130,12 @@ export const TerrainViewCanvas = ({
             created?.destroy()
         }
     }, [])
+
+    useEffect(() => {
+        if (!renderer) return
+        renderer.updaters.paletteUpdater(TERRAIN_THEMES[theme].stops)
+        renderer.updaters.backgroundUpdater(TERRAIN_THEMES[theme].background)
+    }, [renderer, theme])
 
     useEffect(() => {
         if (!renderer) return

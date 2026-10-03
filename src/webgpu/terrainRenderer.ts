@@ -1,11 +1,13 @@
 import { MeshChunk, TinMesh } from "../terrainData"
+import { ElevationStop, STOP_COUNT, stopsToUniform } from "../terrainTheme"
 import { OrbitCamera, orbitEye, orbitViewProj } from "./camera"
 import { initWebGPU } from "./device"
 import { createSmoothTerrainShader, createSteppedTerrainShader } from "./shaders"
 
 const DEPTH_FORMAT: GPUTextureFormat = "depth24plus"
 const NORMAL_SMOOTH_ITERATIONS = 2
-const UNIFORM_SIZE = 96 // viewProj mat4x4f(0~64) + zRange vec2f(64~72) + eye vec3f(80~92, vec3f 는 16바이트 정렬), 전체 16바이트 정렬
+const STOPS_OFFSET = 96 // 표고 색표 array<vec4f, STOP_COUNT> 의 시작 (shaders.ts 의 Uniforms 와 같아야 한다)
+const UNIFORM_SIZE = STOPS_OFFSET + 16 * STOP_COUNT // viewProj mat4x4f(0~64) + zRange vec2f(64~72) + eye vec3f(80~92) + stops
 
 /** 지형 표현 방식. tin: 정점 법선으로 부드럽게, stepped: 계단형(면 법선, 법선 버퍼 없음) */
 export type TerrainMode = "tin" | "stepped"
@@ -19,19 +21,19 @@ export type MeshBounds = {
 /**
  * 배경 pass 함수를 만든다. 프레임마다 가장 먼저 실행되어 색 버퍼와 깊이 버퍼를 비운다.
  *
- * @param bgcolor 배경색(0 ~ 1)
+ * @param bg 배경색 홀더(0 ~ 1). color 를 바꾸면 다음 프레임부터 반영된다(backgroundUpdater)
  * @param depthView 깊이 텍스처 view. 뒤이은 pass 들이 같은 view 를 load 해서 쓴다
  * @returns `(encoder, context) => void` pass 함수
  */
 const renderBackgroundPassFactory =
-    (bgcolor: { r: number; g: number; b: number }, depthView: GPUTextureView) =>
+    (bg: { color: { r: number; g: number; b: number } }, depthView: GPUTextureView) =>
     (encoder: GPUCommandEncoder, context: GPUCanvasContext) => {
         const backgroundPass = encoder.beginRenderPass({
             colorAttachments: [
                 {
                     view: context.getCurrentTexture().createView(),
                     loadOp: "clear",
-                    clearValue: { ...bgcolor, a: 1 },
+                    clearValue: { ...bg.color, a: 1 },
                     storeOp: "store",
                 },
             ],
@@ -445,6 +447,15 @@ const createTerrainDrawingPassAndUpdaters = (
     }
 
     /**
+     * 표고 색표(uniform offset STOPS_OFFSET)를 쓴다. 테마 전환 때 부른다. 셰이더·파이프라인은 그대로다.
+     *
+     * @param stops 색표 단계 STOP_COUNT 개(높이 오름차순)
+     */
+    const paletteUpdater = (stops: ElevationStop[]) => {
+        device.queue.writeBuffer(uniformBuffer, STOPS_OFFSET, stopsToUniform(stops))
+    }
+
+    /**
      * 지형을 그리는 pass. 배경 pass 가 비운 색·깊이 버퍼를 load 해서 그 위에 그린다.
      * meshUpdater 가 정한 모드의 파이프라인으로, 메쉬 조각마다 버퍼를 바꿔 가며 drawIndexed 한다(tin 모드에서만 법선 버퍼 바인딩).
      * 아직 meshUpdater 로 메쉬가 들어오지 않았으면 아무것도 하지 않는다.
@@ -481,7 +492,7 @@ const createTerrainDrawingPassAndUpdaters = (
         pass.end()
     }
 
-    return { terrainPass, meshUpdater, meshStreamStarter, streamedMeshUpdater, cameraUpdater }
+    return { terrainPass, meshUpdater, meshStreamStarter, streamedMeshUpdater, cameraUpdater, paletteUpdater }
 }
 
 /**
@@ -494,8 +505,9 @@ const createTerrainDrawingPassAndUpdaters = (
  * @param options.canvasId 대상 canvas 요소의 id
  * @param options.width 캔버스 실제 픽셀 너비(canvas width 속성과 같아야 한다)
  * @param options.height 캔버스 실제 픽셀 높이
- * @param options.backgroundColor 배경색(0 ~ 1)
- * @returns render(한 프레임 그리기), updaters(meshUpdater, meshStreamStarter, streamedMeshUpdater, cameraUpdater), destroy(device 해제)
+ * @param options.backgroundColor 처음 배경색(0 ~ 1). backgroundUpdater 로 바꿀 수 있다
+ * @returns render(한 프레임 그리기), updaters(meshUpdater, meshStreamStarter, streamedMeshUpdater, cameraUpdater, paletteUpdater,
+ *   backgroundUpdater), destroy(device 해제)
  */
 export const createTerrainRenderFunctionAndUpdateFunctions = async ({
     canvasId,
@@ -518,9 +530,14 @@ export const createTerrainRenderFunctionAndUpdateFunctions = async ({
         })
         .createView()
 
-    const backgroundPass = renderBackgroundPassFactory(backgroundColor, depthView)
-    const { terrainPass, meshUpdater, meshStreamStarter, streamedMeshUpdater, cameraUpdater } =
+    const background = { color: backgroundColor }
+    const backgroundPass = renderBackgroundPassFactory(background, depthView)
+    const { terrainPass, meshUpdater, meshStreamStarter, streamedMeshUpdater, cameraUpdater, paletteUpdater } =
         createTerrainDrawingPassAndUpdaters(device, format, depthView, width / height)
+    /** 배경색을 바꾼다(다음 프레임부터). 테마 전환용 */
+    const backgroundUpdater = (color: { r: number; g: number; b: number }) => {
+        background.color = color
+    }
 
     /** 한 프레임을 그린다: 배경 pass → 지형 pass 순으로 기록해 제출한다 */
     const render = () => {
@@ -530,7 +547,7 @@ export const createTerrainRenderFunctionAndUpdateFunctions = async ({
         device.queue.submit([encoder.finish()])
     }
 
-    const updaters = { meshUpdater, meshStreamStarter, streamedMeshUpdater, cameraUpdater }
+    const updaters = { meshUpdater, meshStreamStarter, streamedMeshUpdater, cameraUpdater, paletteUpdater, backgroundUpdater }
 
     /** GPU device 와 그에 속한 버퍼·텍스처를 모두 해제한다. 컴포넌트 언마운트 때 호출 */
     const destroy = () => device.destroy()

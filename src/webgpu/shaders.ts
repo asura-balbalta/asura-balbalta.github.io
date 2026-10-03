@@ -1,22 +1,40 @@
+import { STOP_COUNT } from "../terrainTheme"
+
 /**
  * 두 지형 셰이더가 같이 쓰는 WGSL 조각.
- * - Uniforms: viewProj 행렬(offset 0) + 표고 최소·최대(offset 64) + 카메라 위치(offset 80), 총 96바이트
- * - shade(): 북서쪽 위의 빛으로 Blinn-Phong(주변광 35% + 난반사 65% + 약한 정반사)
+ * - Uniforms: viewProj 행렬(offset 0) + 표고 최소·최대(offset 64, 지금은 안 씀) + 카메라 위치(offset 80)
+ *   + 표고 색표 stops(offset 96, vec4f × STOP_COUNT: z, r, g, b. 높이 오름차순), 총 96 + 16·STOP_COUNT 바이트
+ * - terrainColor(): 절대 표고 → 바탕색. 색표는 uniform 이라 테마 전환은 셰이더를 바꾸지 않고 uniform 만 다시 쓴다
+ * - shade(): 북서쪽 위의 빛으로 난반사 조명. 지도 톤을 살리려고 주변광 60% + 난반사 40%, 정반사 없음
  */
 const commonWgsl = /* wgsl */ `
+    const STOP_COUNT = ${STOP_COUNT}u;
+
     struct Uniforms {
         viewProj: mat4x4f,
-        zRange: vec2f, // 색 그라데이션용 표고 최소, 최대
-        eye: vec3f, // 카메라 위치 (정반사 계산용)
+        zRange: vec2f, // 표고 최소, 최대 (절대 표고 색표로 바꾼 뒤로는 안 쓴다)
+        eye: vec3f, // 카메라 위치 (계단형의 양면 판정용)
+        stops: array<vec4f, STOP_COUNT>, // 표고 색표: (z, r, g, b), 높이 오름차순
     };
     @group(0) @binding(0) var<uniform> u: Uniforms;
 
+    // 단계 사이는 선형 보간, 양 끝 밖은 끝 색
+    fn terrainColor(z: f32) -> vec3f {
+        if (z <= u.stops[0].x) { return u.stops[0].yzw; }
+        for (var i = 1u; i < STOP_COUNT; i = i + 1u) {
+            if (z <= u.stops[i].x) {
+                let a = u.stops[i - 1u];
+                let b = u.stops[i];
+                return mix(a.yzw, b.yzw, (z - a.x) / (b.x - a.x));
+            }
+        }
+        return u.stops[STOP_COUNT - 1u].yzw;
+    }
+
     fn shade(base: vec3f, n: vec3f, v: vec3f) -> vec3f {
         let l = normalize(vec3f(-0.5, 0.5, 1.0)); // 북서쪽 위에서 비추는 빛
-        let h = normalize(l + v);
         let diffuse = max(dot(n, l), 0.0);
-        let specular = pow(max(dot(n, h), 0.0), 32.0) * 0.15;
-        return base * (0.35 + 0.65 * diffuse) + vec3f(specular);
+        return base * (0.6 + 0.4 * diffuse);
     }
 `
 
@@ -25,7 +43,7 @@ const commonWgsl = /* wgsl */ `
  *
  * - 정점 입력: 위치(@location(0)) + 정점 법선(@location(1))
  * - vertexMain: 위치를 viewProj 로 변환하고 월드 좌표와 법선을 fragment 로 넘긴다.
- * - fragmentMain: 보간된 법선으로 픽셀마다 조명. 바탕색은 표고에 따라 녹색(낮음) → 베이지(높음)
+ * - fragmentMain: 보간된 법선으로 픽셀마다 조명. 바탕색은 절대 표고 색표(terrainColor)
  *
  * @returns `{ label, code }` 형태의 GPUShaderModuleDescriptor
  */
@@ -54,8 +72,7 @@ export const createSmoothTerrainShader = () => ({
         // 보간된 법선은 길이가 1이 아니므로 다시 정규화한다
         let n = normalize(input.normal);
         let v = normalize(u.eye - input.world);
-        let t = clamp((input.world.z - u.zRange.x) / (u.zRange.y - u.zRange.x), 0.0, 1.0);
-        let base = mix(vec3f(0.36, 0.52, 0.36), vec3f(0.86, 0.80, 0.66), t);
+        let base = terrainColor(input.world.z);
         return vec4f(shade(base, n, v), 1);
     }
     `,
@@ -67,7 +84,8 @@ export const createSmoothTerrainShader = () => ({
  * - 정점 입력: 위치(@location(0))만. 법선 버퍼가 없으므로 좌표가 같은 정점을 마음껏 공유할 수 있다.
  * - fragmentMain: 화면 미분(dpdx·dpdy)으로 그 픽셀이 속한 면의 법선을 구한다. 판·벽이 모두 평면이라 정확하다.
  *   미분으로 구한 법선은 앞뒤 부호가 정해지지 않으므로 카메라를 향하게 뒤집는다(양면 조명).
- *   바탕색은 모형 보드 같은 회백색 단색이고, 수직면(단)은 25% 어둡게 해서 어느 방향에서든 판과 구분되게 한다.
+ *   바탕색은 절대 표고 색표(terrainColor. 판은 층 높이라 판마다 한 색)이고, 수직면(단)은 25% 어둡게 해서 어느 방향에서든
+ *   판과 구분되게 한다.
  *
  * @returns `{ label, code }` 형태의 GPUShaderModuleDescriptor
  */
@@ -95,7 +113,7 @@ export const createSteppedTerrainShader = () => ({
         let faceNormal = normalize(cross(dpdx(input.world), dpdy(input.world)));
         let n = select(-faceNormal, faceNormal, dot(faceNormal, v) >= 0.0);
         let riserShade = 1.0 - 0.25 * (1.0 - abs(n.z));
-        let base = vec3f(0.88, 0.86, 0.80) * riserShade;
+        let base = terrainColor(input.world.z) * riserShade;
         return vec4f(shade(base, n, v), 1);
     }
     `,

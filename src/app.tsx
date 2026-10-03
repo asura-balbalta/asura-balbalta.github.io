@@ -3,7 +3,8 @@ import { Map } from "ol"
 import { Extent } from "ol/extent"
 
 import { firebaseApp } from "./fb"
-import { initOlMap } from "./olmap"
+import { initOlMap, setBaseLayer } from "./olmap"
+import { TERRAIN_THEMES, Theme } from "./terrainTheme"
 import { LoadPhase, TinMesh } from "./terrainData"
 import { loadTerrainInWorker } from "./terrainLoadClient"
 import { TerrainSource } from "./terrainLoad.worker"
@@ -12,6 +13,8 @@ import { TerrainMode } from "./webgpu/terrainRenderer"
 
 /** 처음 보여 줄 지형 표현 방식. "tin": 삼각형 메쉬 그대로, "stepped": 등고선 모형처럼 계단형. 화면의 버튼으로 바꿀 수 있다 */
 const INITIAL_TERRAIN_MODE: TerrainMode = "stepped"
+/** 처음 색 테마(지도 타일 + 3D). 화면의 버튼으로 바꿀 수 있다 */
+const INITIAL_THEME: Theme = "dark"
 /** 계단형일 때 층 간격(m). 0.1 ~ 5 정도로 조정 */
 const STEP_INTERVAL = 1
 /** 지형 데이터 출처. "ttp": 점·등고선 조각을 받아 프론트가 삼각분할(기본), "ttm": v1 도엽별 메쉬(비교용) */
@@ -56,11 +59,17 @@ const miniMapStyle: CSSProperties = {
     boxShadow: "0 4px 16px rgba(0, 0, 0, 0.5)",
 }
 
-const busyBadgeStyle: CSSProperties = {
+/** 왼쪽 위에 가로로 놓이는 배지·버튼 줄 */
+const topLeftBarStyle: CSSProperties = {
     position: "fixed",
     top: 16,
     left: 16,
     zIndex: 20,
+    display: "flex",
+    gap: 8,
+}
+
+const busyBadgeStyle: CSSProperties = {
     padding: "8px 12px",
     borderRadius: 6,
     background: "rgba(0, 0, 0, 0.65)",
@@ -68,8 +77,8 @@ const busyBadgeStyle: CSSProperties = {
     font: "14px sans-serif",
 }
 
-/** 지형 생성이 끝난 뒤 배지 자리에 놓이는 표현 방식 전환 버튼 */
-const modeButtonStyle: CSSProperties = {
+/** 배지와 같은 모양의 버튼(표현 방식·테마 전환) */
+const barButtonStyle: CSSProperties = {
     ...busyBadgeStyle,
     border: "1px solid rgba(255, 255, 255, 0.35)",
     cursor: "pointer",
@@ -88,6 +97,8 @@ export default function App() {
     const [mesh, setMesh] = useState<TinMesh | null>(null)
     /** 현재 지형 표현 방식. 버튼으로 바꾸면 같은 mesh 를 다시 올린다 */
     const [mode, setMode] = useState<TerrainMode>(INITIAL_TERRAIN_MODE)
+    /** 색 테마. 지도 타일과 3D 색표·배경을 함께 바꾼다 */
+    const [theme, setTheme] = useState<Theme>(INITIAL_THEME)
     /** 3D 지형이 화면에 올라간 뒤 true. 이때부터 지도를 미니맵으로 옮긴다 */
     const [terrainReady, setTerrainReady] = useState(false)
     /** 배지에 보일 진행 문구. 단계가 없으면(모드 전환 직후 등) null 이고 기본 문구를 쓴다 */
@@ -130,8 +141,15 @@ export default function App() {
             (ev) =>
                 busyRef.current ||
                 ev.originalEvent.timeStamp < ignoreClicksBeforeRef.current,
+            TERRAIN_THEMES[INITIAL_THEME].mapLayer,
         ).then((map) => (mapRef.current = map))
     }, [])
+
+    useEffect(() => {
+        const map = mapRef.current
+        if (!map) return
+        setBaseLayer(map, TERRAIN_THEMES[theme].mapLayer)
+    }, [theme])
 
     useEffect(() => {
         const map = mapRef.current
@@ -171,21 +189,27 @@ export default function App() {
                     mesh={mesh}
                     mode={mode}
                     stepInterval={STEP_INTERVAL}
+                    theme={theme}
                     onDone={onTerrainDone}
                     onProgress={(ratio) => setStatus(`지형 생성 중… ${Math.floor(ratio * 100)}%`)}
                     onFirstChunk={() => setTerrainReady(true)}
                 />
             )}
             <div id="map" style={terrainReady ? miniMapStyle : fullMapStyle}></div>
-            {busy ? (
-                <div style={busyBadgeStyle}>{status ?? "지형 생성 중…"}</div>
-            ) : (
-                terrainReady && (
-                    <button style={modeButtonStyle} onClick={toggleMode}>
-                        {mode === "stepped" ? "TIN 으로 보기" : "계단형으로 보기"}
-                    </button>
-                )
-            )}
+            <div style={topLeftBarStyle}>
+                {busy ? (
+                    <div style={busyBadgeStyle}>{status ?? "지형 생성 중…"}</div>
+                ) : (
+                    terrainReady && (
+                        <button style={barButtonStyle} onClick={toggleMode}>
+                            {mode === "stepped" ? "TIN 으로 보기" : "계단형으로 보기"}
+                        </button>
+                    )
+                )}
+                <button style={barButtonStyle} onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}>
+                    {theme === "dark" ? "라이트 테마" : "다크 테마"}
+                </button>
+            </div>
         </>
     )
 }

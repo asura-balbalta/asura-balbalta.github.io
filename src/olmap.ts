@@ -17,22 +17,40 @@ import { squareToolClickEventHandler, resetSquareTool } from "./squareTool"
 import { getTilesInBbox } from "./terrainData"
 import { drawTileOutlines } from "./tileOverlay"
 
+/** 바탕 지도 타일 레이어 이름. 갤러리: https://docs.stadiamaps.com/themes/ */
+export type BaseLayerName = "alidade_smooth" | "alidade_smooth_dark"
+
+/** 바탕 지도 타일 소스 */
+const baseSource = (layer: BaseLayerName) =>
+    new StadiaMaps({
+        layer,
+        retina: true, // Set to false for stamen_watercolor
+    })
+
+/**
+ * 바탕 지도 타일을 바꾼다(테마 전환). 레이어 목록의 첫 TileLayer 가 바탕 지도라는 전제
+ *
+ * @param map initOlMap 이 만든 지도
+ * @param layer 레이어 이름
+ */
+export const setBaseLayer = (map: Map, layer: BaseLayerName) => {
+    const base = map.getLayers().item(0)
+    if (!(base instanceof TileLayer)) throw new Error("첫 레이어가 바탕 타일 레이어가 아님")
+    base.setSource(baseSource(layer))
+}
+
 export const initOlMap = async (
     onSquareConfirmed: (bbox: Extent) => void,
     /** true 를 돌려주면 그 클릭은 사각형 도구에 넘기지 않는다 (지형 생성 중 잠금) */
     shouldIgnoreClick: (ev: MapBrowserEvent) => boolean = () => false,
+    /** 처음 바탕 지도 레이어 */
+    baseLayer: BaseLayerName = "alidade_smooth",
 ) => {
     let center = [14136104.293764262, 4514380.225694263] // 위치정보 허용 안할 경우 기본 좌표 (녹사평역 인근)
     const map = new Map({
         target: "map",
         layers: [
-            new TileLayer({
-                source: new StadiaMaps({
-                    // See our gallery for more styles: https://docs.stadiamaps.com/themes/
-                    layer: "alidade_smooth_dark",
-                    retina: true, // Set to false for stamen_watercolor
-                }),
-            }),
+            new TileLayer({ source: baseSource(baseLayer) }),
 
             // osm
             // new TileLayer({
