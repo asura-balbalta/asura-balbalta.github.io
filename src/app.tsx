@@ -4,6 +4,7 @@ import { Extent } from "ol/extent"
 
 import { firebaseApp } from "./fb"
 import { applyMapTheme, initOlMap } from "./olmap"
+import { SquareTool } from "./squareTool"
 import { TERRAIN_THEMES, Theme } from "./terrainTheme"
 import { LoadPhase, TinMesh } from "./terrainData"
 import { loadTerrainInWorker } from "./terrainLoadClient"
@@ -24,8 +25,6 @@ const TERRAIN_SOURCE: TerrainSource = "ttp"
 /** ttm 일 때, 합친 뒤 도엽 경계 없이 다시 삼각분할할지(terrainRetri). ttp 는 항상 삼각분할한다 */
 const RETRIANGULATE = true
 /** 지형 생성 완료 후 지도 클릭을 계속 무시하는 시간(ms). OpenLayers 가 클릭을 250ms 늦게 발생시키는 것보다 넉넉하게 */
-const CLICK_LOCK_AFTER_DONE_MS = 1000
-
 /** 로딩 단계를 배지 문구로 */
 const loadStatusText = (phase: LoadPhase, done: number, total: number) => {
     switch (phase) {
@@ -68,6 +67,7 @@ const topLeftBarStyle: CSSProperties = {
     left: 16,
     zIndex: 20,
     display: "flex",
+    flexWrap: "wrap",
     gap: 8,
 }
 
@@ -88,12 +88,13 @@ const barButtonStyle: CSSProperties = {
 
 export default function App() {
     const mapRef = useRef<Map | null>(null)
+    /** 사각형 선택 도구. "영역 선택" 버튼으로 모드를 켜고 끈다 */
+    const squareToolRef = useRef<SquareTool | null>(null)
+    /** 선택 모드가 켜져 있으면 true(버튼 문구·안내 배지용) */
+    const [selecting, setSelecting] = useState(false)
     /** 사각형 확정마다 1씩 오르는 번호. 늦게 돌아온 이전 선택의 결과를 버리는 데 쓴다 */
     const generationRef = useRef(0)
-    /** 다운로드~3D 업로드 완료 + 잠시(CLICK_LOCK_AFTER_DONE_MS) 동안 true. 그동안 지도 클릭을 무시한다 */
-    const busyRef = useRef(false)
-    /** 이 시각보다 먼저 발생한 클릭은 무시한다. 계산으로 멈춰 있던 동안 큐에 쌓인 클릭을 걸러내는 보조 장치 */
-    const ignoreClicksBeforeRef = useRef(0)
+    /** 다운로드~3D 업로드 완료까지 true. 그동안 배지를 보이고 버튼을 감춘다 */
     const [busy, setBusy] = useState(false)
     const [selection, setSelection] = useState<Extent | null>(null)
     const [mesh, setMesh] = useState<TinMesh | null>(null)
@@ -110,16 +111,11 @@ export default function App() {
     /** STL 생성 중이면 배지에 보일 문구, 아니면 null. 생성 중에는 내려받기 버튼 대신 배지를 보인다 */
     const [exporting, setExporting] = useState<string | null>(null)
 
-    const setBusyBoth = (value: boolean) => {
-        busyRef.current = value
-        setBusy(value)
-    }
-
     useEffect(() => {
         initOlMap(
             (bbox) => {
                 const generation = ++generationRef.current
-                setBusyBoth(true)
+                setBusy(true)
                 setStatus(null)
                 setSelection(bbox)
                 loadingRef.current?.cancel()
@@ -139,14 +135,15 @@ export default function App() {
                     })
                     .catch((err) => {
                         console.error(err)
-                        if (generation === generationRef.current) setBusyBoth(false)
+                        if (generation === generationRef.current) setBusy(false)
                     })
             },
-            (ev) =>
-                busyRef.current ||
-                ev.originalEvent.timeStamp < ignoreClicksBeforeRef.current,
             TERRAIN_THEMES[INITIAL_THEME],
-        ).then((map) => (mapRef.current = map))
+            setSelecting,
+        ).then(({ map, squareTool }) => {
+            mapRef.current = map
+            squareToolRef.current = squareTool
+        })
     }, [])
 
     useEffect(() => {
@@ -165,9 +162,9 @@ export default function App() {
         }
     }, [terrainReady, selection])
 
-    /** 표현 방식을 바꾼다. 다시 올리는 동안 잠그고, 끝나면 onTerrainDone 이 푼다 */
+    /** 표현 방식을 바꾼다. 다시 올리는 동안 busy 로 두고, 끝나면 onTerrainDone 이 푼다 */
     const toggleMode = () => {
-        setBusyBoth(true)
+        setBusy(true)
         setStatus(null)
         setMode((m) => (m === "stepped" ? "tin" : "stepped"))
     }
@@ -201,18 +198,13 @@ export default function App() {
             .finally(() => setExporting(null))
     }
 
+    // 예전에는 계산으로 멈춘 동안 큐에 쌓인 지도 클릭이 새 선택을 만들지 않도록 완료 뒤 잠시 클릭을 걸렀다.
+    // 지금은 선택이 "영역 선택" 모드에서 끌기로만 만들어지므로 그런 클릭은 아무 일도 하지 않아 잠금이 필요 없다
     const onTerrainDone = (ok: boolean) => {
-        ignoreClicksBeforeRef.current = performance.now()
         setBusy(false)
         setStatus(null)
         // stepped 모드는 첫 조각에서 이미 전환됐고(onFirstChunk), tin 모드는 여기서 전환한다
         if (ok) setTerrainReady(true)
-        // 계산으로 멈춰 있던 동안 큐에 쌓인 클릭은 멈춤이 풀린 직후(타이머보다 먼저) 처리되므로,
-        // 잠금을 바로 풀지 않고 잠시 유지해서 그 클릭들이 걸러지게 한다.
-        // (이벤트 timeStamp 로 거르는 방법은 브라우저마다 달라 Chrome 에서 통하지 않았다)
-        setTimeout(() => {
-            busyRef.current = false
-        }, CLICK_LOCK_AFTER_DONE_MS)
     }
 
     return (
@@ -233,18 +225,24 @@ export default function App() {
                 {busy ? (
                     <div style={busyBadgeStyle}>{status ?? "지형 생성 중…"}</div>
                 ) : (
-                    terrainReady && (
-                        <>
-                            <button style={barButtonStyle} onClick={toggleMode}>
-                                {mode === "stepped" ? "TIN 으로 보기" : "계단형으로 보기"}
-                            </button>
-                            {!exporting && (
-                                <button style={barButtonStyle} onClick={exportStl}>
-                                    STL 내려받기
+                    <>
+                        <button style={barButtonStyle} onClick={() => squareToolRef.current?.setActive(!selecting)}>
+                            {selecting ? "선택 취소" : "영역 선택"}
+                        </button>
+                        {selecting && <div style={busyBadgeStyle}>지도를 끌어 사각형을 그리세요</div>}
+                        {terrainReady && (
+                            <>
+                                <button style={barButtonStyle} onClick={toggleMode}>
+                                    {mode === "stepped" ? "TIN 으로 보기" : "계단형으로 보기"}
                                 </button>
-                            )}
-                        </>
-                    )
+                                {!exporting && (
+                                    <button style={barButtonStyle} onClick={exportStl}>
+                                        STL 내려받기
+                                    </button>
+                                )}
+                            </>
+                        )}
+                    </>
                 )}
                 {exporting && <div style={busyBadgeStyle}>{exporting}</div>}
                 <button style={barButtonStyle} onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}>

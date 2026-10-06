@@ -14,7 +14,7 @@ import { MapBrowserEvent, MapEvent } from "ol"
 import { Extent } from "ol/extent"
 
 import { selectionStyle, setMapOverlay, tileOutlineStyle } from "./mapOverlay"
-import { squareToolClickEventHandler, resetSquareTool, SQUARE_RANGE_LAYER_NAME } from "./squareTool"
+import { installSquareTool, SQUARE_RANGE_LAYER_NAME, SquareTool } from "./squareTool"
 import { getTtpSheetsInBbox } from "./terrainIndex"
 import { TerrainTheme } from "./terrainTheme"
 import { drawTileOutlines, TILE_LAYER_NAME } from "./tileOverlay"
@@ -49,13 +49,19 @@ export const applyMapTheme = (map: Map, theme: TerrainTheme) => {
     }
 }
 
+/**
+ * 지도를 만들고 사각형 선택 도구를 단다.
+ *
+ * @param onSquareConfirmed 사각형이 확정됐을 때 (EPSG:3857 bbox)
+ * @param theme 처음 테마(바탕 지도·오버레이 색)
+ * @param onSelectingChange 선택 모드가 켜지거나 꺼질 때
+ * @returns 지도와 선택 도구(모드 켜고 끄기)
+ */
 export const initOlMap = async (
     onSquareConfirmed: (bbox: Extent) => void,
-    /** true 를 돌려주면 그 클릭은 사각형 도구에 넘기지 않는다 (지형 생성 중 잠금) */
-    shouldIgnoreClick: (ev: MapBrowserEvent) => boolean = () => false,
-    /** 처음 테마(바탕 지도·오버레이 색) */
     theme: TerrainTheme,
-) => {
+    onSelectingChange?: (active: boolean) => void,
+): Promise<{ map: Map; squareTool: SquareTool }> => {
     let center = [14136104.293764262, 4514380.225694263] // 위치정보 허용 안할 경우 기본 좌표 (녹사평역 인근)
     const map = new Map({
         target: "map",
@@ -98,16 +104,16 @@ export const initOlMap = async (
         // map.getView().setCenter([14136104.293764262, 4514380.225694263])
     }
 
-    map.on("click", async (ev) => {
-        if (shouldIgnoreClick(ev)) return
-        squareToolClickEventHandler(ev, map, (bbox) => {
+    const squareTool = installSquareTool(map, {
+        onConfirmed: (bbox) => {
             // 도엽 외곽선도 지형과 같은 정적 인덱스(R2)에서 찾아 개발 서버 없이 동작한다
             getTtpSheetsInBbox(bbox)
                 .then(({ tiles }) => drawTileOutlines(map, tiles))
                 .catch((err) => console.error(err))
             onSquareConfirmed(bbox)
-        })
+        },
+        onActiveChange: onSelectingChange,
     })
 
-    return map
+    return { map, squareTool }
 }
