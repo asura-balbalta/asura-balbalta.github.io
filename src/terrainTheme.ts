@@ -7,9 +7,23 @@ export type ElevationStop = { z: number; hex: string }
 /** 색표 단계 수. 셰이더의 uniform 배열 크기와 같아야 한다(shaders.ts, terrainRenderer.ts) */
 export const STOP_COUNT = 6
 
+/** 지도 위 오버레이(사각형 선택 박스·1K 도엽 외곽선) 색. 바탕 타일 톤에 맞춰 테마마다 다르다 */
+export type MapOverlayColors = {
+    /** 선택 박스 테두리 */
+    selectionStroke: string
+    /** 선택 박스 채움(반투명) */
+    selectionFill: string
+    /** 1K 도엽 외곽선 */
+    tileStroke: string
+    /** 1K 도엽 이름 글자 */
+    tileText: string
+}
+
 export type TerrainTheme = {
     /** StadiaMaps 레이어 이름 */
     mapLayer: "alidade_smooth" | "alidade_smooth_dark"
+    /** 지도 위 오버레이 색 */
+    mapOverlay: MapOverlayColors
     /** 3D 화면 배경색(0 ~ 1). 지형 가장자리가 또렷하도록 지형 색과 차이를 둔다 */
     background: { r: number; g: number; b: number }
     /** 표고 색표. 지도 타일의 톤에 맞춘 것. 같은 높이는 선택 범위와 무관하게 같은 색 */
@@ -29,6 +43,13 @@ export const hexToRgb = (hex: string) => {
 export const TERRAIN_THEMES: Record<Theme, TerrainTheme> = {
     light: {
         mapLayer: "alidade_smooth",
+        // 밝은 회백색 타일 위라 연한 색은 묻힌다. 선택 박스는 진한 하늘색, 도엽은 진한 주황
+        mapOverlay: {
+            selectionStroke: "#0369A1",
+            selectionFill: "rgba(3, 105, 161, 0.12)",
+            tileStroke: "#EA580C",
+            tileText: "#9A3412",
+        },
         background: hexToRgb("#5B6064"),
         stops: [
             { z: 3, hex: "#B3BDC1" }, // 수면
@@ -41,6 +62,13 @@ export const TERRAIN_THEMES: Record<Theme, TerrainTheme> = {
     },
     dark: {
         mapLayer: "alidade_smooth_dark",
+        // 어두운 타일 위라 연한 색이 잘 보인다
+        mapOverlay: {
+            selectionStroke: "#BAE6FD",
+            selectionFill: "rgba(186, 230, 253, 0.1)",
+            tileStroke: "#FB923C",
+            tileText: "#FDBA74",
+        },
         background: hexToRgb("#0B0C0E"),
         stops: [
             { z: 3, hex: "#15171A" }, // 수면

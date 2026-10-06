@@ -5,10 +5,12 @@ import { register } from "ol/proj/proj4"
 import VectorSource from "ol/source/Vector"
 import proj4 from "proj4"
 
+import { getMapOverlay, tileOutlineStyle } from "./mapOverlay"
 import { TileInfo } from "./terrainData"
 import { EPSG5179_DEF } from "./terrainIndex"
 
-const TILE_LAYER_NAME = "terrainTiles"
+/** 1K 도엽 외곽선 레이어 이름. applyMapTheme 이 이 이름으로 찾아 테마 색을 다시 입힌다 */
+export const TILE_LAYER_NAME = "terrainTiles"
 
 // 서버 데이터 좌표계 ESRI:102080 은 EPSG:5179 와 같은 정의. OpenLayers 의 transform 이 쓰도록 등록한다
 proj4.defs("EPSG:5179", EPSG5179_DEF)
@@ -27,13 +29,7 @@ export const drawTileOutlines = (map: Map, tiles: TileInfo[]) => {
 
     const layer = new VectorLayer({
         source: new VectorSource({ features }),
-        style: {
-            "stroke-color": "#FB923C",
-            "stroke-width": 1,
-            "text-value": ["get", "name"],
-            "text-fill-color": "#FDBA74",
-            "text-font": "12px sans-serif",
-        },
+        style: tileOutlineStyle(getMapOverlay(map)),
     })
     layer.set("name", TILE_LAYER_NAME)
     map.addLayer(layer)

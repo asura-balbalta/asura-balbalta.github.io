@@ -5,6 +5,7 @@ import VectorSource from "ol/source/Vector"
 import VectorLayer from "ol/layer/Vector"
 import { unByKey } from "ol/Observable"
 import { Extent } from "ol/extent"
+import { getMapOverlay, selectionStyle } from "./mapOverlay"
 
 const squareToolHelper: {
     clickCount: number
@@ -17,7 +18,8 @@ const squareToolHelper: {
     eventsKeys: [],
 }
 
-const SQUARE_RANGE_LAYER_NAME = "squareRangeBox"
+/** 선택 박스 레이어 이름. applyMapTheme 이 이 이름으로 찾아 테마 색을 다시 입힌다 */
+export const SQUARE_RANGE_LAYER_NAME = "squareRangeBox"
 
 export const resetSquareTool = (map: Map, parent?: Window) => {
     squareToolHelper.clickCount = 0
@@ -75,11 +77,7 @@ export const squareToolClickEventHandler = (
 
             const squareRangeLayer = new VectorLayer({
                 source: vectorSource,
-                style: {
-                    "fill-color": "rgba(186, 230, 253, 0.1)",
-                    "stroke-color": "#BAE6FD",
-                    "stroke-width": 1.5,
-                },
+                style: selectionStyle(getMapOverlay(map)),
             })
             squareRangeLayer.set("name", SQUARE_RANGE_LAYER_NAME)
 

@@ -1,0 +1,35 @@
+import type Map from "ol/Map"
+import type { FlatStyle } from "ol/style/flat"
+
+import { MapOverlayColors } from "./terrainTheme"
+
+/**
+ * 지도 위 오버레이(선택 박스·1K 외곽선)의 현재 테마 색.
+ * 색은 지도 객체에 넣어 두고(applyMapTheme), 레이어를 만드는 쪽이 그때의 색을 읽는다. 테마가 바뀌면 applyMapTheme 이
+ * 이미 그려진 레이어의 스타일도 바꾼다. squareTool·tileOverlay·olmap 이 서로 import 하지 않도록 여기에 모았다
+ */
+const MAP_OVERLAY_KEY = "mapOverlay"
+
+export const setMapOverlay = (map: Map, colors: MapOverlayColors) => map.set(MAP_OVERLAY_KEY, colors)
+
+export const getMapOverlay = (map: Map): MapOverlayColors => {
+    const colors = map.get(MAP_OVERLAY_KEY)
+    if (!colors) throw new Error("지도에 오버레이 색이 없음 (applyMapTheme 이 먼저 불려야 함)")
+    return colors
+}
+
+/** 사각형 선택 박스 스타일 */
+export const selectionStyle = (c: MapOverlayColors): FlatStyle => ({
+    "fill-color": c.selectionFill,
+    "stroke-color": c.selectionStroke,
+    "stroke-width": 1.5,
+})
+
+/** 1K 도엽 외곽선 + 이름 스타일 */
+export const tileOutlineStyle = (c: MapOverlayColors): FlatStyle => ({
+    "stroke-color": c.tileStroke,
+    "stroke-width": 1,
+    "text-value": ["get", "name"],
+    "text-fill-color": c.tileText,
+    "text-font": "12px sans-serif",
+})

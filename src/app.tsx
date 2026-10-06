@@ -3,7 +3,7 @@ import { Map } from "ol"
 import { Extent } from "ol/extent"
 
 import { firebaseApp } from "./fb"
-import { initOlMap, setBaseLayer } from "./olmap"
+import { applyMapTheme, initOlMap } from "./olmap"
 import { TERRAIN_THEMES, Theme } from "./terrainTheme"
 import { LoadPhase, TinMesh } from "./terrainData"
 import { loadTerrainInWorker } from "./terrainLoadClient"
@@ -145,14 +145,14 @@ export default function App() {
             (ev) =>
                 busyRef.current ||
                 ev.originalEvent.timeStamp < ignoreClicksBeforeRef.current,
-            TERRAIN_THEMES[INITIAL_THEME].mapLayer,
+            TERRAIN_THEMES[INITIAL_THEME],
         ).then((map) => (mapRef.current = map))
     }, [])
 
     useEffect(() => {
         const map = mapRef.current
         if (!map) return
-        setBaseLayer(map, TERRAIN_THEMES[theme].mapLayer)
+        applyMapTheme(map, TERRAIN_THEMES[theme])
     }, [theme])
 
     useEffect(() => {
