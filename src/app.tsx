@@ -7,14 +7,16 @@ import { initOlMap, setBaseLayer } from "./olmap"
 import { TERRAIN_THEMES, Theme } from "./terrainTheme"
 import { LoadPhase, TinMesh } from "./terrainData"
 import { loadTerrainInWorker } from "./terrainLoadClient"
+import { downloadBlob, exportStlInWorker, stlFileName } from "./terrainStlClient"
+import { STL_HEADER_BYTES, STL_TRIANGLE_BYTES } from "./terrainStl"
 import { TerrainSource } from "./terrainLoad.worker"
 import { TerrainViewCanvas } from "./components/TerrainViewCanvas"
 import { TerrainMode } from "./webgpu/terrainRenderer"
 
 /** 처음 보여 줄 지형 표현 방식. "tin": 삼각형 메쉬 그대로, "stepped": 등고선 모형처럼 계단형. 화면의 버튼으로 바꿀 수 있다 */
-const INITIAL_TERRAIN_MODE: TerrainMode = "stepped"
+const INITIAL_TERRAIN_MODE: TerrainMode = "tin"
 /** 처음 색 테마(지도 타일 + 3D). 화면의 버튼으로 바꿀 수 있다 */
-const INITIAL_THEME: Theme = "dark"
+const INITIAL_THEME: Theme = "light"
 /** 계단형일 때 층 간격(m). 0.1 ~ 5 정도로 조정 */
 const STEP_INTERVAL = 1
 /** 지형 데이터 출처. "ttp": 점·등고선 조각을 받아 프론트가 삼각분할(기본), "ttm": v1 도엽별 메쉬(비교용) */
@@ -105,6 +107,8 @@ export default function App() {
     const [status, setStatus] = useState<string | null>(null)
     /** 진행 중인 지형 로딩. 새 선택이 오면 취소한다 */
     const loadingRef = useRef<{ cancel: () => void } | null>(null)
+    /** STL 생성 중이면 배지에 보일 문구, 아니면 null. 생성 중에는 내려받기 버튼 대신 배지를 보인다 */
+    const [exporting, setExporting] = useState<string | null>(null)
 
     const setBusyBoth = (value: boolean) => {
         busyRef.current = value
@@ -168,6 +172,35 @@ export default function App() {
         setMode((m) => (m === "stepped" ? "tin" : "stepped"))
     }
 
+    /**
+     * 현재 지형을 STL 로 만들어 내려받는다. 현재 표현 방식(tin/stepped)대로 적는다.
+     * Worker 가 메쉬 사본으로 일하므로, 생성 중에 다른 지역을 골라도 먼저 시작한 내보내기는 그대로 끝난다
+     */
+    const exportStl = () => {
+        if (!mesh || exporting) return
+        setExporting("STL 생성 중…")
+        const started = performance.now()
+        const { promise } = exportStlInWorker(mesh, {
+            mode,
+            step: STEP_INTERVAL,
+            onProgress: (ratio) => setExporting(`STL 생성 중… ${Math.floor(ratio * 100)}%`),
+        })
+        promise
+            .then((blob) => {
+                const triangles = (blob.size - STL_HEADER_BYTES) / STL_TRIANGLE_BYTES
+                console.log(
+                    `STL 생성 (${mode}) ${(performance.now() - started).toFixed(0)}ms: ` +
+                        `삼각형 ${triangles.toLocaleString()}개, ${(blob.size / 1048576).toFixed(1)}MB`,
+                )
+                downloadBlob(blob, stlFileName(mode))
+            })
+            .catch((err) => {
+                console.error(err)
+                window.alert(`STL 생성에 실패했습니다: ${err.message}`)
+            })
+            .finally(() => setExporting(null))
+    }
+
     const onTerrainDone = (ok: boolean) => {
         ignoreClicksBeforeRef.current = performance.now()
         setBusy(false)
@@ -201,11 +234,19 @@ export default function App() {
                     <div style={busyBadgeStyle}>{status ?? "지형 생성 중…"}</div>
                 ) : (
                     terrainReady && (
-                        <button style={barButtonStyle} onClick={toggleMode}>
-                            {mode === "stepped" ? "TIN 으로 보기" : "계단형으로 보기"}
-                        </button>
+                        <>
+                            <button style={barButtonStyle} onClick={toggleMode}>
+                                {mode === "stepped" ? "TIN 으로 보기" : "계단형으로 보기"}
+                            </button>
+                            {!exporting && (
+                                <button style={barButtonStyle} onClick={exportStl}>
+                                    STL 내려받기
+                                </button>
+                            )}
+                        </>
                     )
                 )}
+                {exporting && <div style={busyBadgeStyle}>{exporting}</div>}
                 <button style={barButtonStyle} onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}>
                     {theme === "dark" ? "라이트 테마" : "다크 테마"}
                 </button>
