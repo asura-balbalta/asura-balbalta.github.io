@@ -4,10 +4,12 @@ import proj4 from "proj4"
 import { TileInfo } from "./terrainData"
 
 /**
- * terrain_tile_pslg(ttp) 운영 base URL(R2 공개 주소). 인덱스는 `{base}/index/v1/...`, 5K 파일은 `{base}/v1/{50K}/{5K}.ttp`.
- * 개발 서버가 같은 파일을 같은 경로로 서빙하므로 서버 데이터로 보려면 `${TERRAIN_API}/ttp` 로 바꾸면 된다(서버 readme 7.5).
+ * terrain_tile_pslg(ttp) 운영 base URL(R2 버킷 asrbbt-layers 의 커스텀 도메인, 운영·로컬 개발 공통 기본값).
+ * 인덱스는 `{base}/index/v1/...`, 5K 파일은 `{base}/v1/{50K}/{5K}.ttp`.
+ * 예비: r2.dev 공개 주소 `https://pub-afd24bde9df64c64be95d8ef8d8deae7.r2.dev/ttp`(같은 파일, 커스텀 도메인 문제일 때만).
+ * 개발 서버가 같은 파일을 같은 경로로 서빙하므로 서버 데이터로 보려면 `${TERRAIN_API}/ttp` 로 바꾸면 된다(서버 readme 7·7.5).
  */
-export const TTP_BASE = "https://pub-afd24bde9df64c64be95d8ef8d8deae7.r2.dev/ttp"
+export const TTP_BASE = "https://layers.asrbbt.world/ttp"
 
 /** 서버 데이터 좌표계 ESRI:102080 은 EPSG:5179 와 같은 정의(단위 m) */
 export const EPSG5179_DEF =

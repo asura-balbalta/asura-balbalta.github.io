@@ -111,13 +111,13 @@ const KEY_Y_SPAN = 2 ** 26
  *
  * @param tiles 선택 범위에 걸린 1K 들
  * @param commonOrigin 공통 원점(정수 m)
- * @param onProgress 합친 도엽 수 알림
+ * @param onProgress 단계별 진행률. "merge" 는 도엽 하나를 합칠 때마다(합친 수, 전체), 재삼각분할 직전에 "retriangulate"
  * @returns 삼각분할된 메쉬(원점 기준 m)
  */
 const mergeTtpTiles = (
     tiles: TtpTile[],
     commonOrigin: [number, number],
-    onProgress?: (done: number, total: number) => void,
+    onProgress?: LoadProgress,
 ): TinMesh => {
     const t0 = performance.now()
     /** 파일 원점 기준 mm → 공통 원점 기준 mm 로 옮기는 오프셋 */
@@ -183,7 +183,6 @@ const mergeTtpTiles = (
     const pieceEnds: { lineId: number; startSeq: number; nPts: number; first: number; last: number }[] = []
     let cornersUsed = 0
     for (const [tileIndex, tile] of tiles.entries()) {
-        onProgress?.(tileIndex, tiles.length)
         const [dx, dy] = shift(tile)
         const xy = tile.lineXY
         let c = 0
@@ -209,6 +208,8 @@ const mergeTtpTiles = (
         for (const pts of [tile.inserted, tile.alpt]) {
             for (let k = 0; k < pts.n; k++) vertexOf(pts.xy[3 * k] + dx, pts.xy[3 * k + 1] + dy, pts.z[3 * k + 2])
         }
+        // 처리가 끝난 뒤에 보고해야 마지막이 (전체, 전체)가 된다(앞에서 보고하면 전체−1 에서 멈춘 것처럼 보인다)
+        onProgress?.("merge", tileIndex + 1, tiles.length)
     }
 
     // 3) 같은 선의 조각 잇기
@@ -246,6 +247,7 @@ const mergeTtpTiles = (
         }
         return poly
     })
+    onProgress?.("retriangulate", 0, 1)
     return retriangulate(merged, tilePolygons, coords.subarray(0, 2 * n))
 }
 
@@ -286,5 +288,5 @@ export const loadTerrainTtp = async (
         `TTP: 5K 파일 ${files.length}개(gen_flags ${files[0]?.genFlags}), 1K ${selected.length}/${allTiles.length}개 사용 (조회 ${Math.round(t1 - t0)}ms, 받기 ${Math.round(t2 - t1)}ms)`,
     )
     onProgress?.("merge", 0, selected.length)
-    return mergeTtpTiles(selected, q.origin, (done, total) => onProgress?.("merge", done, total))
+    return mergeTtpTiles(selected, q.origin, onProgress)
 }
