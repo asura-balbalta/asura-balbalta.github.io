@@ -6,14 +6,12 @@ import VectorSource from "ol/source/Vector"
 import proj4 from "proj4"
 
 import { TileInfo } from "./terrainData"
+import { EPSG5179_DEF } from "./terrainIndex"
 
 const TILE_LAYER_NAME = "terrainTiles"
 
-// 서버 데이터 좌표계 ESRI:102080 은 EPSG:5179 와 같은 정의
-proj4.defs(
-    "EPSG:5179",
-    "+proj=tmerc +lat_0=38 +lon_0=127.5 +k=0.9996 +x_0=1000000 +y_0=2000000 +ellps=GRS80 +units=m +no_defs",
-)
+// 서버 데이터 좌표계 ESRI:102080 은 EPSG:5179 와 같은 정의. OpenLayers 의 transform 이 쓰도록 등록한다
+proj4.defs("EPSG:5179", EPSG5179_DEF)
 register(proj4)
 
 export const drawTileOutlines = (map: Map, tiles: TileInfo[]) => {

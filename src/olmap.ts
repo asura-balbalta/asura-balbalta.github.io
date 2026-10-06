@@ -14,7 +14,7 @@ import { MapBrowserEvent, MapEvent } from "ol"
 import { Extent } from "ol/extent"
 
 import { squareToolClickEventHandler, resetSquareTool } from "./squareTool"
-import { getTilesInBbox } from "./terrainData"
+import { getTtpSheetsInBbox } from "./terrainIndex"
 import { drawTileOutlines } from "./tileOverlay"
 
 /** 바탕 지도 타일 레이어 이름. 갤러리: https://docs.stadiamaps.com/themes/ */
@@ -90,7 +90,8 @@ export const initOlMap = async (
     map.on("click", async (ev) => {
         if (shouldIgnoreClick(ev)) return
         squareToolClickEventHandler(ev, map, (bbox) => {
-            getTilesInBbox(bbox)
+            // 도엽 외곽선도 지형과 같은 정적 인덱스(R2)에서 찾아 개발 서버 없이 동작한다
+            getTtpSheetsInBbox(bbox)
                 .then(({ tiles }) => drawTileOutlines(map, tiles))
                 .catch((err) => console.error(err))
             onSquareConfirmed(bbox)

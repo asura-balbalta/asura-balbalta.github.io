@@ -1,10 +1,8 @@
 import { Extent } from "ol/extent"
 
-import { fetchGunzip, getTtmSheetsInBbox, LoadProgress, TERRAIN_API, TinMesh } from "./terrainData"
+import { fetchGunzip, LoadProgress, TinMesh } from "./terrainData"
+import { getTtpSheetsInBbox, TTP_BASE } from "./terrainIndex"
 import { retriangulate } from "./terrainRetri"
-
-/** terrain_tile_pslg(ttp) base URL. 운영에서는 R2 공개 주소로 바꾼다 */
-export const TTP_BASE = `${TERRAIN_API}/ttp`
 
 /** 등고선 조각: 한 1K 안에 들어온 한 선(line)의 연속 순번 구간 */
 type TtpPiece = {
@@ -254,7 +252,7 @@ const mergeTtpTiles = (
 /**
  * 지도에서 고른 범위의 지형 메쉬를 ttp(terrain_tile_pslg) 파일로 만든다. loadTerrainTtm 의 ttp 판.
  *
- * 1. /ttm/sheets 로 범위에 걸친 1K 와 5K 파일(ttp_path) 조회
+ * 1. 정적 인덱스(R2, terrainIndex)로 범위에 걸친 1K 와 5K 파일(path) 조회
  * 2. 5K 파일들을 병렬로 받아 풀기
  * 3. 범위에 걸친 1K 만 골라 공통 원점으로 합치고 재삼각분할(mergeTtpTiles)
  *
@@ -269,13 +267,13 @@ export const loadTerrainTtp = async (
     const { onProgress } = options
     const t0 = performance.now()
     onProgress?.("sheets", 0, 1)
-    const q = await getTtmSheetsInBbox(bbox3857)
+    const q = await getTtpSheetsInBbox(bbox3857)
     const t1 = performance.now()
     let downloaded = 0
     onProgress?.("download", 0, q.sheets.length)
     const files = await Promise.all(
         q.sheets.map(async (s) => {
-            const file = parseTtp(await fetchGunzip(`${TTP_BASE}/${s.ttp_path}`))
+            const file = parseTtp(await fetchGunzip(`${TTP_BASE}/${s.path}`))
             onProgress?.("download", ++downloaded, q.sheets.length)
             return file
         }),

@@ -95,7 +95,7 @@ type TtmTile = {
 
 /**
  * 범위에 걸친 1K 도엽과, 그 1K 들이 들어 있는 5K 파일 경로를 조회한다.
- * 지금은 개발 서버의 /ttm/sheets 를 쓴다. 운영(R2)용 정적 인덱스가 정해지면 이 함수만 교체한다.
+ * 개발 서버의 /ttm/sheets 를 쓴다(ttm 경로 전용). ttp 경로는 운영 정적 인덱스(terrainIndex.getTtpSheetsInBbox)를 쓴다.
  *
  * @param bbox3857 지도에서 고른 범위 [minX, minY, maxX, maxY] (EPSG:3857)
  * @returns 공통 원점, 걸친 1K 목록, 5K 파일 목록
