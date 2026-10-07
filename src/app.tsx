@@ -233,7 +233,7 @@ export default function App() {
                         {terrainReady && (
                             <>
                                 <button style={barButtonStyle} onClick={toggleMode}>
-                                    {mode === "stepped" ? "TIN 으로 보기" : "계단형으로 보기"}
+                                    {mode === "stepped" ? "삼각 메쉬로 보기" : "계단형으로 보기"}
                                 </button>
                                 {!exporting && (
                                     <button style={barButtonStyle} onClick={exportStl}>
