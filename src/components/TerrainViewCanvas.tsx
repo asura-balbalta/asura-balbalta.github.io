@@ -99,7 +99,11 @@ export const TerrainViewCanvas = ({
     const cameraRef = useRef<OrbitCamera | null>(null)
     /** 직전 effect 가 올린 mesh. 같은 mesh 로 다시 돌면(mode 전환) 카메라를 유지한다 */
     const lastMeshRef = useRef<TinMesh | null>(null)
-    const dragRef = useRef<{ x: number; y: number } | null>(null)
+    /**
+     * 눌려 있는 포인터(마우스 버튼·손가락)의 pointerId → 마지막 위치. 하나면 끌어서 회전, 둘이면 두 점 거리 변화로 확대·축소.
+     * 브라우저가 제스처를 가져가며 pointercancel 을 보내면 거기서도 지워 상태가 남지 않게 한다
+     */
+    const pointersRef = useRef(new Map<number, { x: number; y: number }>())
 
     useEffect(() => {
         let cancelled = false
@@ -250,26 +254,46 @@ export const TerrainViewCanvas = ({
                 width: size.width,
                 height: size.height,
                 cursor: "grab",
+                // 터치를 브라우저의 스크롤·핀치 제스처로 넘기지 않는다. 없으면 세로 끌기에 주소 표시줄이 반응하며
+                // pointercancel 로 입력이 끊기고, 두 손가락 벌리기는 페이지 확대가 된다
+                touchAction: "none",
             }}
             onPointerDown={(e) => {
-                e.currentTarget.setPointerCapture(e.pointerId)
-                dragRef.current = { x: e.clientX, y: e.clientY }
+                pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY })
+                // 캔버스 밖으로 나가도 move/up 을 계속 받기 위해. 포인터가 이미 끝났으면(합성 이벤트, 즉시 취소) 예외가 나므로 무시
+                try {
+                    e.currentTarget.setPointerCapture(e.pointerId)
+                } catch {
+                    /* 캡처 없이도 캔버스 안에서는 동작한다 */
+                }
             }}
-            onPointerUp={() => (dragRef.current = null)}
+            onPointerUp={(e) => pointersRef.current.delete(e.pointerId)}
+            onPointerCancel={(e) => pointersRef.current.delete(e.pointerId)}
+            onPointerLeave={(e) => pointersRef.current.delete(e.pointerId)}
             onPointerMove={(e) => {
-                const drag = dragRef.current
-                if (!drag) return
-                const dx = e.clientX - drag.x
-                const dy = e.clientY - drag.y
-                dragRef.current = { x: e.clientX, y: e.clientY }
-                updateCamera((cam) => ({
-                    ...cam,
-                    azimuth: cam.azimuth - dx * 0.005,
-                    elevation: Math.min(
-                        Math.max(cam.elevation + dy * 0.005, 0.05),
-                        1.5,
-                    ),
-                }))
+                const pointers = pointersRef.current
+                const prev = pointers.get(e.pointerId)
+                if (!prev) return
+                const next = { x: e.clientX, y: e.clientY }
+                if (pointers.size === 1) {
+                    // 한 손가락(마우스): 끌어서 회전
+                    const dx = next.x - prev.x
+                    const dy = next.y - prev.y
+                    updateCamera((cam) => ({
+                        ...cam,
+                        azimuth: cam.azimuth - dx * 0.005,
+                        elevation: Math.min(Math.max(cam.elevation + dy * 0.005, 0.05), 1.5),
+                    }))
+                } else if (pointers.size === 2) {
+                    // 두 손가락: 두 점 사이 거리가 늘면 가까이(확대), 줄면 멀리(축소)
+                    const other = [...pointers].find(([id]) => id !== e.pointerId)![1]
+                    const before = Math.hypot(prev.x - other.x, prev.y - other.y)
+                    const after = Math.hypot(next.x - other.x, next.y - other.y)
+                    if (before > 0 && after > 0) {
+                        updateCamera((cam) => ({ ...cam, distance: (cam.distance * before) / after }))
+                    }
+                }
+                pointers.set(e.pointerId, next)
             }}
             onWheel={(e) => {
                 updateCamera((cam) => ({
