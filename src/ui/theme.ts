@@ -19,6 +19,16 @@ export const UI_FONT_FAMILY =
 export const uiCssVars = (theme: Theme): CSSProperties => {
     const vars: Record<string, string> = {}
     for (const [name, value] of Object.entries(TERRAIN_THEMES[theme].ui)) vars[`--ui-${name}`] = value
+    // 색이 아닌 재질 값(디자인 시스템 tokens.json 의 shadow·material 가족). 그림자는 Fluent shadow16·shadow8 값
+    const dark = theme === "dark"
+    vars["--ui-shadow-float"] = dark
+        ? "0 0 2px rgba(0,0,0,0.24), 0 8px 16px rgba(0,0,0,0.28)"
+        : "0 0 2px rgba(0,0,0,0.12), 0 8px 16px rgba(0,0,0,0.14)"
+    vars["--ui-shadow-menu"] = dark
+        ? "0 0 2px rgba(0,0,0,0.24), 0 4px 8px rgba(0,0,0,0.28)"
+        : "0 0 2px rgba(0,0,0,0.12), 0 4px 8px rgba(0,0,0,0.14)"
+    vars["--ui-glass-blur"] = "18px"
+    vars["--ui-glass-saturate"] = dark ? "1.4" : "1.6"
     return vars as CSSProperties
 }
 

@@ -1,0 +1,33 @@
+import { ArrowMaximizeRegular } from "@fluentui/react-icons"
+import React, { ReactNode } from "react"
+
+/**
+ * 지도(#map)를 감싸는 틀. 지도 화면에서는 전체 화면, 3D 화면에서는 오른쪽 위 280×190 미니맵이 된다.
+ *
+ * OpenLayers 는 처음 받은 #map 요소에 붙어 있으므로 요소가 다시 만들어지면 안 된다. 그래서 두 모드를 다른 컴포넌트로
+ * 갈아 끼우지 않고, 같은 자리의 이 틀이 클래스만 바꾼다(children 인 #map 은 React 트리에서 같은 위치를 유지).
+ * 미니맵일 때는 왼쪽 아래에 "지도로" 버튼이 붙는다. 모양은 ui.css(.ui-map-full, .ui-minimap).
+ *
+ * @param props.mode "full" 전체 화면 지도, "mini" 미니맵
+ * @param props.onExpand 미니맵의 "지도로" 버튼
+ * @param props.children #map 요소(className "ui-map")
+ */
+export const MapFrame = ({
+    mode,
+    onExpand,
+    children,
+}: {
+    mode: "full" | "mini"
+    onExpand?: () => void
+    children: ReactNode
+}) => (
+    <div className={mode === "mini" ? "ui-minimap" : "ui-map-full"}>
+        {children}
+        {mode === "mini" && (
+            <button type="button" className="ui-minimap-button ui-glass" onClick={onExpand} aria-label="지도 화면으로 이동">
+                <ArrowMaximizeRegular fontSize={12} />
+                지도로
+            </button>
+        )}
+    </div>
+)

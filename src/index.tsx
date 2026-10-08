@@ -4,6 +4,8 @@ import { createGlobalStyle } from "styled-components"
 import reset from "styled-reset"
 
 import App from "./app.tsx"
+// 그릇(레일·패널·상태 표시줄 등)의 재질·배치. esbuild 가 dist/index.css 로 내고 dist/index.html 이 링크한다
+import "./ui/ui.css"
 
 const rootElement =
     document.getElementById("root") || document.createElement("div")
