@@ -4,9 +4,9 @@
     "description": "",
     "main": "index.js",
     "scripts": {
-        "build": "esbuild --bundle src/index.tsx src/terrainSteps.worker.ts src/terrainLoad.worker.ts src/terrainStl.worker.ts src/buildings.worker.ts src/terrainSkp.worker.ts --outdir=dist --minify",
+        "build": "esbuild --bundle src/index.tsx src/*.worker.ts src/export/*.worker.ts --outdir=dist --minify",
         "deploy": "firebase deploy",
-        "dev": "esbuild --bundle src/index.tsx src/terrainSteps.worker.ts src/terrainLoad.worker.ts src/terrainStl.worker.ts src/buildings.worker.ts src/terrainSkp.worker.ts --outdir=dist --sourcemap --watch",
+        "dev": "esbuild --bundle src/index.tsx src/*.worker.ts src/export/*.worker.ts --outdir=dist --sourcemap --watch",
         "test": "echo \"Error: no test specified\" && exit 1",
         "typecheck": "tsc --noEmit"
     },

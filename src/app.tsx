@@ -11,9 +11,7 @@ import { SquareTool } from "./squareTool"
 import { TERRAIN_THEMES, Theme } from "./terrainTheme"
 import { LoadPhase, TinMesh } from "./terrainData"
 import { loadTerrainInWorker } from "./terrainLoadClient"
-import { downloadBlob, exportFileName, exportStlInWorker } from "./terrainStlClient"
-import { exportSkpInWorker } from "./terrainSkpClient"
-import { STL_HEADER_BYTES, STL_TRIANGLE_BYTES } from "./terrainStl"
+import { ExportButtons } from "./export/ExportButtons"
 import { TerrainSource } from "./terrainLoad.worker"
 import { TerrainViewCanvas } from "./components/TerrainViewCanvas"
 import { TerrainMode } from "./webgpu/terrainRenderer"
@@ -148,8 +146,6 @@ export default function App() {
     const [status, setStatus] = useState<string | null>(null)
     /** 진행 중인 지형 로딩. 새 선택이 오면 취소한다 */
     const loadingRef = useRef<{ cancel: () => void } | null>(null)
-    /** STL·SKP 생성 중이면 배지에 보일 문구, 아니면 null. 생성 중에는 내려받기 버튼 대신 배지를 보인다 */
-    const [exporting, setExporting] = useState<string | null>(null)
 
     useEffect(() => {
         initOlMap(
@@ -242,48 +238,6 @@ export default function App() {
         setMode((m) => (m === "stepped" ? "tin" : "stepped"))
     }
 
-    /**
-     * "내보내기" 에 체크된 레이어를 STL 또는 SKP 파일 하나로 만들어 내려받는다. 지형은 현재 표현 방식(tin/stepped)대로 적는다.
-     * Worker 가 메쉬 사본으로 일하므로, 생성 중에 다른 지역을 골라도 먼저 시작한 내보내기는 그대로 끝난다
-     */
-    const runExport = (kind: "stl" | "skp") => {
-        if (!mesh || exporting) return
-        const label = kind.toUpperCase()
-        const layerMeshes = {
-            terrain: layers.terrain.export ? mesh : null,
-            buildings: layers.buildings.export ? buildings : null,
-        }
-        const included = LAYER_DEFS.map((d) => d.id).filter((id) => layerMeshes[id])
-        if (included.length === 0) {
-            window.alert(`${label} 에 넣을 레이어를 하나 이상 체크하세요`)
-            return
-        }
-        setExporting(`${label} 생성 중…`)
-        const started = performance.now()
-        const options = {
-            mode,
-            step: STEP_INTERVAL,
-            onProgress: (ratio: number) => setExporting(`${label} 생성 중… ${Math.floor(ratio * 100)}%`),
-        }
-        const { promise } = kind === "stl" ? exportStlInWorker(layerMeshes, options) : exportSkpInWorker(layerMeshes, options)
-        promise
-            .then((blob) => {
-                // STL 은 크기에서 삼각형 수를 역산할 수 있고, SKP 는 그럴 수 없다
-                const triangles =
-                    kind === "stl" ? `삼각형 ${((blob.size - STL_HEADER_BYTES) / STL_TRIANGLE_BYTES).toLocaleString()}개, ` : ""
-                console.log(
-                    `${label} 생성 (${included.join("+")}, 지형 ${mode}) ${(performance.now() - started).toFixed(0)}ms: ` +
-                        `${triangles}${(blob.size / 1048576).toFixed(1)}MB`,
-                )
-                downloadBlob(blob, exportFileName(mode, included, kind))
-            })
-            .catch((err) => {
-                console.error(err)
-                window.alert(`${label} 생성에 실패했습니다: ${err.message}`)
-            })
-            .finally(() => setExporting(null))
-    }
-
     // 예전에는 계산으로 멈춘 동안 큐에 쌓인 지도 클릭이 새 선택을 만들지 않도록 완료 뒤 잠시 클릭을 걸렀다.
     // 지금은 선택이 "영역 선택" 모드에서 끌기로만 만들어지므로 그런 클릭은 아무 일도 하지 않아 잠금이 필요 없다
     const onTerrainDone = (ok: boolean) => {
@@ -319,25 +273,22 @@ export default function App() {
                         </button>
                         {selecting && <div style={busyBadgeStyle}>지도를 끌어 사각형을 그리세요</div>}
                         {terrainReady && (
-                            <>
-                                <button style={barButtonStyle} onClick={toggleMode}>
-                                    {mode === "stepped" ? "삼각 메쉬로 보기" : "계단형으로 보기"}
-                                </button>
-                                {!exporting && (
-                                    <>
-                                        <button style={barButtonStyle} onClick={() => runExport("stl")}>
-                                            STL 내려받기
-                                        </button>
-                                        <button style={barButtonStyle} onClick={() => runExport("skp")}>
-                                            SKP 내려받기
-                                        </button>
-                                    </>
-                                )}
-                            </>
+                            <button style={barButtonStyle} onClick={toggleMode}>
+                                {mode === "stepped" ? "삼각 메쉬로 보기" : "계단형으로 보기"}
+                            </button>
                         )}
                     </>
                 )}
-                {exporting && <div style={busyBadgeStyle}>{exporting}</div>}
+                {/* 내보내기 버튼·배지. 형식 추가는 src/export 안에서만 */}
+                <ExportButtons
+                    meshes={{ terrain: mesh, buildings }}
+                    layers={layers}
+                    mode={mode}
+                    step={STEP_INTERVAL}
+                    active={terrainReady && !busy}
+                    buttonStyle={barButtonStyle}
+                    badgeStyle={busyBadgeStyle}
+                />
                 {buildingsStatus && <div style={busyBadgeStyle}>{buildingsStatus}</div>}
                 <button style={barButtonStyle} onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}>
                     {theme === "dark" ? "라이트 테마" : "다크 테마"}
