@@ -1,14 +1,14 @@
 import type { Extent } from "ol/extent"
 
-import { fetchGunzip, TERRAIN_API } from "./terrainData"
+import { fetchGunzip } from "./terrainData"
 import { getTtpSheetsInBbox } from "./terrainIndex"
 
 /**
  * 건물 레이어(buildings, BFP1) base URL. 경로 규칙은 ttp 와 같고 base 만 다르다(서버 readme 8절, 전달 문서 2026-10-08).
- * 지금은 개발 서버. R2 업로드가 끝나면 운영 `https://layers.asrbbt.world/buildings`
- * (예비 `https://pub-afd24bde9df64c64be95d8ef8d8deae7.r2.dev/buildings`) 로 바꾼다
+ * 운영(R2 커스텀 도메인)이 기본값. 개발 서버 데이터로 보려면 `${TERRAIN_API}/buildings`,
+ * 예비는 `https://pub-afd24bde9df64c64be95d8ef8d8deae7.r2.dev/buildings`
  */
-export const BUILDINGS_BASE = `${TERRAIN_API}/buildings`
+export const BUILDINGS_BASE = "https://layers.asrbbt.world/buildings"
 
 /** flags 비트(전달 문서 5절) */
 export const BUILDING_FLAG = {
