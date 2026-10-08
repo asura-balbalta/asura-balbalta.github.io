@@ -2,15 +2,17 @@
  * GLB(바이너리 glTF 2.0) 인코더. 외부 라이브러리 없이 JSON 머리말과 BIN 버퍼를 규격대로 붙인다.
  *
  * 입력 좌표는 TinMesh 와 같은 Z-up 미터(x 동, y 북, z 높이)이고, glTF 는 Y-up 이므로 (x, z, -y) 로 바꿔 넣는다.
- * 노드 하나가 레이어 하나이며, 노드의 메쉬는 조각(primitive) 여러 개를 가질 수 있다(계단형 변환 조각 등).
+ * 파일 전체가 노드 하나·메쉬 하나이고, 메쉬가 조각(primitive) 여러 개를 가진다. 레이어는 조각의 재질로 구분한다.
+ * Blender 등은 이것을 오브젝트 하나 + 재질 슬롯 여러 개로 들여오므로 지형·건물이 한 덩어리로 다뤄진다
+ * (처음에는 레이어마다 노드를 두었는데, 뷰어에서 별개 오브젝트로 갈라져 보여 합쳤다).
  * 법선이 없는 조각은 뷰어가 규격대로 면 법선을 계산한다(평면 음영).
  */
 
-/** 한 조각: Z-up 좌표. normals 가 있으면 정점 법선(부드러운 음영), 없으면 평면 음영 */
-export type GlbPrimitive = { positions: Float32Array; indices: Uint32Array; normals?: Float32Array }
+/** 재질 하나: 이름(레이어 id), 색(0 ~ 1) */
+export type GlbMaterial = { name: string; color: [number, number, number] }
 
-/** 노드(레이어) 하나: 이름, 색(0 ~ 1), 조각들 */
-export type GlbNode = { name: string; color: [number, number, number]; primitives: GlbPrimitive[] }
+/** 한 조각: Z-up 좌표와 재질 번호. normals 가 있으면 정점 법선(부드러운 음영), 없으면 평면 음영 */
+export type GlbPrimitive = { positions: Float32Array; indices: Uint32Array; normals?: Float32Array; material: number }
 
 const GLB_MAGIC = 0x46546c67 // "glTF"
 const CHUNK_JSON = 0x4e4f534a
@@ -60,12 +62,19 @@ const toYUp = (src: Float32Array) => {
 }
 
 /**
- * 노드들을 GLB 파일 바이트로 만든다.
+ * 조각들을 노드 하나·메쉬 하나의 GLB 파일 바이트로 만든다.
  *
- * @param nodes 레이어별 노드. 재질은 노드마다 하나(단색, 양면)
+ * @param name 노드·메쉬 이름
+ * @param materials 재질 목록(단색, 양면). 조각의 material 이 이 배열의 번호다
+ * @param primitives 조각들
  * @param extras asset.extras 에 넣을 메타데이터(원점·좌표계 등). 뷰어는 무시하고 파일에만 남는다
  */
-export const encodeGlb = (nodes: GlbNode[], extras: Record<string, unknown> = {}): ArrayBuffer => {
+export const encodeGlb = (
+    name: string,
+    materials: GlbMaterial[],
+    primitives: GlbPrimitive[],
+    extras: Record<string, unknown> = {},
+): ArrayBuffer => {
     const bufferViews: object[] = []
     const accessors: object[] = []
     const parts: ArrayBufferView[] = []
@@ -100,26 +109,26 @@ export const encodeGlb = (nodes: GlbNode[], extras: Record<string, unknown> = {}
         return accessors.length - 1
     }
 
-    const materials = nodes.map(({ name, color }) => ({
+    const materialsJson = materials.map(({ name, color }) => ({
         name,
         doubleSided: true,
         pbrMetallicRoughness: { baseColorFactor: [...color, 1], metallicFactor: 0, roughnessFactor: 1 },
     }))
-    const meshes = nodes.map(({ name, primitives }, m) => ({
+    const mesh = {
         name,
         primitives: primitives.map((p) => {
             const attributes: Record<string, number> = { POSITION: addVec3(toYUp(p.positions), true) }
             if (p.normals) attributes.NORMAL = addVec3(toYUp(p.normals), false)
-            return { attributes, indices: addIndices(p.indices), material: m, mode: 4 }
+            return { attributes, indices: addIndices(p.indices), material: p.material, mode: 4 }
         }),
-    }))
+    }
     const json = {
         asset: { version: "2.0", generator: "asrbbt", extras },
         scene: 0,
-        scenes: [{ nodes: nodes.map((_, i) => i) }],
-        nodes: nodes.map(({ name }, i) => ({ name, mesh: i })),
-        meshes,
-        materials,
+        scenes: [{ nodes: [0] }],
+        nodes: [{ name, mesh: 0 }],
+        meshes: [mesh],
+        materials: materialsJson,
         accessors,
         bufferViews,
         buffers: [{ byteLength: binLength }],
