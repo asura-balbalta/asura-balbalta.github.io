@@ -4,6 +4,7 @@ import { LAYER_DEFS, LayerId, LayerStates } from "../layers"
 import type { TerrainMode } from "../webgpu/terrainRenderer"
 import { export3dmInWorker } from "./3dmClient"
 import { downloadBlob, exportFileName, ExportKind } from "./download"
+import { exportGlbInWorker } from "./glbClient"
 import { exportSkpInWorker } from "./skpClient"
 import { STL_HEADER_BYTES, STL_TRIANGLE_BYTES } from "./stl"
 import { ExportOptions, exportStlInWorker, LayerMeshes } from "./stlClient"
@@ -13,6 +14,7 @@ const EXPORTERS: Record<ExportKind, (layers: LayerMeshes, options: ExportOptions
     stl: exportStlInWorker,
     skp: exportSkpInWorker,
     "3dm": export3dmInWorker,
+    glb: exportGlbInWorker,
 }
 
 /** 화면에 보일 형식 목록과 버튼 문구 */
@@ -20,6 +22,7 @@ const EXPORT_KINDS: { kind: ExportKind; label: string }[] = [
     { kind: "stl", label: "STL 내려받기" },
     { kind: "skp", label: "SKP 내려받기" },
     { kind: "3dm", label: "3DM 내려받기" },
+    { kind: "glb", label: "GLB 내려받기" },
 ]
 
 /**
