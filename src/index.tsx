@@ -20,6 +20,9 @@ const GlobalStyle = createGlobalStyle`
 
   body {
     line-height: normal;
+    /* UI 글꼴은 운영체제 글꼴(ui/theme.ts UI_FONT_FAMILY 와 같은 스택). 숫자(퍼센트·n/N·km)는 폭을 고정해 흔들리지 않게 */
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans KR', sans-serif;
+    font-variant-numeric: tabular-nums;
   }
 
   /* OpenLayers 기본 CSS 를 넣지 않았으므로 저작권 표시(Attribution 컨트롤)만 직접 꾸민다 */

@@ -1,4 +1,5 @@
 import React, { CSSProperties, useEffect, useRef, useState } from "react"
+import { FluentProvider } from "@fluentui/react-components"
 import { Map } from "ol"
 import { Extent } from "ol/extent"
 
@@ -15,6 +16,7 @@ import { loadTerrainInWorker } from "./terrainLoadClient"
 import { ExportButtons } from "./export/ExportButtons"
 import { TerrainSource } from "./terrainLoad.worker"
 import { TerrainViewCanvas } from "./components/TerrainViewCanvas"
+import { fluentTheme, uiCssVars } from "./ui/theme"
 import { TerrainMode } from "./webgpu/terrainRenderer"
 
 /** 처음 보여 줄 지형 표현 방식. "tin": 삼각형 메쉬 그대로, "stepped": 등고선 모형처럼 계단형. 화면의 버튼으로 바꿀 수 있다 */
@@ -255,7 +257,9 @@ export default function App() {
     }
 
     return (
-        <>
+        // Fluent 컨트롤은 테마 객체로, 직접 그리는 그릇은 CSS 변수(--ui-*)로 같은 색을 받는다(ui/theme.ts).
+        // Provider 가 그리는 div 가 지도·캔버스를 가리지 않도록 배경은 투명하게 둔다
+        <FluentProvider theme={fluentTheme(theme)} style={{ ...uiCssVars(theme), background: "transparent" }}>
             {mesh && (
                 <TerrainViewCanvas
                     mesh={mesh}
@@ -326,6 +330,6 @@ export default function App() {
                     ))}
                 </div>
             )}
-        </>
+        </FluentProvider>
     )
 }
