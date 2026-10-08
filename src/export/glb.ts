@@ -5,7 +5,8 @@
  * 파일 전체가 노드 하나·메쉬 하나이고, 메쉬가 조각(primitive) 여러 개를 가진다. 레이어는 조각의 재질로 구분한다.
  * Blender 등은 이것을 오브젝트 하나 + 재질 슬롯 여러 개로 들여오므로 지형·건물이 한 덩어리로 다뤄진다
  * (처음에는 레이어마다 노드를 두었는데, 뷰어에서 별개 오브젝트로 갈라져 보여 합쳤다).
- * 법선이 없는 조각은 뷰어가 규격대로 면 법선을 계산한다(평면 음영).
+ * 각진 물체(건물·계단형)는 toFlatPrimitive 로 꼭짓점을 삼각형마다 따로 두고 면 법선을 넣는다. 법선 없이 두면 규격상
+ * 뷰어가 평면 법선을 계산해야 하지만, Blender 는 스무스 셰이딩으로 들여와 공유 꼭짓점의 모서리가 둥글게 보였다.
  */
 
 /** 재질 하나: 이름(레이어 id), 색(0 ~ 1) */
@@ -48,6 +49,42 @@ export const computeVertexNormals = (positions: Float32Array, indices: Uint32Arr
         normals[i + 2] /= len
     }
     return normals
+}
+
+/**
+ * 인덱스 메쉬를 꼭짓점을 공유하지 않는 평면 음영 조각으로 펼친다. 삼각형마다 꼭짓점 3개와 같은 면 법선 3개를 두므로
+ * 데이터는 약 3배가 되지만, 뷰어의 셰이딩 설정과 무관하게 모서리가 각지게 보인다. 넓이 0 삼각형은 법선 (0, 0, 0).
+ */
+export const toFlatPrimitive = (positions: Float32Array, indices: Uint32Array, material: number): GlbPrimitive => {
+    const count = Math.floor(indices.length / 3)
+    const flatPositions = new Float32Array(count * 9)
+    const normals = new Float32Array(count * 9)
+    const flatIndices = new Uint32Array(count * 3)
+    for (let t = 0; t < count; t++) {
+        const a = indices[t * 3] * 3, b = indices[t * 3 + 1] * 3, c = indices[t * 3 + 2] * 3
+        const o = t * 9
+        flatPositions.set(positions.subarray(a, a + 3), o)
+        flatPositions.set(positions.subarray(b, b + 3), o + 3)
+        flatPositions.set(positions.subarray(c, c + 3), o + 6)
+        const e1x = positions[b] - positions[a], e1y = positions[b + 1] - positions[a + 1], e1z = positions[b + 2] - positions[a + 2]
+        const e2x = positions[c] - positions[a], e2y = positions[c + 1] - positions[a + 1], e2z = positions[c + 2] - positions[a + 2]
+        let nx = e1y * e2z - e1z * e2y, ny = e1z * e2x - e1x * e2z, nz = e1x * e2y - e1y * e2x
+        const len = Math.hypot(nx, ny, nz)
+        if (len > 0) {
+            nx /= len
+            ny /= len
+            nz /= len
+        }
+        for (let k = 0; k < 3; k++) {
+            normals[o + k * 3] = nx
+            normals[o + k * 3 + 1] = ny
+            normals[o + k * 3 + 2] = nz
+        }
+        flatIndices[t * 3] = t * 3
+        flatIndices[t * 3 + 1] = t * 3 + 1
+        flatIndices[t * 3 + 2] = t * 3 + 2
+    }
+    return { positions: flatPositions, normals, indices: flatIndices, material }
 }
 
 /** Z-up (x, y, z) 배열을 glTF Y-up (x, z, -y) 로 바꾼 새 배열 */

@@ -2,7 +2,7 @@ import { LAYER_DEFS } from "../layers"
 import type { TinMesh } from "../terrainData"
 import { buildSteppedMeshChunks } from "../terrainSteps"
 import type { TerrainMode } from "../webgpu/terrainRenderer"
-import { computeVertexNormals, encodeGlb, GlbMaterial, GlbPrimitive } from "./glb"
+import { computeVertexNormals, encodeGlb, GlbMaterial, GlbPrimitive, toFlatPrimitive } from "./glb"
 import type { LayerMeshes } from "./stlClient"
 
 /**
@@ -35,7 +35,7 @@ const post = (msg: GlbExportResponse, transfer: Transferable[] = []) => self.pos
  * 레이어들을 GLB 파일 하나로 만든다. 메인 스레드 밖에서 돈다.
  *
  * 노드 하나에 LAYER_DEFS 순서로 레이어마다 재질 하나를 두고 조각을 붙인다. 지형 tin 은 정점 법선을 넣어 부드럽게,
- * stepped 조각과 다른 레이어는 법선 없이 평면 음영으로 둔다. 원점·좌표계는 asset.extras 에 남긴다. 진행률은 레이어 단위로 낸다(인코딩 자체가 빨라 세분하지 않는다).
+ * stepped 조각과 건물 등 각진 레이어는 꼭짓점을 펼친 평면 조각(toFlatPrimitive)으로 넣는다. 원점·좌표계는 asset.extras 에 남긴다. 진행률은 레이어 단위로 낸다(인코딩 자체가 빨라 세분하지 않는다).
  * 취소는 메인에서 terminate 로 한다(요청마다 Worker 를 새로 만든다). 오류는 메인의 worker.onerror 로 전달된다.
  */
 self.onmessage = (e: MessageEvent<GlbExportRequest>) => {
@@ -57,7 +57,7 @@ self.onmessage = (e: MessageEvent<GlbExportRequest>) => {
         const w = weight(mesh)
         if (id === "terrain" && mode === "stepped") {
             const chunks = buildSteppedMeshChunks(mesh, step, STEPPED_CHUNK_BYTES, (done, all) => progress(done / all, w))
-            for (const chunk of chunks) primitives.push({ positions: chunk.positions, indices: chunk.indices, material })
+            for (const chunk of chunks) primitives.push(toFlatPrimitive(chunk.positions, chunk.indices, material))
         } else if (id === "terrain") {
             primitives.push({
                 positions: mesh.positions,
@@ -66,7 +66,7 @@ self.onmessage = (e: MessageEvent<GlbExportRequest>) => {
                 material,
             })
         } else {
-            primitives.push({ positions: mesh.positions, indices: mesh.indices, material })
+            primitives.push(toFlatPrimitive(mesh.positions, mesh.indices, material))
         }
         doneBefore += w
         progress(0, 0)
