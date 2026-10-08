@@ -1,7 +1,8 @@
 import { Extent } from "ol/extent"
 
+import { clipMeshToConvexPolygon } from "./terrainClip"
 import { fetchGunzip, LoadProgress, TinMesh } from "./terrainData"
-import { getTtpSheetsInBbox, TTP_BASE } from "./terrainIndex"
+import { bboxToPolygon5179, getTtpSheetsInBbox, TTP_BASE } from "./terrainIndex"
 import { retriangulate } from "./terrainRetri"
 
 /** 등고선 조각: 한 1K 안에 들어온 한 선(line)의 연속 순번 구간 */
@@ -257,10 +258,11 @@ const mergeTtpTiles = (
  * 1. 정적 인덱스(R2, terrainIndex)로 범위에 걸친 1K 와 5K 파일(path) 조회
  * 2. 5K 파일들을 병렬로 받아 풀기
  * 3. 범위에 걸친 1K 만 골라 공통 원점으로 합치고 재삼각분할(mergeTtpTiles)
+ * 4. 선택 사각형(5179 로 바꾼 네 모서리)으로 잘라 그린 범위만 남김(clipMeshToConvexPolygon)
  *
  * @param bbox3857 지도에서 고른 범위 [minX, minY, maxX, maxY] (EPSG:3857)
  * @param options.onProgress 단계별 진행률(loadTerrainTtm 과 같은 단계)
- * @returns 렌더러에 넘길 메쉬
+ * @returns 렌더러에 넘길 메쉬(선택 범위 안)
  */
 export const loadTerrainTtp = async (
     bbox3857: Extent,
@@ -288,5 +290,12 @@ export const loadTerrainTtp = async (
         `TTP: 5K 파일 ${files.length}개(gen_flags ${files[0]?.genFlags}), 1K ${selected.length}/${allTiles.length}개 사용 (조회 ${Math.round(t1 - t0)}ms, 받기 ${Math.round(t2 - t1)}ms)`,
     )
     onProgress?.("merge", 0, selected.length)
-    return mergeTtpTiles(selected, q.origin, onProgress)
+    const merged = mergeTtpTiles(selected, q.origin, onProgress)
+    // 걸친 1K 전체가 아니라 지도에서 그린 사각형만 남긴다(도엽 가장자리의 바늘 삼각형 제거, terrainClip 참고)
+    const [ox, oy] = q.origin
+    const selection = bboxToPolygon5179(bbox3857).map(([x, y]) => [x - ox, y - oy] as [number, number])
+    const t3 = performance.now()
+    const clipped = clipMeshToConvexPolygon(merged, selection)
+    console.log(`자르기 ${Math.round(performance.now() - t3)}ms`)
+    return clipped
 }

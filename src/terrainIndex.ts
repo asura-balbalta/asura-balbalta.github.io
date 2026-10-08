@@ -104,7 +104,7 @@ const polygonsIntersect = (a: [number, number][], b: [number, number][]) => {
 }
 
 /** 선택 bbox(3857)의 네 모서리를 5179 로 바꾼 사각형(둘레 순서). 3857 사각형은 5179 평면에서 조금 기울어진다 */
-const bboxToPolygon5179 = (bbox3857: Extent): [number, number][] => {
+export const bboxToPolygon5179 = (bbox3857: Extent): [number, number][] => {
     const [x0, y0, x1, y1] = bbox3857
     const corners3857: [number, number][] = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
     return corners3857.map(([x, y]) => proj4("EPSG:3857", "EPSG:5179", [x, y]) as [number, number])
