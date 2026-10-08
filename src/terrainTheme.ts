@@ -1,4 +1,4 @@
-/** 화면 테마. 지도 타일(Stadia alidade_smooth / _dark)과 3D 지형의 색을 함께 바꾼다 */
+/** 화면 테마. 지도 타일 톤(라이트/다크, 출처는 basemap.ts)과 3D 지형의 색을 함께 바꾼다 */
 export type Theme = "light" | "dark"
 
 /** 표고(m, 절대값) → 바탕색 단계. 단계 사이는 선형 보간, 양 끝 밖은 끝 색 */
@@ -20,8 +20,8 @@ export type MapOverlayColors = {
 }
 
 export type TerrainTheme = {
-    /** StadiaMaps 레이어 이름 */
-    mapLayer: "alidade_smooth" | "alidade_smooth_dark"
+    /** 바탕 지도 톤. 출처(Stadia·CARTO 등)마다 이 톤의 스타일을 고른다(basemap.ts) */
+    basemap: "light" | "dark"
     /** 지도 위 오버레이 색 */
     mapOverlay: MapOverlayColors
     /** 3D 화면 배경색(0 ~ 1). 지형 가장자리가 또렷하도록 지형 색과 차이를 둔다 */
@@ -44,7 +44,7 @@ export const hexToRgb = (hex: string) => {
  */
 export const TERRAIN_THEMES: Record<Theme, TerrainTheme> = {
     light: {
-        mapLayer: "alidade_smooth",
+        basemap: "light",
         // 밝은 회백색 타일 위라 연한 색은 묻힌다. 선택 박스는 진한 하늘색, 도엽은 진한 주황
         mapOverlay: {
             selectionStroke: "#0369A1",
@@ -64,7 +64,7 @@ export const TERRAIN_THEMES: Record<Theme, TerrainTheme> = {
         buildingColor: "#CFC9C0", // 평지(#EEEFED)보다 조금 어두운 따뜻한 회색
     },
     dark: {
-        mapLayer: "alidade_smooth_dark",
+        basemap: "dark",
         // 어두운 타일 위라 연한 색이 잘 보인다
         mapOverlay: {
             selectionStroke: "#BAE6FD",

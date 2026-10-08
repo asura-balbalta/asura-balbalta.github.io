@@ -3,6 +3,7 @@ import { Map } from "ol"
 import { Extent } from "ol/extent"
 
 import { firebaseApp } from "./fb"
+import { BASEMAP_PROVIDERS, BasemapProvider, nextBasemapProvider } from "./basemap"
 import { loadBuildingsInWorker } from "./buildingsClient"
 import { BuildingsLoadPhase } from "./buildingsData"
 import { INITIAL_LAYER_STATES, LAYER_DEFS, LayerId, LayerStates } from "./layers"
@@ -20,6 +21,8 @@ import { TerrainMode } from "./webgpu/terrainRenderer"
 const INITIAL_TERRAIN_MODE: TerrainMode = "tin"
 /** 처음 색 테마(지도 타일 + 3D). 화면의 버튼으로 바꿀 수 있다 */
 const INITIAL_THEME: Theme = "light"
+/** 처음 바탕 지도 출처(basemap.ts). 화면의 버튼으로 바꿀 수 있고, 타일이 안 나오면 자동으로 다음 출처로 넘어간다 */
+const INITIAL_BASEMAP: BasemapProvider = "stadia"
 /** 계단형일 때 층 간격(m). 0.1 ~ 5 정도로 조정 */
 const STEP_INTERVAL = 1
 /** 지형 데이터 출처. "ttp": 점·등고선 조각을 받아 프론트가 삼각분할(기본), "ttm": v1 도엽별 메쉬(비교용) */
@@ -140,6 +143,8 @@ export default function App() {
     const [mode, setMode] = useState<TerrainMode>(INITIAL_TERRAIN_MODE)
     /** 색 테마. 지도 타일과 3D 색표·배경을 함께 바꾼다 */
     const [theme, setTheme] = useState<Theme>(INITIAL_THEME)
+    /** 바탕 지도 출처. 버튼으로 바꾸거나, 타일 로딩이 계속 실패하면(무료 한도 초과) 자동으로 다음 출처로 넘어간다 */
+    const [basemap, setBasemap] = useState<BasemapProvider>(INITIAL_BASEMAP)
     /** 3D 지형이 화면에 올라간 뒤 true. 이때부터 지도를 미니맵으로 옮긴다 */
     const [terrainReady, setTerrainReady] = useState(false)
     /** 배지에 보일 진행 문구. 단계가 없으면(모드 전환 직후 등) null 이고 기본 문구를 쓴다 */
@@ -176,7 +181,9 @@ export default function App() {
                     })
             },
             TERRAIN_THEMES[INITIAL_THEME],
+            INITIAL_BASEMAP,
             setSelecting,
+            setBasemap,
         ).then(({ map, squareTool }) => {
             mapRef.current = map
             squareToolRef.current = squareTool
@@ -186,8 +193,8 @@ export default function App() {
     useEffect(() => {
         const map = mapRef.current
         if (!map) return
-        applyMapTheme(map, TERRAIN_THEMES[theme])
-    }, [theme])
+        applyMapTheme(map, TERRAIN_THEMES[theme], basemap, setBasemap)
+    }, [theme, basemap])
 
     useEffect(() => {
         const map = mapRef.current
@@ -292,6 +299,9 @@ export default function App() {
                 {buildingsStatus && <div style={busyBadgeStyle}>{buildingsStatus}</div>}
                 <button style={barButtonStyle} onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}>
                     {theme === "dark" ? "라이트 테마" : "다크 테마"}
+                </button>
+                <button style={barButtonStyle} onClick={() => setBasemap((b) => nextBasemapProvider(b))}>
+                    지도: {BASEMAP_PROVIDERS.find((p) => p.id === basemap)?.label}
                 </button>
             </div>
             {terrainReady && (

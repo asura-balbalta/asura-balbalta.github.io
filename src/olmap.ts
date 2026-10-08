@@ -1,7 +1,6 @@
 import Map from "ol/Map"
 import View from "ol/View"
 import TileLayer from "ol/layer/Tile"
-import { StadiaMaps, XYZ } from "ol/source"
 import { Projection, transform } from "ol/proj"
 import Feature, { FeatureLike } from "ol/Feature"
 import Point from "ol/geom/Point"
@@ -13,33 +12,39 @@ import { MapBrowserEvent, MapEvent } from "ol"
 
 import { Extent } from "ol/extent"
 
+import Attribution from "ol/control/Attribution"
+
+import { BasemapProvider, createBasemapSource, nextBasemapProvider, watchTileErrors } from "./basemap"
 import { selectionStyle, setMapOverlay, tileOutlineStyle } from "./mapOverlay"
 import { installSquareTool, SQUARE_RANGE_LAYER_NAME, SquareTool } from "./squareTool"
 import { getTtpSheetsInBbox } from "./terrainIndex"
 import { TerrainTheme } from "./terrainTheme"
 import { drawTileOutlines, TILE_LAYER_NAME } from "./tileOverlay"
 
-/** 바탕 지도 타일 레이어 이름. 갤러리: https://docs.stadiamaps.com/themes/ */
-export type BaseLayerName = "alidade_smooth" | "alidade_smooth_dark"
-
-/** 바탕 지도 타일 소스 */
-const baseSource = (layer: BaseLayerName) =>
-    new StadiaMaps({
-        layer,
-        retina: true, // Set to false for stamen_watercolor
-    })
-
 /**
- * 지도에 테마를 적용한다(초기화·테마 전환). 바탕 타일을 바꾸고, 오버레이 색을 지도에 넣어 두며, 이미 그려진
- * 선택 박스·1K 외곽선 레이어가 있으면 그 색으로 다시 입힌다. 레이어 목록의 첫 TileLayer 가 바탕 지도라는 전제
+ * 지도에 테마와 바탕 지도 출처를 적용한다(초기화·테마 전환·출처 전환). 바탕 타일을 바꾸고, 오버레이 색을 지도에 넣어
+ * 두며, 이미 그려진 선택 박스·1K 외곽선 레이어가 있으면 그 색으로 다시 입힌다. 레이어 목록의 첫 TileLayer 가 바탕
+ * 지도라는 전제. 바탕 타일 로딩이 연속 실패하면(무료 한도 초과 등) onBasemapFallback 에 다음 출처를 알린다
  *
  * @param map initOlMap 이 만든 지도
- * @param theme 적용할 테마
+ * @param theme 적용할 테마(지도 톤·오버레이 색)
+ * @param provider 바탕 지도 출처
+ * @param onBasemapFallback 이 출처가 죽었을 때 넘어갈 다음 출처를 받는 콜백. 받는 쪽이 provider 를 바꿔 다시 부른다
  */
-export const applyMapTheme = (map: Map, theme: TerrainTheme) => {
+export const applyMapTheme = (
+    map: Map,
+    theme: TerrainTheme,
+    provider: BasemapProvider,
+    onBasemapFallback?: (next: BasemapProvider) => void,
+) => {
     const base = map.getLayers().item(0)
     if (!(base instanceof TileLayer)) throw new Error("첫 레이어가 바탕 타일 레이어가 아님")
-    base.setSource(baseSource(theme.mapLayer))
+    const source = createBasemapSource(provider, theme.basemap)
+    watchTileErrors(source, () => {
+        console.warn(`바탕 지도(${provider}) 타일 로딩이 계속 실패해 다음 출처로 넘깁니다`)
+        onBasemapFallback?.(nextBasemapProvider(provider))
+    })
+    base.setSource(source)
     setMapOverlay(map, theme.mapOverlay)
     for (const layer of map.getAllLayers()) {
         if (!(layer instanceof VectorLayer)) continue
@@ -53,20 +58,25 @@ export const applyMapTheme = (map: Map, theme: TerrainTheme) => {
  * 지도를 만들고 사각형 선택 도구를 단다.
  *
  * @param onSquareConfirmed 사각형이 확정됐을 때 (EPSG:3857 bbox)
- * @param theme 처음 테마(바탕 지도·오버레이 색)
+ * @param theme 처음 테마(지도 톤·오버레이 색)
+ * @param basemap 처음 바탕 지도 출처
  * @param onSelectingChange 선택 모드가 켜지거나 꺼질 때
+ * @param onBasemapFallback 바탕 지도 출처가 죽었을 때 다음 출처를 받는 콜백(applyMapTheme 참고)
  * @returns 지도와 선택 도구(모드 켜고 끄기)
  */
 export const initOlMap = async (
     onSquareConfirmed: (bbox: Extent) => void,
     theme: TerrainTheme,
+    basemap: BasemapProvider,
     onSelectingChange?: (active: boolean) => void,
+    onBasemapFallback?: (next: BasemapProvider) => void,
 ): Promise<{ map: Map; squareTool: SquareTool }> => {
     let center = [14136104.293764262, 4514380.225694263] // 위치정보 허용 안할 경우 기본 좌표 (녹사평역 인근)
     const map = new Map({
         target: "map",
         layers: [
-            new TileLayer({ source: baseSource(theme.mapLayer) }),
+            // 소스는 아래 applyMapTheme 이 출처·톤에 맞춰 넣는다
+            new TileLayer(),
 
             // osm
             // new TileLayer({
@@ -83,9 +93,10 @@ export const initOlMap = async (
             projection: "EPSG:3857",
             // rotation: Math.PI / 2 // 시계방향 90
         }),
-        controls: [],
+        // 저작권 표시. Stadia·CARTO·OSM 모두 무료 사용 조건이다(스타일은 index.tsx 전역 CSS)
+        controls: [new Attribution({ collapsible: false })],
     })
-    setMapOverlay(map, theme.mapOverlay)
+    applyMapTheme(map, theme, basemap, onBasemapFallback)
 
     if ("geolocation" in navigator) {
         /* geolocation is available */
