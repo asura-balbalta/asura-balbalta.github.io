@@ -1,0 +1,121 @@
+import { LAYER_DEFS } from "../layers"
+import type { TinMesh } from "../terrainData"
+import { buildSteppedMeshChunks } from "../terrainSteps"
+import type { TerrainMode } from "../webgpu/terrainRenderer"
+import type { LayerMeshes } from "./stlClient"
+
+/**
+ * 메인 → Worker: 3DM 생성 요청. 레이어마다 넣을지 말지를 메인이 정해 메쉬를 주거나(null 이면 뺌) 만다.
+ * 메쉬는 메인이 slice() 로 만든 사본이며 그 배열을 transfer 로 넘겨받는다
+ */
+export type Rhino3dmExportRequest = {
+    layers: LayerMeshes
+    /** 지형(terrain)을 "tin" 이면 삼각형 그대로, "stepped" 면 화면과 같은 계단형으로 변환해 넣는다. 다른 레이어는 그대로 */
+    mode: TerrainMode
+    /** stepped 일 때 층 간격(m) */
+    step: number
+}
+
+/** Worker → 메인: 진행률(0 ~ 1), 완료(.3dm 파일 바이트, transfer) */
+export type Rhino3dmExportResponse = { type: "progress"; ratio: number } | { type: "done"; buffer: ArrayBuffer }
+
+/**
+ * rhino3dm(McNeel 의 openNURBS wasm 빌드)은 node 전용 require 를 품고 있어 esbuild 로 번들하지 않는다.
+ * 대신 package.json 의 prebuild/predev 가 node_modules 의 rhino3dm.min.js 와 rhino3dm.wasm 을 이 Worker 와 같은 폴더(dist/export)에
+ * 복사하고, 여기서 importScripts 로 읽는다. wasm 은 라이브러리가 자기 스크립트 위치(self.location) 기준으로 찾는다
+ */
+const RHINO_SCRIPT = "rhino3dm.min.js"
+/** importScripts 가 정의하는 전역. 타입은 패키지의 선언을 빌려 쓴다 */
+declare const rhino3dm: typeof import("rhino3dm").default
+declare function importScripts(...urls: string[]): void
+type RhinoModule = Awaited<ReturnType<typeof rhino3dm>>
+
+/** 계단형 변환 조각의 정점·인덱스 버퍼 최대 바이트. GPU 와 무관하므로 Worker 메모리만 고려 */
+const STEPPED_CHUNK_BYTES = 64 * 1048576
+/** 삼각형 메쉬는 이 면 수마다 진행률을 보낸다 */
+const PROGRESS_EVERY_FACES = 50_000
+
+const post = (msg: Rhino3dmExportResponse, transfer: Transferable[] = []) => self.postMessage(msg, { transfer })
+
+/** 레이어별 Rhino 레이어 색. 없는 레이어는 회색 */
+const LAYER_COLORS: Record<string, { r: number; g: number; b: number; a: number }> = {
+    terrain: { r: 140, g: 170, b: 120, a: 255 },
+    buildings: { r: 200, g: 200, b: 200, a: 255 },
+}
+
+/**
+ * 인덱스 메쉬를 Rhino Mesh 로 만든다. 정점은 그대로 공유하고(미터), 넓이 0 삼각형(같은 정점 둘 이상)은 건너뛴다.
+ *
+ * @returns 메쉬와 건너뛴 삼각형 수
+ */
+const toRhinoMesh = (
+    rhino: RhinoModule,
+    positions: Float32Array,
+    indices: Uint32Array,
+    onFace?: (done: number, total: number) => void,
+) => {
+    const mesh = new rhino.Mesh()
+    const vertices = mesh.vertices()
+    for (let i = 0; i < positions.length; i += 3) vertices.add(positions[i], positions[i + 1], positions[i + 2])
+    const faces = mesh.faces()
+    const count = Math.floor(indices.length / 3)
+    let skipped = 0
+    for (let t = 0; t < count; t++) {
+        const a = indices[t * 3], b = indices[t * 3 + 1], c = indices[t * 3 + 2]
+        if (a === b || b === c || a === c) skipped++
+        else faces.addTriFace(a, b, c)
+        if (onFace && (t + 1) % PROGRESS_EVERY_FACES === 0) onFace(t + 1, count)
+    }
+    return { mesh, skipped }
+}
+
+/**
+ * rhino3dm 으로 레이어들을 Rhino .3dm 파일 하나로 만든다. 메인 스레드 밖에서 돈다.
+ *
+ * LAYER_DEFS 순서로 레이어마다 Rhino 레이어(레이어 id 이름)를 만들고 그 위에 메쉬 객체를 둔다. 지형 stepped 는 변환 조각마다
+ * 메쉬 객체 하나씩이다. 문서 단위는 미터라 TinMesh 좌표를 환산 없이 쓴다.
+ * 진행률은 레이어의 원본 삼각형 수로 가중해 0 ~ 1 로 낸다. 취소는 메인에서 terminate 로 한다(요청마다 Worker 를 새로 만든다).
+ * 오류는 메인의 worker.onerror 로 전달된다(비동기 핸들러 안의 오류는 unhandledrejection 이 아니라 throw 로 올린다).
+ */
+self.onmessage = async (e: MessageEvent<Rhino3dmExportRequest>) => {
+    const { layers, mode, step } = e.data
+    importScripts(RHINO_SCRIPT)
+    const rhino = await rhino3dm()
+
+    const weight = (m: TinMesh | null) => (m ? m.indices.length / 3 : 0)
+    const total = Object.values(layers).reduce((sum, m) => sum + weight(m), 0) || 1
+    let doneBefore = 0
+    const progress = (ratioInLayer: number, layerWeight: number) =>
+        post({ type: "progress", ratio: (doneBefore + ratioInLayer * layerWeight) / total })
+
+    const doc = new rhino.File3dm()
+    doc.settings().modelUnitSystem = rhino.UnitSystem.Meters
+    let skipped = 0
+    for (const { id } of LAYER_DEFS) {
+        const mesh = layers[id]
+        if (!mesh) continue
+        const layerIndex = doc.layers().addLayer(id, LAYER_COLORS[id] ?? { r: 160, g: 160, b: 160, a: 255 })
+        const attributes = new rhino.ObjectAttributes()
+        attributes.layerIndex = layerIndex
+        attributes.name = id
+        const w = weight(mesh)
+        const addMesh = (positions: Float32Array, indices: Uint32Array, onFace?: (done: number, total: number) => void) => {
+            const r = toRhinoMesh(rhino, positions, indices, onFace)
+            skipped += r.skipped
+            doc.objects().addMesh(r.mesh, attributes)
+        }
+        if (id === "terrain" && mode === "stepped") {
+            const chunks = buildSteppedMeshChunks(mesh, step, STEPPED_CHUNK_BYTES, (done, all) => progress(done / all, w))
+            for (const chunk of chunks) addMesh(chunk.positions, chunk.indices)
+        } else {
+            addMesh(mesh.positions, mesh.indices, (done, all) => progress(done / all, w))
+        }
+        doneBefore += w
+    }
+    if (skipped > 0) console.warn(`3DM: 넓이 0 등으로 건너뛴 삼각형 ${skipped}개`)
+    // wasm 객체는 해제하지 않는다. 요청마다 Worker 를 새로 만들고 끝나면 terminate 하므로 메모리는 그때 돌아간다
+    const bytes = doc.toByteArray()
+    // wasm 힙을 가리키는 뷰일 수 있으므로 정확한 길이만 복사해 넘긴다
+    const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer
+    post({ type: "done", buffer }, [buffer])
+}

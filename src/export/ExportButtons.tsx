@@ -2,15 +2,24 @@ import React, { CSSProperties, useState } from "react"
 
 import { LAYER_DEFS, LayerId, LayerStates } from "../layers"
 import type { TerrainMode } from "../webgpu/terrainRenderer"
+import { export3dmInWorker } from "./3dmClient"
 import { downloadBlob, exportFileName, ExportKind } from "./download"
 import { exportSkpInWorker } from "./skpClient"
 import { STL_HEADER_BYTES, STL_TRIANGLE_BYTES } from "./stl"
-import { exportStlInWorker, LayerMeshes } from "./stlClient"
+import { ExportOptions, exportStlInWorker, LayerMeshes } from "./stlClient"
 
-/** 화면에 보일 형식 목록. 새 형식은 여기와 runExport 의 분기에만 더한다 */
+/** 형식별 Worker 호출. 새 형식은 여기와 EXPORT_KINDS 에만 더한다 */
+const EXPORTERS: Record<ExportKind, (layers: LayerMeshes, options: ExportOptions) => { promise: Promise<Blob> }> = {
+    stl: exportStlInWorker,
+    skp: exportSkpInWorker,
+    "3dm": export3dmInWorker,
+}
+
+/** 화면에 보일 형식 목록과 버튼 문구 */
 const EXPORT_KINDS: { kind: ExportKind; label: string }[] = [
     { kind: "stl", label: "STL 내려받기" },
     { kind: "skp", label: "SKP 내려받기" },
+    { kind: "3dm", label: "3DM 내려받기" },
 ]
 
 /**
@@ -64,10 +73,10 @@ export const ExportButtons = ({
             step,
             onProgress: (ratio: number) => setExporting(`${label} 생성 중… ${Math.floor(ratio * 100)}%`),
         }
-        const { promise } = kind === "stl" ? exportStlInWorker(selected, options) : exportSkpInWorker(selected, options)
+        const { promise } = EXPORTERS[kind](selected, options)
         promise
             .then((blob) => {
-                // STL 은 크기에서 삼각형 수를 역산할 수 있고, SKP 는 그럴 수 없다
+                // STL 은 크기에서 삼각형 수를 역산할 수 있고, 다른 형식은 그럴 수 없다
                 const triangles =
                     kind === "stl" ? `삼각형 ${((blob.size - STL_HEADER_BYTES) / STL_TRIANGLE_BYTES).toLocaleString()}개, ` : ""
                 console.log(

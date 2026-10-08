@@ -2,7 +2,7 @@ import type { LayerId } from "../layers"
 import type { TerrainMode } from "../webgpu/terrainRenderer"
 
 /** 내보내기 형식. 버튼·파일 확장자·Worker 선택에 쓴다 */
-export type ExportKind = "stl" | "skp"
+export type ExportKind = "stl" | "skp" | "3dm"
 
 /** 내려받을 파일 이름. 예: asrbbt-terrain-tin+buildings-20261008-1630.stl */
 export const exportFileName = (mode: TerrainMode, layerIds: LayerId[], ext: ExportKind, now = new Date()) => {
