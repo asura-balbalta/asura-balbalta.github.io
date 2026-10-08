@@ -56,7 +56,7 @@ const initialCamera = ({ min, max }: MeshBounds): OrbitCamera => ({
  * - buildings(건물 레이어 메쉬)가 바뀌면 그 레이어의 GPU 버퍼만 교체한다(layerMeshUpdater). 카메라는 그대로.
  * - layers 가 바뀌면 레이어별 보이기만 바꾼다(layerVisibilityUpdater). 버퍼는 그대로.
  * - theme 이 바뀌면 표고 색표·건물색과 배경색 uniform 만 다시 쓴다(셰이더·메쉬 그대로).
- * - 드래그: 회전(좌우 = azimuth, 상하 = elevation), 휠·두 손가락: 확대·축소(distance)
+ * - 드래그: 회전(좌우 = azimuth, 상하 = elevation), 휠·트랙패드 핀치·두 손가락: 확대·축소(distance)
  * - 1차 구현이라 캔버스 크기는 마운트 시점 창 크기로 고정된다.
  *
  * @param props.mesh 원본 TIN 메쉬
@@ -98,6 +98,7 @@ export const TerrainViewCanvas = ({
     const onFirstChunkRef = useRef(onFirstChunk)
     onFirstChunkRef.current = onFirstChunk
     const canvasId = `terrain-canvas-${useId()}`
+    const canvasRef = useRef<HTMLCanvasElement | null>(null)
     // canvas 속성은 실제 픽셀 수(× devicePixelRatio), style 은 화면에 보이는 크기
     const [size] = useState(() => ({
         width: window.innerWidth,
@@ -265,9 +266,27 @@ export const TerrainViewCanvas = ({
         cameraRef.current = change(cameraRef.current)
         renderer.updaters.cameraUpdater(cameraRef.current)
     }
+    const updateCameraRef = useRef(updateCamera)
+    updateCameraRef.current = updateCamera
+
+    // 휠·트랙패드 확대/축소. React 의 onWheel 은 passive 리스너라 preventDefault 가 듣지 않으므로 직접 단다.
+    // 트랙패드 핀치는 브라우저가 ctrlKey 가 켜진 wheel 로 보내는데, 막지 않으면 페이지 자체가 확대된다(모바일 핀치는
+    // 터치라 touch-action 으로 막히지만 이 경로는 아님). 핀치는 deltaY 가 작아 배율을 10배로 둔다
+    useEffect(() => {
+        const canvas = canvasRef.current
+        if (!canvas) return
+        const onWheel = (e: WheelEvent) => {
+            e.preventDefault()
+            const rate = e.ctrlKey ? 0.01 : 0.001
+            updateCameraRef.current((cam) => ({ ...cam, distance: cam.distance * Math.exp(e.deltaY * rate) }))
+        }
+        canvas.addEventListener("wheel", onWheel, { passive: false })
+        return () => canvas.removeEventListener("wheel", onWheel)
+    }, [])
 
     return (
         <canvas
+            ref={canvasRef}
             id={canvasId}
             width={Math.round(size.width * size.dpr)}
             height={Math.round(size.height * size.dpr)}
@@ -317,12 +336,6 @@ export const TerrainViewCanvas = ({
                     }
                 }
                 pointers.set(e.pointerId, next)
-            }}
-            onWheel={(e) => {
-                updateCamera((cam) => ({
-                    ...cam,
-                    distance: cam.distance * Math.exp(e.deltaY * 0.001),
-                }))
             }}
         />
     )
