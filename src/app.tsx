@@ -11,7 +11,8 @@ import { SquareTool } from "./squareTool"
 import { TERRAIN_THEMES, Theme } from "./terrainTheme"
 import { LoadPhase, TinMesh } from "./terrainData"
 import { loadTerrainInWorker } from "./terrainLoadClient"
-import { downloadBlob, exportStlInWorker, stlFileName } from "./terrainStlClient"
+import { downloadBlob, exportFileName, exportStlInWorker } from "./terrainStlClient"
+import { exportSkpInWorker } from "./terrainSkpClient"
 import { STL_HEADER_BYTES, STL_TRIANGLE_BYTES } from "./terrainStl"
 import { TerrainSource } from "./terrainLoad.worker"
 import { TerrainViewCanvas } from "./components/TerrainViewCanvas"
@@ -101,7 +102,7 @@ const barButtonStyle: CSSProperties = {
     cursor: "pointer",
 }
 
-/** 왼쪽 아래의 레이어 패널. 레이어마다 보기·STL 체크 */
+/** 왼쪽 아래의 레이어 패널. 레이어마다 보기·내보내기 체크 */
 const layerPanelStyle: CSSProperties = {
     ...busyBadgeStyle,
     position: "fixed",
@@ -135,7 +136,7 @@ export default function App() {
     const [buildingsStatus, setBuildingsStatus] = useState<string | null>(null)
     /** 진행 중인 건물 로딩. 새 지형이 오면 취소한다 */
     const buildingsLoadingRef = useRef<{ cancel: () => void } | null>(null)
-    /** 레이어별 보기·STL 포함 상태 */
+    /** 레이어별 보기·내보내기 포함 상태 */
     const [layers, setLayers] = useState<LayerStates>(INITIAL_LAYER_STATES)
     /** 현재 지형 표현 방식. 버튼으로 바꾸면 같은 mesh 를 다시 올린다 */
     const [mode, setMode] = useState<TerrainMode>(INITIAL_TERRAIN_MODE)
@@ -147,7 +148,7 @@ export default function App() {
     const [status, setStatus] = useState<string | null>(null)
     /** 진행 중인 지형 로딩. 새 선택이 오면 취소한다 */
     const loadingRef = useRef<{ cancel: () => void } | null>(null)
-    /** STL 생성 중이면 배지에 보일 문구, 아니면 null. 생성 중에는 내려받기 버튼 대신 배지를 보인다 */
+    /** STL·SKP 생성 중이면 배지에 보일 문구, 아니면 null. 생성 중에는 내려받기 버튼 대신 배지를 보인다 */
     const [exporting, setExporting] = useState<string | null>(null)
 
     useEffect(() => {
@@ -230,7 +231,7 @@ export default function App() {
             })
     }
 
-    /** 레이어 하나의 보기 또는 STL 포함을 바꾼다 */
+    /** 레이어 하나의 보기 또는 내보내기 포함을 바꾼다 */
     const setLayerFlag = (id: LayerId, key: "visible" | "export", value: boolean) =>
         setLayers((prev) => ({ ...prev, [id]: { ...prev[id], [key]: value } }))
 
@@ -242,39 +243,43 @@ export default function App() {
     }
 
     /**
-     * "STL" 에 체크된 레이어를 STL 하나로 만들어 내려받는다. 지형은 현재 표현 방식(tin/stepped)대로 적는다.
+     * "내보내기" 에 체크된 레이어를 STL 또는 SKP 파일 하나로 만들어 내려받는다. 지형은 현재 표현 방식(tin/stepped)대로 적는다.
      * Worker 가 메쉬 사본으로 일하므로, 생성 중에 다른 지역을 골라도 먼저 시작한 내보내기는 그대로 끝난다
      */
-    const exportStl = () => {
+    const runExport = (kind: "stl" | "skp") => {
         if (!mesh || exporting) return
+        const label = kind.toUpperCase()
         const layerMeshes = {
             terrain: layers.terrain.export ? mesh : null,
             buildings: layers.buildings.export ? buildings : null,
         }
         const included = LAYER_DEFS.map((d) => d.id).filter((id) => layerMeshes[id])
         if (included.length === 0) {
-            window.alert("STL 에 넣을 레이어를 하나 이상 체크하세요")
+            window.alert(`${label} 에 넣을 레이어를 하나 이상 체크하세요`)
             return
         }
-        setExporting("STL 생성 중…")
+        setExporting(`${label} 생성 중…`)
         const started = performance.now()
-        const { promise } = exportStlInWorker(layerMeshes, {
+        const options = {
             mode,
             step: STEP_INTERVAL,
-            onProgress: (ratio) => setExporting(`STL 생성 중… ${Math.floor(ratio * 100)}%`),
-        })
+            onProgress: (ratio: number) => setExporting(`${label} 생성 중… ${Math.floor(ratio * 100)}%`),
+        }
+        const { promise } = kind === "stl" ? exportStlInWorker(layerMeshes, options) : exportSkpInWorker(layerMeshes, options)
         promise
             .then((blob) => {
-                const triangles = (blob.size - STL_HEADER_BYTES) / STL_TRIANGLE_BYTES
+                // STL 은 크기에서 삼각형 수를 역산할 수 있고, SKP 는 그럴 수 없다
+                const triangles =
+                    kind === "stl" ? `삼각형 ${((blob.size - STL_HEADER_BYTES) / STL_TRIANGLE_BYTES).toLocaleString()}개, ` : ""
                 console.log(
-                    `STL 생성 (${included.join("+")}, 지형 ${mode}) ${(performance.now() - started).toFixed(0)}ms: ` +
-                        `삼각형 ${triangles.toLocaleString()}개, ${(blob.size / 1048576).toFixed(1)}MB`,
+                    `${label} 생성 (${included.join("+")}, 지형 ${mode}) ${(performance.now() - started).toFixed(0)}ms: ` +
+                        `${triangles}${(blob.size / 1048576).toFixed(1)}MB`,
                 )
-                downloadBlob(blob, stlFileName(mode, included))
+                downloadBlob(blob, exportFileName(mode, included, kind))
             })
             .catch((err) => {
                 console.error(err)
-                window.alert(`STL 생성에 실패했습니다: ${err.message}`)
+                window.alert(`${label} 생성에 실패했습니다: ${err.message}`)
             })
             .finally(() => setExporting(null))
     }
@@ -319,9 +324,14 @@ export default function App() {
                                     {mode === "stepped" ? "삼각 메쉬로 보기" : "계단형으로 보기"}
                                 </button>
                                 {!exporting && (
-                                    <button style={barButtonStyle} onClick={exportStl}>
-                                        STL 내려받기
-                                    </button>
+                                    <>
+                                        <button style={barButtonStyle} onClick={() => runExport("stl")}>
+                                            STL 내려받기
+                                        </button>
+                                        <button style={barButtonStyle} onClick={() => runExport("skp")}>
+                                            SKP 내려받기
+                                        </button>
+                                    </>
                                 )}
                             </>
                         )}
@@ -337,7 +347,7 @@ export default function App() {
                 <div style={layerPanelStyle}>
                     <span style={layerPanelHeaderStyle}>레이어</span>
                     <span style={layerPanelHeaderStyle}>보기</span>
-                    <span style={layerPanelHeaderStyle}>STL</span>
+                    <span style={layerPanelHeaderStyle}>내보내기</span>
                     {LAYER_DEFS.map(({ id, label }) => (
                         <React.Fragment key={id}>
                             <span>{label}</span>

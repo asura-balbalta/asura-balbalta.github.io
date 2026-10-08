@@ -1,15 +1,15 @@
 /**
  * 3D 화면에 얹는 공간정보 레이어 목록. 지형·건물로 시작하고 앞으로 늘어난다.
  *
- * 레이어마다 "보기"(화면에 그릴지)와 "STL"(내보내기에 넣을지)을 따로 켜고 끈다. 새 레이어를 추가할 때는
- * 여기에 항목을 더하고, 렌더러(layerMeshUpdater)와 STL worker 에 그 레이어의 메쉬를 넘기는 코드를 잇는다.
+ * 레이어마다 "보기"(화면에 그릴지)와 "내보내기"(STL·SKP 에 넣을지)를 따로 켜고 끈다. 새 레이어를 추가할 때는
+ * 여기에 항목을 더하고, 렌더러(layerMeshUpdater)와 STL·SKP worker 에 그 레이어의 메쉬를 넘기는 코드를 잇는다.
  */
 export type LayerId = "terrain" | "buildings"
 
 export type LayerState = {
     /** 화면에 그린다 */
     visible: boolean
-    /** STL 내보내기에 넣는다 */
+    /** STL·SKP 내보내기에 넣는다 */
     export: boolean
 }
 

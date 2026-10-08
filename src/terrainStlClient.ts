@@ -73,12 +73,12 @@ export const exportStlInWorker = (
     return { promise, cancel: stop }
 }
 
-/** 내려받을 STL 파일 이름. 예: asrbbt-terrain-tin+buildings-20261008-1630.stl */
-export const stlFileName = (mode: TerrainMode, layerIds: LayerId[], now = new Date()) => {
+/** 내려받을 파일 이름. 예: asrbbt-terrain-tin+buildings-20261008-1630.stl */
+export const exportFileName = (mode: TerrainMode, layerIds: LayerId[], ext: "stl" | "skp", now = new Date()) => {
     const pad = (n: number) => String(n).padStart(2, "0")
     const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}`
     const parts = layerIds.map((id) => (id === "terrain" ? `terrain-${mode}` : id))
-    return `asrbbt-${parts.join("+")}-${stamp}.stl`
+    return `asrbbt-${parts.join("+")}-${stamp}.${ext}`
 }
 
 /** Blob 을 브라우저 다운로드로 내려준다 */
