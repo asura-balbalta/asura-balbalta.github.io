@@ -3,6 +3,9 @@ import { Map } from "ol"
 import { Extent } from "ol/extent"
 
 import { firebaseApp } from "./fb"
+import { loadBuildingsInWorker } from "./buildingsClient"
+import { BuildingsLoadPhase } from "./buildingsData"
+import { INITIAL_LAYER_STATES, LAYER_DEFS, LayerId, LayerStates } from "./layers"
 import { applyMapTheme, initOlMap } from "./olmap"
 import { SquareTool } from "./squareTool"
 import { TERRAIN_THEMES, Theme } from "./terrainTheme"
@@ -36,6 +39,18 @@ const loadStatusText = (phase: LoadPhase, done: number, total: number) => {
             return `도엽 합치는 중 ${done}/${total}`
         case "retriangulate":
             return "재삼각분할 중"
+    }
+}
+
+/** 건물 레이어 로딩 단계를 배지 문구로 */
+const buildingsStatusText = (phase: BuildingsLoadPhase, done: number, total: number) => {
+    switch (phase) {
+        case "index":
+            return "건물 목록 조회 중"
+        case "download":
+            return `건물 데이터 받는 중 ${done}/${total}`
+        case "build":
+            return `건물 세우는 중 ${done}/${total}`
     }
 }
 
@@ -86,6 +101,22 @@ const barButtonStyle: CSSProperties = {
     cursor: "pointer",
 }
 
+/** 왼쪽 아래의 레이어 패널. 레이어마다 보기·STL 체크 */
+const layerPanelStyle: CSSProperties = {
+    ...busyBadgeStyle,
+    position: "fixed",
+    left: 16,
+    bottom: 16,
+    zIndex: 20,
+    display: "grid",
+    gridTemplateColumns: "auto auto auto",
+    columnGap: 12,
+    rowGap: 4,
+    alignItems: "center",
+}
+
+const layerPanelHeaderStyle: CSSProperties = { opacity: 0.7, fontSize: 12 }
+
 export default function App() {
     const mapRef = useRef<Map | null>(null)
     /** 사각형 선택 도구. "영역 선택" 버튼으로 모드를 켜고 끈다 */
@@ -98,6 +129,14 @@ export default function App() {
     const [busy, setBusy] = useState(false)
     const [selection, setSelection] = useState<Extent | null>(null)
     const [mesh, setMesh] = useState<TinMesh | null>(null)
+    /** 건물 레이어 메쉬(지형과 같은 원점). 지형이 바뀌면 null 로 비우고 다시 만든다 */
+    const [buildings, setBuildings] = useState<TinMesh | null>(null)
+    /** 건물 레이어 로딩 중 배지 문구. 지형과 별개로 진행되므로 따로 보인다 */
+    const [buildingsStatus, setBuildingsStatus] = useState<string | null>(null)
+    /** 진행 중인 건물 로딩. 새 지형이 오면 취소한다 */
+    const buildingsLoadingRef = useRef<{ cancel: () => void } | null>(null)
+    /** 레이어별 보기·STL 포함 상태 */
+    const [layers, setLayers] = useState<LayerStates>(INITIAL_LAYER_STATES)
     /** 현재 지형 표현 방식. 버튼으로 바꾸면 같은 mesh 를 다시 올린다 */
     const [mode, setMode] = useState<TerrainMode>(INITIAL_TERRAIN_MODE)
     /** 색 테마. 지도 타일과 3D 색표·배경을 함께 바꾼다 */
@@ -132,6 +171,7 @@ export default function App() {
                         if (generation !== generationRef.current) return
                         setStatus(null)
                         setMesh(loaded)
+                        loadBuildingsLayer(bbox, loaded, generation)
                     })
                     .catch((err) => {
                         console.error(err)
@@ -162,6 +202,38 @@ export default function App() {
         }
     }, [terrainReady, selection])
 
+    /**
+     * 지형이 올라온 뒤 그 위에 세울 건물 레이어를 Worker 로 만든다. 지형과 별개로 진행되어 지형이 먼저 보이고
+     * 건물은 준비되는 대로 얹힌다. 이전 건물 로딩은 취소하고, 늦게 돌아온 결과는 generation 으로 버린다
+     */
+    const loadBuildingsLayer = (bbox: Extent, terrain: TinMesh, generation: number) => {
+        buildingsLoadingRef.current?.cancel()
+        setBuildings(null)
+        const started = performance.now()
+        const loading = loadBuildingsInWorker(bbox, terrain, {
+            onProgress: (phase, done, total) => {
+                if (generation === generationRef.current) setBuildingsStatus(buildingsStatusText(phase, done, total))
+            },
+        })
+        buildingsLoadingRef.current = loading
+        loading.promise
+            .then((result) => {
+                if (generation !== generationRef.current) return
+                console.log(
+                    `건물 레이어: ${result.built}개 세움(지형 밖 ${result.skipped}), 삼각형 ${(result.mesh.indices.length / 3).toLocaleString()}, ${Math.round(performance.now() - started)}ms`,
+                )
+                setBuildings(result.mesh)
+            })
+            .catch((err) => console.error("건물 레이어 실패:", err))
+            .finally(() => {
+                if (generation === generationRef.current) setBuildingsStatus(null)
+            })
+    }
+
+    /** 레이어 하나의 보기 또는 STL 포함을 바꾼다 */
+    const setLayerFlag = (id: LayerId, key: "visible" | "export", value: boolean) =>
+        setLayers((prev) => ({ ...prev, [id]: { ...prev[id], [key]: value } }))
+
     /** 표현 방식을 바꾼다. 다시 올리는 동안 busy 로 두고, 끝나면 onTerrainDone 이 푼다 */
     const toggleMode = () => {
         setBusy(true)
@@ -170,14 +242,23 @@ export default function App() {
     }
 
     /**
-     * 현재 지형을 STL 로 만들어 내려받는다. 현재 표현 방식(tin/stepped)대로 적는다.
+     * "STL" 에 체크된 레이어를 STL 하나로 만들어 내려받는다. 지형은 현재 표현 방식(tin/stepped)대로 적는다.
      * Worker 가 메쉬 사본으로 일하므로, 생성 중에 다른 지역을 골라도 먼저 시작한 내보내기는 그대로 끝난다
      */
     const exportStl = () => {
         if (!mesh || exporting) return
+        const layerMeshes = {
+            terrain: layers.terrain.export ? mesh : null,
+            buildings: layers.buildings.export ? buildings : null,
+        }
+        const included = LAYER_DEFS.map((d) => d.id).filter((id) => layerMeshes[id])
+        if (included.length === 0) {
+            window.alert("STL 에 넣을 레이어를 하나 이상 체크하세요")
+            return
+        }
         setExporting("STL 생성 중…")
         const started = performance.now()
-        const { promise } = exportStlInWorker(mesh, {
+        const { promise } = exportStlInWorker(layerMeshes, {
             mode,
             step: STEP_INTERVAL,
             onProgress: (ratio) => setExporting(`STL 생성 중… ${Math.floor(ratio * 100)}%`),
@@ -186,10 +267,10 @@ export default function App() {
             .then((blob) => {
                 const triangles = (blob.size - STL_HEADER_BYTES) / STL_TRIANGLE_BYTES
                 console.log(
-                    `STL 생성 (${mode}) ${(performance.now() - started).toFixed(0)}ms: ` +
+                    `STL 생성 (${included.join("+")}, 지형 ${mode}) ${(performance.now() - started).toFixed(0)}ms: ` +
                         `삼각형 ${triangles.toLocaleString()}개, ${(blob.size / 1048576).toFixed(1)}MB`,
                 )
-                downloadBlob(blob, stlFileName(mode))
+                downloadBlob(blob, stlFileName(mode, included))
             })
             .catch((err) => {
                 console.error(err)
@@ -212,6 +293,8 @@ export default function App() {
             {mesh && (
                 <TerrainViewCanvas
                     mesh={mesh}
+                    buildings={buildings}
+                    layers={layers}
                     mode={mode}
                     stepInterval={STEP_INTERVAL}
                     theme={theme}
@@ -245,10 +328,33 @@ export default function App() {
                     </>
                 )}
                 {exporting && <div style={busyBadgeStyle}>{exporting}</div>}
+                {buildingsStatus && <div style={busyBadgeStyle}>{buildingsStatus}</div>}
                 <button style={barButtonStyle} onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}>
                     {theme === "dark" ? "라이트 테마" : "다크 테마"}
                 </button>
             </div>
+            {terrainReady && (
+                <div style={layerPanelStyle}>
+                    <span style={layerPanelHeaderStyle}>레이어</span>
+                    <span style={layerPanelHeaderStyle}>보기</span>
+                    <span style={layerPanelHeaderStyle}>STL</span>
+                    {LAYER_DEFS.map(({ id, label }) => (
+                        <React.Fragment key={id}>
+                            <span>{label}</span>
+                            <input
+                                type="checkbox"
+                                checked={layers[id].visible}
+                                onChange={(e) => setLayerFlag(id, "visible", e.target.checked)}
+                            />
+                            <input
+                                type="checkbox"
+                                checked={layers[id].export}
+                                onChange={(e) => setLayerFlag(id, "export", e.target.checked)}
+                            />
+                        </React.Fragment>
+                    ))}
+                </div>
+            )}
         </>
     )
 }

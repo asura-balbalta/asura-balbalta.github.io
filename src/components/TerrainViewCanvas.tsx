@@ -1,5 +1,6 @@
 import React, { useEffect, useId, useRef, useState } from "react"
 
+import { INITIAL_LAYER_STATES, LAYER_DEFS, LayerStates } from "../layers"
 import { TinMesh } from "../terrainData"
 import { TERRAIN_THEMES, Theme } from "../terrainTheme"
 import type { SteppedMeshRequest, SteppedMeshResponse } from "../terrainSteps.worker"
@@ -52,11 +53,15 @@ const initialCamera = ({ min, max }: MeshBounds): OrbitCamera => ({
  *   올린다(meshStreamStarter). 변환 중에도 메인 스레드는 멈추지 않고, 계단형 메쉬 전체를 메모리에 두지 않는다.
  *   Worker 에는 원본의 사본(slice)을 transfer 하므로 원본 mesh 는 부모가 계속 들고 있다가 모드·층 간격을 바꿔 다시 쓸 수 있다.
  *   첫 조각이 올라갈 때 이전 지형을 교체하고 카메라를 맞춘다(onFirstChunk). 그때까지는 이전 지형이 그대로 보인다.
- * - theme 이 바뀌면 표고 색표와 배경색 uniform 만 다시 쓴다(셰이더·메쉬 그대로).
- * - 드래그: 회전(좌우 = azimuth, 상하 = elevation), 휠: 확대·축소(distance)
+ * - buildings(건물 레이어 메쉬)가 바뀌면 그 레이어의 GPU 버퍼만 교체한다(layerMeshUpdater). 카메라는 그대로.
+ * - layers 가 바뀌면 레이어별 보이기만 바꾼다(layerVisibilityUpdater). 버퍼는 그대로.
+ * - theme 이 바뀌면 표고 색표·건물색과 배경색 uniform 만 다시 쓴다(셰이더·메쉬 그대로).
+ * - 드래그: 회전(좌우 = azimuth, 상하 = elevation), 휠·두 손가락: 확대·축소(distance)
  * - 1차 구현이라 캔버스 크기는 마운트 시점 창 크기로 고정된다.
  *
  * @param props.mesh 원본 TIN 메쉬
+ * @param props.buildings 건물 레이어 메쉬(지형과 같은 원점). null 이면 비운다
+ * @param props.layers 레이어별 보이기 상태
  * @param props.mode 지형 표현 방식. "tin"(부드러운 음영, 표고 색) 또는 "stepped"(계단형, 단색)
  * @param props.stepInterval stepped 모드의 층 간격(m)
  * @param props.theme 색 테마(terrainTheme). 기본 "light"
@@ -66,6 +71,8 @@ const initialCamera = ({ min, max }: MeshBounds): OrbitCamera => ({
  */
 export const TerrainViewCanvas = ({
     mesh,
+    buildings = null,
+    layers = INITIAL_LAYER_STATES,
     mode = "tin",
     stepInterval = 1,
     theme = "light",
@@ -74,6 +81,8 @@ export const TerrainViewCanvas = ({
     onFirstChunk,
 }: {
     mesh: TinMesh
+    buildings?: TinMesh | null
+    layers?: LayerStates
     mode?: TerrainMode
     stepInterval?: number
     theme?: Theme
@@ -137,9 +146,23 @@ export const TerrainViewCanvas = ({
 
     useEffect(() => {
         if (!renderer) return
-        renderer.updaters.paletteUpdater(TERRAIN_THEMES[theme].stops)
+        renderer.updaters.paletteUpdater(TERRAIN_THEMES[theme])
         renderer.updaters.backgroundUpdater(TERRAIN_THEMES[theme].background)
     }, [renderer, theme])
+
+    useEffect(() => {
+        if (!renderer) return
+        try {
+            renderer.updaters.layerMeshUpdater("buildings", buildings)
+        } catch (err) {
+            console.error(err)
+        }
+    }, [renderer, buildings])
+
+    useEffect(() => {
+        if (!renderer) return
+        for (const { id } of LAYER_DEFS) renderer.updaters.layerVisibilityUpdater(id, layers[id].visible)
+    }, [renderer, layers])
 
     useEffect(() => {
         if (!renderer) return

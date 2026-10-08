@@ -3,7 +3,8 @@ import { STOP_COUNT } from "../terrainTheme"
 /**
  * 두 지형 셰이더가 같이 쓰는 WGSL 조각.
  * - Uniforms: viewProj 행렬(offset 0) + 표고 최소·최대(offset 64, 지금은 안 씀) + 카메라 위치(offset 80)
- *   + 표고 색표 stops(offset 96, vec4f × STOP_COUNT: z, r, g, b. 높이 오름차순), 총 96 + 16·STOP_COUNT 바이트
+ *   + 표고 색표 stops(offset 96, vec4f × STOP_COUNT: z, r, g, b. 높이 오름차순)
+ *   + 건물색 buildingColor(offset 96 + 16·STOP_COUNT, vec4f), 총 112 + 16·STOP_COUNT 바이트
  * - terrainColor(): 절대 표고 → 바탕색. 색표는 uniform 이라 테마 전환은 셰이더를 바꾸지 않고 uniform 만 다시 쓴다
  * - shade(): 남동쪽 위의 빛으로 난반사 조명. 지도 톤을 살리려고 주변광 60% + 난반사 40%, 정반사 없음
  */
@@ -15,6 +16,7 @@ const commonWgsl = /* wgsl */ `
         zRange: vec2f, // 표고 최소, 최대 (절대 표고 색표로 바꾼 뒤로는 안 쓴다)
         eye: vec3f, // 카메라 위치 (계단형의 양면 판정용)
         stops: array<vec4f, STOP_COUNT>, // 표고 색표: (z, r, g, b), 높이 오름차순
+        buildingColor: vec4f, // 건물 레이어 색 (r, g, b, 1)
     };
     @group(0) @binding(0) var<uniform> u: Uniforms;
 
@@ -114,6 +116,43 @@ export const createSteppedTerrainShader = () => ({
         let n = select(-faceNormal, faceNormal, dot(faceNormal, v) >= 0.0);
         let riserShade = 1.0 - 0.25 * (1.0 - abs(n.z));
         let base = terrainColor(input.world.z) * riserShade;
+        return vec4f(shade(base, n, v), 1);
+    }
+    `,
+})
+
+/**
+ * 건물 레이어 셰이더 descriptor. 건물은 바닥 폴리곤을 세운 상자라 면이 모두 평면이므로, 계단형 지형과 같이
+ * 정점 입력은 위치뿐이고 법선은 화면 미분으로 구한다(양면 조명). 색은 uniform 의 buildingColor 하나이고
+ * 벽(수직면)은 25% 어둡게 해 지붕과 구분한다.
+ *
+ * @returns `{ label, code }` 형태의 GPUShaderModuleDescriptor
+ */
+export const createBuildingShader = () => ({
+    label: "building shader",
+    code: /* wgsl */ `
+    ${commonWgsl}
+
+    struct VertexOutput {
+        @builtin(position) p: vec4f,
+        @location(0) world: vec3f,
+    };
+
+    @vertex
+    fn vertexMain(@location(0) pos: vec3f) -> VertexOutput {
+        var output: VertexOutput;
+        output.p = u.viewProj * vec4f(pos, 1);
+        output.world = pos;
+        return output;
+    }
+
+    @fragment
+    fn fragmentMain(input: VertexOutput) -> @location(0) vec4f {
+        let v = normalize(u.eye - input.world);
+        let faceNormal = normalize(cross(dpdx(input.world), dpdy(input.world)));
+        let n = select(-faceNormal, faceNormal, dot(faceNormal, v) >= 0.0);
+        let wallShade = 1.0 - 0.25 * (1.0 - abs(n.z));
+        let base = u.buildingColor.rgb * wallShade;
         return vec4f(shade(base, n, v), 1);
     }
     `,

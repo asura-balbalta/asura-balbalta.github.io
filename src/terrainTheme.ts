@@ -28,6 +28,8 @@ export type TerrainTheme = {
     background: { r: number; g: number; b: number }
     /** 표고 색표. 지도 타일의 톤에 맞춘 것. 같은 높이는 선택 범위와 무관하게 같은 색 */
     stops: ElevationStop[]
+    /** 건물 레이어 색("#RRGGBB"). 지붕 기준이고 벽은 셰이더가 25% 어둡게 한다 */
+    buildingColor: string
 }
 
 /** "#RRGGBB" → 0 ~ 1 rgb */
@@ -59,6 +61,7 @@ export const TERRAIN_THEMES: Record<Theme, TerrainTheme> = {
             { z: 500, hex: "#A8ADAE" }, // 산지
             { z: 1000, hex: "#7E8486" }, // 고산
         ],
+        buildingColor: "#CFC9C0", // 평지(#EEEFED)보다 조금 어두운 따뜻한 회색
     },
     dark: {
         mapLayer: "alidade_smooth_dark",
@@ -78,6 +81,7 @@ export const TERRAIN_THEMES: Record<Theme, TerrainTheme> = {
             { z: 500, hex: "#5B5F62" }, // 산지
             { z: 1000, hex: "#787D80" }, // 고산
         ],
+        buildingColor: "#6B7075", // 평지(#313335)보다 밝은 회색
     },
 }
 

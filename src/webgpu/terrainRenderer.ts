@@ -1,16 +1,21 @@
+import { LayerId } from "../layers"
 import { MeshChunk, TinMesh } from "../terrainData"
-import { ElevationStop, STOP_COUNT, stopsToUniform } from "../terrainTheme"
+import { hexToRgb, STOP_COUNT, stopsToUniform, TerrainTheme } from "../terrainTheme"
 import { OrbitCamera, orbitEye, orbitViewProj } from "./camera"
 import { initWebGPU } from "./device"
-import { createSmoothTerrainShader, createSteppedTerrainShader } from "./shaders"
+import { createBuildingShader, createSmoothTerrainShader, createSteppedTerrainShader } from "./shaders"
 
 const DEPTH_FORMAT: GPUTextureFormat = "depth24plus"
 const NORMAL_SMOOTH_ITERATIONS = 2
 const STOPS_OFFSET = 96 // 표고 색표 array<vec4f, STOP_COUNT> 의 시작 (shaders.ts 의 Uniforms 와 같아야 한다)
-const UNIFORM_SIZE = STOPS_OFFSET + 16 * STOP_COUNT // viewProj mat4x4f(0~64) + zRange vec2f(64~72) + eye vec3f(80~92) + stops
+const BUILDING_COLOR_OFFSET = STOPS_OFFSET + 16 * STOP_COUNT // 건물색 vec4f
+const UNIFORM_SIZE = BUILDING_COLOR_OFFSET + 16 // viewProj mat4x4f(0~64) + zRange vec2f(64~72) + eye vec3f(80~92) + stops + buildingColor
 
 /** 지형 표현 방식. tin: 정점 법선으로 부드럽게, stepped: 계단형(면 법선, 법선 버퍼 없음) */
 export type TerrainMode = "tin" | "stepped"
+
+/** 지형 밖의 레이어. 메쉬 하나를 통째로 받아 올리고(layerMeshUpdater) 전용 파이프라인으로 그린다 */
+export type OverlayLayerId = Exclude<LayerId, "terrain">
 
 /** 메쉬 정점 좌표의 범위. 원점을 뺀 로컬 좌표(m) 기준 */
 export type MeshBounds = {
@@ -237,15 +242,16 @@ const float32x3Layout = (shaderLocation: number): GPUVertexBufferLayout => ({
  * 지형 pass 와 그 데이터를 바꾸는 updater 들을 만든다.
  *
  * 셰이더 모듈, 파이프라인(깊이 테스트 포함), uniform 버퍼, 바인드그룹은 여기서 한 번만 만든다.
- * 파이프라인은 모드별로 둘이다: tin(좌표 + 정점 법선, 부드러운 음영), stepped(좌표만, 셰이더에서 면 법선).
- * uniform 버퍼는 둘이 같이 쓰고, 바인드그룹만 파이프라인마다 만든다(layout "auto" 라서).
+ * 파이프라인은 셋이다: 지형 tin(좌표 + 정점 법선, 부드러운 음영), 지형 stepped(좌표만, 셰이더에서 면 법선),
+ * buildings(좌표만, 면 법선, 건물색). uniform 버퍼는 모두 같이 쓰고, 바인드그룹만 파이프라인마다 만든다(layout "auto" 라서).
+ * GPU 조각은 레이어별로 들고 있고(layerChunks), pass 는 보이는 레이어만 그린다(layerVisibilityUpdater).
  * 메쉬와 카메라는 반환하는 updater 로 버퍼만 바꾼다.
  *
  * @param device GPU device
  * @param format 캔버스 텍스처 포맷
  * @param depthView 배경 pass 와 공유하는 깊이 텍스처 view
  * @param aspect 화면 가로/세로 비율(카메라 투영용)
- * @returns terrainPass, meshUpdater, meshStreamStarter, streamedMeshUpdater, cameraUpdater
+ * @returns scenePass 와 updater 들
  */
 const createTerrainDrawingPassAndUpdaters = (
     device: GPUDevice,
@@ -259,15 +265,15 @@ const createTerrainDrawingPassAndUpdaters = (
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     })
 
-    /** 모드별 파이프라인과 그 바인드그룹을 만든다 */
+    /** 파이프라인과 그 바인드그룹을 만든다 */
     const createPipelineSet = (
-        mode: TerrainMode,
+        name: string,
         shader: GPUShaderModuleDescriptor,
         buffers: GPUVertexBufferLayout[],
     ) => {
         const shaderModule = device.createShaderModule(shader)
         const pipeline = device.createRenderPipeline({
-            label: `terrain pipeline (${mode})`,
+            label: `pipeline (${name})`,
             layout: "auto",
             vertex: { module: shaderModule, entryPoint: "vertexMain", buffers },
             fragment: {
@@ -283,31 +289,42 @@ const createTerrainDrawingPassAndUpdaters = (
             },
         })
         const bindGroup = device.createBindGroup({
-            label: `terrain bind group (${mode})`,
+            label: `bind group (${name})`,
             layout: pipeline.getBindGroupLayout(0),
             entries: [{ binding: 0, resource: { buffer: uniformBuffer } }],
         })
         return { pipeline, bindGroup }
     }
 
-    const pipelines: Record<TerrainMode, ReturnType<typeof createPipelineSet>> = {
-        tin: createPipelineSet("tin", createSmoothTerrainShader(), [
+    const pipelines: Record<TerrainMode | OverlayLayerId, ReturnType<typeof createPipelineSet>> = {
+        tin: createPipelineSet("terrain tin", createSmoothTerrainShader(), [
             float32x3Layout(0),
             float32x3Layout(1),
         ]),
-        stepped: createPipelineSet("stepped", createSteppedTerrainShader(), [
+        stepped: createPipelineSet("terrain stepped", createSteppedTerrainShader(), [
             float32x3Layout(0),
         ]),
+        buildings: createPipelineSet("buildings", createBuildingShader(), [float32x3Layout(0)]),
     }
 
     let mode: TerrainMode = "tin"
-    /** GPU 에 올라간 메쉬 조각들. 한 프레임에 조각 수만큼 drawIndexed 한다 */
-    let gpuChunks: {
+    type GpuChunk = {
         vertexBuffer: GPUBuffer
         normalBuffer: GPUBuffer | null
         indexBuffer: GPUBuffer
         indexCount: number
-    }[] = []
+    }
+    /** 레이어별로 GPU 에 올라간 메쉬 조각들. 한 프레임에 보이는 레이어의 조각 수만큼 drawIndexed 한다 */
+    const layerChunks: Record<LayerId, GpuChunk[]> = { terrain: [], buildings: [] }
+    const layerVisible: Record<LayerId, boolean> = { terrain: true, buildings: true }
+
+    const destroyChunks = (chunks: GpuChunk[]) => {
+        for (const c of chunks) {
+            c.vertexBuffer.destroy()
+            c.normalBuffer?.destroy()
+            c.indexBuffer.destroy()
+        }
+    }
 
     /** 버퍼를 만들고 데이터를 써서 돌려준다 */
     const uploadBuffer = (label: string, usage: GPUBufferUsageFlags, data: Float32Array | Uint32Array) => {
@@ -315,6 +332,14 @@ const createTerrainDrawingPassAndUpdaters = (
         device.queue.writeBuffer(buffer, 0, data)
         return buffer
     }
+
+    /** 조각을 GPU 버퍼로 올린 GpuChunk 를 만든다 */
+    const uploadChunk = (label: string, chunk: MeshChunk): GpuChunk => ({
+        vertexBuffer: uploadBuffer(`${label} vertices`, GPUBufferUsage.VERTEX, chunk.positions),
+        normalBuffer: chunk.normals ? uploadBuffer(`${label} normals`, GPUBufferUsage.VERTEX, chunk.normals) : null,
+        indexBuffer: uploadBuffer(`${label} indices`, GPUBufferUsage.INDEX, chunk.indices),
+        indexCount: chunk.indices.length,
+    })
 
     /**
      * 조각 단위 메쉬 교체를 시작한다. 조각을 하나씩 받아 올리는 함수들을 돌려주며, 조각이 나중에(Worker 메시지 등으로)
@@ -345,12 +370,8 @@ const createTerrainDrawingPassAndUpdaters = (
         const start = () => {
             started = true
             mode = newMode
-            for (const c of gpuChunks) {
-                c.vertexBuffer.destroy()
-                c.normalBuffer?.destroy()
-                c.indexBuffer.destroy()
-            }
-            gpuChunks = []
+            destroyChunks(layerChunks.terrain)
+            layerChunks.terrain = []
             device.queue.writeBuffer(
                 uniformBuffer,
                 64,
@@ -361,14 +382,7 @@ const createTerrainDrawingPassAndUpdaters = (
         const addChunk = (chunk: MeshChunk) => {
             if (!started) start()
             if (mode === "tin" && !chunk.normals) throw new Error("tin 모드 조각에는 normals 가 필요함")
-            gpuChunks.push({
-                vertexBuffer: uploadBuffer("terrain vertices", GPUBufferUsage.VERTEX, chunk.positions),
-                normalBuffer: chunk.normals
-                    ? uploadBuffer("terrain normals", GPUBufferUsage.VERTEX, chunk.normals)
-                    : null,
-                indexBuffer: uploadBuffer("terrain indices", GPUBufferUsage.INDEX, chunk.indices),
-                indexCount: chunk.indices.length,
-            })
+            layerChunks.terrain.push(uploadChunk("terrain", chunk))
             vertices += chunk.positions.length / 3
             indices += chunk.indices.length
             largestChunkBytes = Math.max(largestChunkBytes, chunk.positions.byteLength, chunk.indices.byteLength)
@@ -376,10 +390,37 @@ const createTerrainDrawingPassAndUpdaters = (
         const finish = () => {
             if (!started) start()
             console.log(
-                `GPU 버퍼: ${gpuChunks.length}조각 (가장 큰 조각 ${Math.round(largestChunkBytes / 1048576)}MB, device 한도 ${Math.round(maxBytes / 1048576)}MB, 정점 ${vertices}, 인덱스 ${indices})`,
+                `GPU 버퍼(지형): ${layerChunks.terrain.length}조각 (가장 큰 조각 ${Math.round(largestChunkBytes / 1048576)}MB, device 한도 ${Math.round(maxBytes / 1048576)}MB, 정점 ${vertices}, 인덱스 ${indices})`,
             )
         }
         return { maxBytes, addChunk, finish }
+    }
+
+    /**
+     * 지형 밖 레이어(건물 등)의 메쉬를 통째로 교체한다. 이전 조각을 해제하고, 버퍼 한도 안의 조각으로 나눠 올린다.
+     * 법선 버퍼는 쓰지 않는다(레이어 셰이더가 면 법선을 화면 미분으로 구함).
+     *
+     * @param id 레이어
+     * @param mesh 그릴 메쉬(지형과 같은 원점의 xyz). null 이면 비운다
+     */
+    const layerMeshUpdater = (id: OverlayLayerId, mesh: TinMesh | null) => {
+        destroyChunks(layerChunks[id])
+        layerChunks[id] = []
+        if (!mesh) return
+        for (const chunk of splitMeshIntoChunks(mesh.positions, mesh.indices, undefined, device.limits.maxBufferSize)) {
+            layerChunks[id].push(uploadChunk(id, chunk))
+        }
+        console.log(`GPU 버퍼(${id}): ${layerChunks[id].length}조각, 정점 ${mesh.positions.length / 3}, 인덱스 ${mesh.indices.length}`)
+    }
+
+    /**
+     * 레이어를 그릴지 정한다(다음 프레임부터). 메쉬·버퍼는 그대로 두므로 바로 켜고 끌 수 있다.
+     *
+     * @param id 레이어
+     * @param visible true 면 그린다
+     */
+    const layerVisibilityUpdater = (id: LayerId, visible: boolean) => {
+        layerVisible[id] = visible
     }
 
     /**
@@ -447,25 +488,34 @@ const createTerrainDrawingPassAndUpdaters = (
     }
 
     /**
-     * 표고 색표(uniform offset STOPS_OFFSET)를 쓴다. 테마 전환 때 부른다. 셰이더·파이프라인은 그대로다.
+     * 표고 색표(uniform offset STOPS_OFFSET)와 건물색(BUILDING_COLOR_OFFSET)을 쓴다. 테마 전환 때 부른다.
+     * 셰이더·파이프라인은 그대로다.
      *
-     * @param stops 색표 단계 STOP_COUNT 개(높이 오름차순)
+     * @param theme 색표 단계 STOP_COUNT 개(높이 오름차순)와 건물색을 가진 테마
      */
-    const paletteUpdater = (stops: ElevationStop[]) => {
-        device.queue.writeBuffer(uniformBuffer, STOPS_OFFSET, stopsToUniform(stops))
+    const paletteUpdater = (theme: Pick<TerrainTheme, "stops" | "buildingColor">) => {
+        device.queue.writeBuffer(uniformBuffer, STOPS_OFFSET, stopsToUniform(theme.stops))
+        const { r, g, b } = hexToRgb(theme.buildingColor)
+        device.queue.writeBuffer(uniformBuffer, BUILDING_COLOR_OFFSET, new Float32Array([r, g, b, 1]))
     }
 
     /**
-     * 지형을 그리는 pass. 배경 pass 가 비운 색·깊이 버퍼를 load 해서 그 위에 그린다.
-     * meshUpdater 가 정한 모드의 파이프라인으로, 메쉬 조각마다 버퍼를 바꿔 가며 drawIndexed 한다(tin 모드에서만 법선 버퍼 바인딩).
-     * 아직 meshUpdater 로 메쉬가 들어오지 않았으면 아무것도 하지 않는다.
+     * 장면을 그리는 pass. 배경 pass 가 비운 색·깊이 버퍼를 load 해서 그 위에 그린다.
+     * 보이는 레이어마다 파이프라인을 바꾸고(지형은 meshUpdater 가 정한 모드, 그 밖은 레이어 전용), 조각마다 버퍼를
+     * 바꿔 가며 drawIndexed 한다(tin 모드에서만 법선 버퍼 바인딩). 그릴 조각이 없으면 아무것도 하지 않는다.
      *
      * @param encoder 이번 프레임의 command encoder
      * @param context 캔버스 context
      */
-    const terrainPass = (encoder: GPUCommandEncoder, context: GPUCanvasContext) => {
-        if (gpuChunks.length === 0) return
-        const { pipeline, bindGroup } = pipelines[mode]
+    const scenePass = (encoder: GPUCommandEncoder, context: GPUCanvasContext) => {
+        const draws: { chunks: GpuChunk[]; set: ReturnType<typeof createPipelineSet> }[] = []
+        if (layerVisible.terrain && layerChunks.terrain.length > 0) {
+            draws.push({ chunks: layerChunks.terrain, set: pipelines[mode] })
+        }
+        if (layerVisible.buildings && layerChunks.buildings.length > 0) {
+            draws.push({ chunks: layerChunks.buildings, set: pipelines.buildings })
+        }
+        if (draws.length === 0) return
 
         const pass = encoder.beginRenderPass({
             colorAttachments: [
@@ -481,18 +531,29 @@ const createTerrainDrawingPassAndUpdaters = (
                 depthStoreOp: "store",
             },
         })
-        pass.setPipeline(pipeline)
-        pass.setBindGroup(0, bindGroup)
-        for (const c of gpuChunks) {
-            pass.setVertexBuffer(0, c.vertexBuffer)
-            if (c.normalBuffer) pass.setVertexBuffer(1, c.normalBuffer)
-            pass.setIndexBuffer(c.indexBuffer, "uint32")
-            pass.drawIndexed(c.indexCount)
+        for (const { chunks, set } of draws) {
+            pass.setPipeline(set.pipeline)
+            pass.setBindGroup(0, set.bindGroup)
+            for (const c of chunks) {
+                pass.setVertexBuffer(0, c.vertexBuffer)
+                if (c.normalBuffer) pass.setVertexBuffer(1, c.normalBuffer)
+                pass.setIndexBuffer(c.indexBuffer, "uint32")
+                pass.drawIndexed(c.indexCount)
+            }
         }
         pass.end()
     }
 
-    return { terrainPass, meshUpdater, meshStreamStarter, streamedMeshUpdater, cameraUpdater, paletteUpdater }
+    return {
+        scenePass,
+        meshUpdater,
+        meshStreamStarter,
+        streamedMeshUpdater,
+        layerMeshUpdater,
+        layerVisibilityUpdater,
+        cameraUpdater,
+        paletteUpdater,
+    }
 }
 
 /**
@@ -500,14 +561,14 @@ const createTerrainDrawingPassAndUpdaters = (
  *
  * 1. initWebGPU 로 device·context 준비
  * 2. 캔버스 크기의 깊이 텍스처 생성
- * 3. 배경 pass, 지형 pass·updater 생성
+ * 3. 배경 pass, 장면 pass·updater 생성
  *
  * @param options.canvasId 대상 canvas 요소의 id
  * @param options.width 캔버스 실제 픽셀 너비(canvas width 속성과 같아야 한다)
  * @param options.height 캔버스 실제 픽셀 높이
  * @param options.backgroundColor 처음 배경색(0 ~ 1). backgroundUpdater 로 바꿀 수 있다
- * @returns render(한 프레임 그리기), updaters(meshUpdater, meshStreamStarter, streamedMeshUpdater, cameraUpdater, paletteUpdater,
- *   backgroundUpdater), destroy(device 해제)
+ * @returns render(한 프레임 그리기), updaters(meshUpdater, meshStreamStarter, streamedMeshUpdater, layerMeshUpdater,
+ *   layerVisibilityUpdater, cameraUpdater, paletteUpdater, backgroundUpdater), destroy(device 해제)
  */
 export const createTerrainRenderFunctionAndUpdateFunctions = async ({
     canvasId,
@@ -532,22 +593,21 @@ export const createTerrainRenderFunctionAndUpdateFunctions = async ({
 
     const background = { color: backgroundColor }
     const backgroundPass = renderBackgroundPassFactory(background, depthView)
-    const { terrainPass, meshUpdater, meshStreamStarter, streamedMeshUpdater, cameraUpdater, paletteUpdater } =
-        createTerrainDrawingPassAndUpdaters(device, format, depthView, width / height)
+    const { scenePass, ...sceneUpdaters } = createTerrainDrawingPassAndUpdaters(device, format, depthView, width / height)
     /** 배경색을 바꾼다(다음 프레임부터). 테마 전환용 */
     const backgroundUpdater = (color: { r: number; g: number; b: number }) => {
         background.color = color
     }
 
-    /** 한 프레임을 그린다: 배경 pass → 지형 pass 순으로 기록해 제출한다 */
+    /** 한 프레임을 그린다: 배경 pass → 장면 pass 순으로 기록해 제출한다 */
     const render = () => {
         const encoder = device.createCommandEncoder()
         backgroundPass(encoder, context)
-        terrainPass(encoder, context)
+        scenePass(encoder, context)
         device.queue.submit([encoder.finish()])
     }
 
-    const updaters = { meshUpdater, meshStreamStarter, streamedMeshUpdater, cameraUpdater, paletteUpdater, backgroundUpdater }
+    const updaters = { ...sceneUpdaters, backgroundUpdater }
 
     /** GPU device 와 그에 속한 버퍼·텍스처를 모두 해제한다. 컴포넌트 언마운트 때 호출 */
     const destroy = () => device.destroy()
