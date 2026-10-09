@@ -9,12 +9,13 @@
 
 /* 유리: 지도·3D 위에 떠 있는 것(레일, 알약, 미니맵 틀, 탭 막대). 테두리는 border 가 아니라 안쪽 그림자로 그려 폭을 먹지 않는다
    (레일 48 = 4 + 40 + 4). backdrop-filter 는 blur() saturate() 를 먼저 두고, 굴절 필터는 지원 브라우저에서만 덧쓴다 */
+/* 테두리는 1px 번진 안쪽 선. 선명한 1px 선은 모서리가 각져 보여 3D 화면의 WebGL 유리(베벨·그림자로 번짐)와 달라 보였다 */
 .ui-glass {
     background: var(--ui-glass);
     -webkit-backdrop-filter: blur(var(--ui-glass-blur)) saturate(var(--ui-glass-saturate));
     backdrop-filter: blur(var(--ui-glass-blur)) saturate(var(--ui-glass-saturate));
     box-shadow:
-        inset 0 0 0 1px var(--ui-glass-edge),
+        inset 0 0 1px 1px var(--ui-glass-edge),
         inset 0 1px 0 var(--ui-glass-highlight),
         var(--ui-shadow-float);
     color: var(--ui-text);
@@ -27,6 +28,15 @@
     backdrop-filter: blur(var(--ui-glass-blur)) saturate(var(--ui-glass-saturate));
     border-top: 1px solid var(--ui-glass-edge);
     color: var(--ui-text);
+}
+
+/* 리퀴드 글래스(ui/liquidGlass.ts)가 켜진 동안(3D 화면): 떠 있는 유리의 CSS 유리를 끄고 주입된 캔버스가 그린다.
+   상태 표시줄(glass-strong)은 작은 글자가 많아 그대로 CSS 유리 */
+.ui-lg .ui-glass {
+    background: transparent;
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    box-shadow: none;
 }
 
 /* 단색 패널: 글이 많은 면(사이드 패널, 시트). 메뉴·토스트는 Fluent 가 같은 색으로 그린다 */
@@ -63,52 +73,56 @@ button.ui-status-pill:focus-visible,
     color: var(--ui-text-secondary);
 }
 
-/* ---- 레일 (데스크톱 왼쪽 위) ---- */
+/* ---- 독 (데스크톱 아래 가운데, 상태 표시줄 28px 위) ---- */
 
-.ui-rail {
+.ui-dock {
     position: fixed;
-    left: 12px;
-    top: 12px;
+    left: 50%;
+    bottom: calc(28px + 12px);
+    transform: translateX(-50%);
     z-index: 20;
-    width: 48px;
+    height: 48px;
     box-sizing: border-box;
     padding: 4px;
-    border-radius: 12px;
+    /* macOS 독 정도의 라운드. 탭 막대와 같다 */
+    border-radius: 16px;
     display: flex;
-    flex-direction: column;
+    align-items: center;
     gap: 4px;
 }
 
-/* Fluent Button size="large" 는 40px 높이. 폭도 40 으로 맞춰 정사각형 */
-.ui-rail .ui-rail-button {
+/* Fluent Button size="large" 는 40px 높이. 폭도 40 으로 맞춰 정사각형. 모서리는 독 16px 에서 패딩 4px 을 뺀 12px */
+.ui-dock .ui-dock-button {
     width: 40px;
     min-width: 40px;
     height: 40px;
     padding: 0;
-    border-radius: 8px;
+    border-radius: 12px;
 }
 
-/* 열려 있는 패널의 버튼: 강조 옅은 바탕 + 왼쪽 2px 강조선 */
-.ui-rail .ui-rail-open {
+/* 열려 있는 패널의 버튼: 강조 옅은 바탕 + 아래 2px 강조선 */
+.ui-dock .ui-dock-open {
     background: var(--ui-accent-tint);
-    box-shadow: inset 2px 0 0 var(--ui-accent);
+    box-shadow: inset 0 -2px 0 var(--ui-accent);
 }
 
-.ui-rail-divider {
-    height: 1px;
-    margin: 2px 6px;
+.ui-dock-divider {
+    width: 1px;
+    height: 28px;
+    margin: 0 2px;
     background: var(--ui-divider);
 }
 
-/* ---- 사이드 패널 (레일 오른쪽) ---- */
+/* ---- 독 패널 (독 위 팝오버) ---- */
 
-.ui-sidepanel {
+.ui-dock-panel {
     position: fixed;
-    left: 68px;
-    top: 12px;
+    left: 50%;
+    bottom: calc(28px + 12px + 48px + 8px);
+    transform: translateX(-50%);
     z-index: 20;
     width: 272px;
-    max-height: calc(100vh - 12px - 28px - 12px);
+    max-height: calc(100vh - 96px - 12px);
     display: flex;
     flex-direction: column;
     overflow: hidden;
@@ -444,7 +458,8 @@ button.ui-status-pill:focus-visible,
     height: 56px;
     box-sizing: border-box;
     padding: 0 8px;
-    border-radius: 999px;
+    /* macOS 독 정도의 라운드(시안은 알약). 독과 같다 */
+    border-radius: 16px;
     display: flex;
     align-items: center;
     justify-content: space-around;
@@ -456,7 +471,7 @@ button.ui-status-pill:focus-visible,
     height: 44px;
     padding: 0;
     border: 0;
-    border-radius: 999px;
+    border-radius: 12px;
     background: transparent;
     display: flex;
     flex-direction: column;

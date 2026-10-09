@@ -1,7 +1,7 @@
 import { ArrowDownloadRegular, LayerRegular, SettingsRegular, SquareRegular } from "@fluentui/react-icons"
 import React from "react"
 
-import { PanelId } from "./Rail"
+import { PanelId } from "./Dock"
 
 const PANELS: { id: PanelId; label: string; icon: React.ReactElement }[] = [
     { id: "layers", label: "레이어", icon: <LayerRegular fontSize={18} /> },

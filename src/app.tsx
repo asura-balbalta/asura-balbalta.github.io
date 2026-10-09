@@ -24,9 +24,9 @@ import { ExportPanel } from "./ui/ExportPanel"
 import { HintPill } from "./ui/HintPill"
 import { LayersPanel } from "./ui/LayersPanel"
 import { MapFrame } from "./ui/MapFrame"
-import { PanelId, Rail } from "./ui/Rail"
+import { Dock, PanelId } from "./ui/Dock"
 import { SettingsPanel } from "./ui/SettingsPanel"
-import { SidePanel } from "./ui/SidePanel"
+import { DockPanel } from "./ui/DockPanel"
 import { StatusBar, StatusMenu } from "./ui/StatusBar"
 import { fluentTheme, uiCssVars } from "./ui/theme"
 import { AppToaster, useAppToast } from "./ui/Toasts"
@@ -34,6 +34,7 @@ import { BottomSheet } from "./ui/BottomSheet"
 import { StatusPill } from "./ui/StatusPill"
 import { TabBar } from "./ui/TabBar"
 import { MOBILE_QUERY, useMediaQuery } from "./ui/useMediaQuery"
+import { LIQUID_GLASS_ENABLED, useLiquidGlass } from "./ui/liquidGlass"
 import { Button, Menu, MenuItem, MenuList, MenuPopover, MenuTrigger } from "@fluentui/react-components"
 import { TerrainMode } from "./webgpu/terrainRenderer"
 
@@ -103,9 +104,11 @@ const extentKmText = (extent: Extent) => {
 export default function AppRoot() {
     const [theme, setTheme] = useState<Theme>(INITIAL_THEME)
     const isMobile = useMediaQuery(MOBILE_QUERY)
+    /** 리퀴드 글래스 프로토타입의 루트(유리 요소·3D 캔버스의 부모) */
+    const rootRef = useRef<HTMLDivElement | null>(null)
     return (
-        <FluentProvider theme={fluentTheme(theme)} style={{ ...uiCssVars(theme), background: "transparent" }}>
-            <App theme={theme} setTheme={setTheme} isMobile={isMobile} />
+        <FluentProvider ref={rootRef} theme={fluentTheme(theme)} style={{ ...uiCssVars(theme), background: "transparent" }}>
+            <App theme={theme} setTheme={setTheme} isMobile={isMobile} rootRef={rootRef} />
             {/* 모바일은 탭 막대 위(ui.css --ui-above-tabbar: 20 + 56 + 8) */}
             <AppToaster bottom={isMobile ? 84 : 40} />
         </FluentProvider>
@@ -113,8 +116,8 @@ export default function AppRoot() {
 }
 
 /**
- * 화면. 지도(또는 3D) 위에 레일 · 사이드 패널 · 상태 표시줄 · 미니맵 · 안내 알약이 뜬다(docs/design-code-plan.md).
- * 모바일(< 768px)은 같은 상태로 그릇만 바꾼다: 레일 → 탭 막대, 사이드 패널 → 바텀 시트, 상태 표시줄 → 상태 알약(작업 중에만),
+ * 화면. 지도(또는 3D) 위에 독(아래 가운데) · 독 위 패널 · 상태 표시줄 · 미니맵 · 안내 알약이 뜬다(docs/design-code-plan.md).
+ * 모바일(< 768px)은 같은 상태로 그릇만 바꾼다: 독 → 탭 막대, 독 패널 → 바텀 시트, 상태 표시줄 → 상태 알약(작업 중에만),
  * 미니맵은 접을 수 있고 그 아래 보기 모드 빠른 메뉴가 있다.
  *
  * 흐름: 지도 화면 → 범위 그리기 → 로딩(상태 표시줄에 진행) → 3D 화면(지도는 미니맵으로) → 내려받기. 미니맵의 "지도로" 는
@@ -122,7 +125,17 @@ export default function AppRoot() {
  *
  * @param props.isMobile 모바일 그릇을 쓸지
  */
-function App({ theme, setTheme, isMobile }: { theme: Theme; setTheme: (theme: Theme) => void; isMobile: boolean }) {
+function App({
+    theme,
+    setTheme,
+    isMobile,
+    rootRef,
+}: {
+    theme: Theme
+    setTheme: (theme: Theme) => void
+    isMobile: boolean
+    rootRef: React.RefObject<HTMLDivElement | null>
+}) {
     const toast = useAppToast()
     const mapRef = useRef<Map | null>(null)
     /** 사각형 선택 도구. 레일 맨 위 버튼으로 모드를 켜고 끈다 */
@@ -166,6 +179,8 @@ function App({ theme, setTheme, isMobile }: { theme: Theme; setTheme: (theme: Th
     useEffect(() => {
         if (view === "map") setMinimapCollapsed(false)
     }, [view])
+    // 리퀴드 글래스(?glass=0 으로 끔): 3D 화면에서만
+    useLiquidGlass(LIQUID_GLASS_ENABLED && view === "3d" && !!mesh, rootRef)
     /** 지형 로딩·생성 진행. busy 인데 단계가 없으면(모드 전환 직후 등) 기본 문구를 쓴다 */
     const [terrainProgress, setTerrainProgress] = useState<Progress | null>(null)
     /** 진행 중인 지형 로딩. 새 선택이 오면 취소한다 */
@@ -369,8 +384,8 @@ function App({ theme, setTheme, isMobile }: { theme: Theme; setTheme: (theme: Th
     const included = mesh ? exportableLayers({ terrain: mesh, buildings }, layers) : []
 
     // 폭에 따라 그릇만 바꾼다. props 는 같다
-    const Toolbar = isMobile ? TabBar : Rail
-    const Panel = isMobile ? BottomSheet : SidePanel
+    const Toolbar = isMobile ? TabBar : Dock
+    const Panel = isMobile ? BottomSheet : DockPanel
 
     /**
      * 모바일에서 탭 막대 위 왼쪽에 서는 알약: 작업 중이면 상태 알약, 아니면 지도 화면에서 "3D로 돌아가기".
@@ -403,7 +418,7 @@ function App({ theme, setTheme, isMobile }: { theme: Theme; setTheme: (theme: Th
                     onFirstChunk={showTerrain}
                 />
             )}
-            {/* 레일(탭 막대)이 지도 틀보다 앞에 와야 Tab 키가 도구부터 닿는다. 겹침은 z-index 가 정한다 */}
+            {/* 독(탭 막대)이 지도 틀보다 앞에 와야 Tab 키가 도구부터 닿는다. 겹침은 z-index 가 정한다 */}
             <Toolbar
                 drawing={selecting}
                 onToggleDraw={() => squareToolRef.current?.setActive(!selecting)}

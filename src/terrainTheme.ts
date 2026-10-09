@@ -117,8 +117,8 @@ export const TERRAIN_THEMES: Record<Theme, TerrainTheme> = {
             "focus-inner": "#ffffff",
             glass: "rgba(255, 255, 255, 0.35)",
             "glass-strong": "rgba(255, 255, 255, 0.8)",
-            "glass-edge": "rgba(255, 255, 255, 0.8)",
-            "glass-highlight": "rgba(255, 255, 255, 0.9)",
+            "glass-edge": "rgba(255, 255, 255, 0.45)",
+            "glass-highlight": "rgba(255, 255, 255, 0.55)",
         },
         background: hexToRgb("#5B6064"),
         stops: [
@@ -166,8 +166,8 @@ export const TERRAIN_THEMES: Record<Theme, TerrainTheme> = {
             "focus-inner": "#000000",
             glass: "rgba(26, 26, 26, 0.4)",
             "glass-strong": "rgba(31, 31, 31, 0.7)",
-            "glass-edge": "rgba(255, 255, 255, 0.14)",
-            "glass-highlight": "rgba(255, 255, 255, 0.12)",
+            "glass-edge": "rgba(255, 255, 255, 0.1)",
+            "glass-highlight": "rgba(255, 255, 255, 0.08)",
         },
         background: hexToRgb("#0B0C0E"),
         stops: [

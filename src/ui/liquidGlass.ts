@@ -1,0 +1,112 @@
+import { LiquidGlass } from "../vendor/liquidglass/index.js"
+import { RefObject, useEffect } from "react"
+
+/**
+ * 리퀴드 글래스(3D 화면의 유리 그릇). 기본으로 켜고, 비교·디버그용으로 URL 에 ?glass=0 을 주면 CSS 유리로 돌아간다.
+ *
+ * 라이브러리는 루트의 직계 자식을 캔버스로 떠서(일반 DOM 은 html-to-image, canvas 는 drawImage) 유리 요소 위치에 WebGL 로
+ * 굴절·흐림을 그린다. 3D 화면에서만 켠다: WebGPU 캔버스는 루트 직계 자식이라 data-dynamic 을 주면 매 프레임 drawImage 로
+ * 복사되지만, 지도 화면의 OpenLayers 는 div 안의 캔버스라 html-to-image 경로를 타서 끌 때마다 다시 떠야 해 쓸 수 없다.
+ * 켜는 동안 루트에 ui-lg 클래스를 달아 CSS 유리(배경·흐림·그림자)를 끄고, 유리 요소의 첫 자식으로 주입되는 캔버스가 그린다.
+ * 요소마다 모서리 반지름을 dataset.config 로 준다(라이브러리 기본 65px 은 알약 전용).
+ * 라이브러리는 init 때 받은 요소만 그리므로, 루트의 자식이 바뀌어 유리 대상 집합이 달라지면(모바일 ↔ 데스크톱 전환으로
+ * 탭 막대 ↔ 독이 갈아 끼워지거나, 상태 알약·빠른 메뉴가 생기고 없어질 때) 인스턴스를 부수고 다시 만든다.
+ * 상태 표시줄은 작은 글자가 많아 대상에서 빼고 CSS 유리(glass-strong)를 유지한다.
+ * 측정용으로 window.__lg 에 인스턴스를 둔다(fps 속성).
+ */
+export const LIQUID_GLASS_ENABLED = new URLSearchParams(window.location.search).get("glass") !== "0"
+
+/**
+ * 유리 요소 선택자 → 모서리 반지름(ui.css 의 border-radius 와 같게)과 베벨 깊이 zRadius(px).
+ * 셰이더는 가장자리에서 zRadius 만큼 들어올 때까지 높이를 올리고 그 뒤 평평하다. zRadius 가 요소 높이의 절반보다 크면
+ * 평평한 구간이 없어 가운데 선에서 기울기가 뒤집혀 굴절 경계가 가로선으로 보인다. 그래서 높이 절반보다 작게 둔다
+ * 베벨 폭만큼 테두리 안쪽에 굴절 띠가 생기므로 좁게(5px) 둔다. 처음 10~12 로 두니 테두리 안쪽에 흐린 띠가 보였다
+ */
+const GLASS_TARGETS: [selector: string, config: { cornerRadius: number; zRadius: number }][] = [
+    [".ui-dock", { cornerRadius: 16, zRadius: 5 }],
+    [".ui-pill", { cornerRadius: 16, zRadius: 5 }],
+    [".ui-tabbar", { cornerRadius: 16, zRadius: 5 }],
+    [".ui-status-pill", { cornerRadius: 14, zRadius: 5 }],
+    [".ui-quick-menu", { cornerRadius: 16, zRadius: 5 }],
+]
+
+/**
+ * @param active 3D 화면에서 true. 바뀔 때마다 만들고 부순다
+ * @param root 루트 요소(FluentProvider 의 div). 유리 요소와 WebGPU 캔버스가 그 직계 자식이어야 한다
+ */
+export const useLiquidGlass = (active: boolean, root: RefObject<HTMLElement | null>) => {
+    useEffect(() => {
+        const rootEl = root.current
+        if (!active || !rootEl) return
+        const w = window as unknown as { __lg?: LiquidGlass }
+        let instance: LiquidGlass | null = null
+        let disposed = false
+        /** 초기화 세대. 늦게 끝난 이전 초기화는 버린다 */
+        let generation = 0
+        let registered: HTMLElement[] = []
+        let timer = 0
+
+        /** 지금 루트에 있는 유리 대상 요소(모서리 반지름 config 를 달아서) */
+        const collect = () => {
+            const glass: HTMLElement[] = []
+            for (const [selector, config] of GLASS_TARGETS) {
+                for (const el of rootEl.querySelectorAll<HTMLElement>(selector)) {
+                    el.dataset.config = JSON.stringify(config)
+                    glass.push(el)
+                }
+            }
+            return glass
+        }
+        const start = () => {
+            const gen = ++generation
+            const canvas = rootEl.querySelector<HTMLCanvasElement>('canvas[id^="terrain-canvas"]')
+            if (canvas) canvas.dataset.dynamic = ""
+            registered = collect()
+            rootEl.classList.add("ui-lg")
+            LiquidGlass.init({
+                root: rootEl,
+                glassElements: registered,
+                // 가장자리 빛·프레넬·색수차를 낮춰 테두리 안쪽 띠가 보이지 않게. 흐림과 약한 굴절만 남긴다
+                defaults: {
+                    blurAmount: 0.25,
+                    refraction: 0.35,
+                    chromAberration: 0.01,
+                    edgeHighlight: 0.02,
+                    fresnel: 0.3,
+                    specular: 0.08,
+                    shadowOpacity: 0.2,
+                    shadowSpread: 8,
+                },
+            })
+                .then((created) => {
+                    if (disposed || gen !== generation) return created.destroy()
+                    instance = created
+                    w.__lg = created
+                })
+                .catch((err) => console.error("리퀴드 글래스 초기화 실패:", err))
+        }
+        const restart = () => {
+            if (disposed) return
+            instance?.destroy()
+            instance = null
+            start()
+        }
+        start()
+        // 루트의 자식이 바뀌어 유리 대상 집합이 달라지면 다시 만든다(같으면 그대로)
+        const observer = new MutationObserver(() => {
+            const now = collect()
+            if (now.length === registered.length && now.every((el, i) => el === registered[i])) return
+            window.clearTimeout(timer)
+            timer = window.setTimeout(restart, 50)
+        })
+        observer.observe(rootEl, { childList: true })
+        return () => {
+            disposed = true
+            window.clearTimeout(timer)
+            observer.disconnect()
+            instance?.destroy()
+            rootEl.classList.remove("ui-lg")
+            delete w.__lg
+        }
+    }, [active, root])
+}
