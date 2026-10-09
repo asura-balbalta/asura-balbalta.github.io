@@ -34,7 +34,7 @@ import { BottomSheet } from "./ui/BottomSheet"
 import { StatusPill } from "./ui/StatusPill"
 import { TabBar } from "./ui/TabBar"
 import { MOBILE_QUERY, useMediaQuery } from "./ui/useMediaQuery"
-import { Button } from "@fluentui/react-components"
+import { Button, Menu, MenuItem, MenuList, MenuPopover, MenuTrigger } from "@fluentui/react-components"
 import { TerrainMode } from "./webgpu/terrainRenderer"
 
 /** 처음 보여 줄 지형 표현 방식. "tin": 삼각형 메쉬 그대로, "stepped": 등고선 모형처럼 계단형. 설정 패널·상태 표시줄에서 바꾼다 */
@@ -45,8 +45,8 @@ const INITIAL_THEME: Theme = "light"
 const INITIAL_BASEMAP: BasemapProvider = "stadia"
 /** 계단형일 때 처음 층 간격(m). 설정 패널에서 0.1 ~ 5 로 바꾼다 */
 const INITIAL_STEP_INTERVAL = 1
-/** 처음 지형 데이터 출처. "ttp": 점·등고선 조각을 받아 프론트가 삼각분할(기본), "ttm": v1 도엽별 메쉬(비교용). 설정에서 바꾼다 */
-const INITIAL_TERRAIN_SOURCE: TerrainSource = "ttp"
+/** 지형 데이터 출처. "ttp": 점·등고선 조각을 받아 프론트가 삼각분할. "ttm"(v1 도엽별 메쉬)은 개발 서버 전용이라 설정에 두지 않는다 */
+const TERRAIN_SOURCE: TerrainSource = "ttp"
 /** ttm 일 때, 합친 뒤 도엽 경계 없이 다시 삼각분할할지(terrainRetri). ttp 는 항상 삼각분할한다 */
 const RETRIANGULATE = true
 
@@ -106,8 +106,8 @@ export default function AppRoot() {
     return (
         <FluentProvider theme={fluentTheme(theme)} style={{ ...uiCssVars(theme), background: "transparent" }}>
             <App theme={theme} setTheme={setTheme} isMobile={isMobile} />
-            {/* 모바일은 탭 막대(56px + 여백 12px × 2) 위에 */}
-            <AppToaster bottom={isMobile ? 92 : 40} />
+            {/* 모바일은 탭 막대 위(ui.css --ui-above-tabbar: 20 + 56 + 8) */}
+            <AppToaster bottom={isMobile ? 84 : 40} />
         </FluentProvider>
     )
 }
@@ -115,7 +115,7 @@ export default function AppRoot() {
 /**
  * 화면. 지도(또는 3D) 위에 레일 · 사이드 패널 · 상태 표시줄 · 미니맵 · 안내 알약이 뜬다(docs/design-code-plan.md).
  * 모바일(< 768px)은 같은 상태로 그릇만 바꾼다: 레일 → 탭 막대, 사이드 패널 → 바텀 시트, 상태 표시줄 → 상태 알약(작업 중에만),
- * 미니맵은 접을 수 있다.
+ * 미니맵은 접을 수 있고 그 아래 보기 모드 빠른 메뉴가 있다.
  *
  * 흐름: 지도 화면 → 범위 그리기 → 로딩(상태 표시줄에 진행) → 3D 화면(지도는 미니맵으로) → 내려받기. 미니맵의 "지도로" 는
  * 3D 를 숨기고 지도 화면으로 돌아가며, 상태 표시줄의 "3D로 돌아가기" 로 되돌아온다. 로딩 중에는 버튼을 숨기지 않고 비활성으로 둔다
@@ -153,18 +153,19 @@ function App({ theme, setTheme, isMobile }: { theme: Theme; setTheme: (theme: Th
     const [mode, setMode] = useState<TerrainMode>(INITIAL_TERRAIN_MODE)
     /** 계단형 층 간격(m). 바꾸면 계단형 지형을 다시 만든다 */
     const [stepInterval, setStepInterval] = useState(INITIAL_STEP_INTERVAL)
-    /** 지형 데이터 출처. 바꾸면 현재 범위의 지형을 다시 받는다 */
-    const [terrainSource, setTerrainSource] = useState<TerrainSource>(INITIAL_TERRAIN_SOURCE)
-    const terrainSourceRef = useRef(terrainSource)
-    terrainSourceRef.current = terrainSource
     /** 바탕 지도 출처. 설정으로 바꾸거나, 타일 로딩이 계속 실패하면(무료 한도 초과) 자동으로 다음 출처로 넘어간다 */
     const [basemap, setBasemap] = useState<BasemapProvider>(INITIAL_BASEMAP)
     /** 3D 지형이 한 번이라도 화면에 올라갔으면 true. 레이어·내려받기 패널과 보기 모드 전환을 연다 */
     const [terrainReady, setTerrainReady] = useState(false)
     /** 보이는 화면. 3D 가 준비되면 "3d" 로 넘어가고, 미니맵의 "지도로" 가 "map" 으로 되돌린다 */
     const [view, setView] = useState<"map" | "3d">("map")
-    /** 열려 있는 사이드 패널 */
+    /** 열려 있는 패널(독 팝오버 또는 바텀 시트) */
     const [openPanel, setOpenPanel] = useState<PanelId | null>(null)
+    /** 모바일 미니맵이 접혀 있는지. 지도 화면으로 돌아가면 풀어, 다음에 미니맵이 될 때 펼친 채 시작한다 */
+    const [minimapCollapsed, setMinimapCollapsed] = useState(false)
+    useEffect(() => {
+        if (view === "map") setMinimapCollapsed(false)
+    }, [view])
     /** 지형 로딩·생성 진행. busy 인데 단계가 없으면(모드 전환 직후 등) 기본 문구를 쓴다 */
     const [terrainProgress, setTerrainProgress] = useState<Progress | null>(null)
     /** 진행 중인 지형 로딩. 새 선택이 오면 취소한다 */
@@ -173,10 +174,10 @@ function App({ theme, setTheme, isMobile }: { theme: Theme; setTheme: (theme: Th
     const [exporting, setExporting] = useState<{ kind: ExportKind; ratio?: number } | null>(null)
 
     /**
-     * 범위의 지형을 Worker 로 받아 mesh 로 만든다. 사각형 확정과 데이터 출처 변경이 부른다.
+     * 범위의 지형을 Worker 로 받아 mesh 로 만든다. 사각형 확정이 부른다.
      * 이전 로딩은 취소하고, 늦게 돌아온 결과는 generation 으로 버린다
      */
-    const startTerrainLoad = (bbox: Extent, source: TerrainSource) => {
+    const startTerrainLoad = (bbox: Extent) => {
         const generation = ++generationRef.current
         setBusy(true)
         setTerrainProgress(null)
@@ -184,7 +185,7 @@ function App({ theme, setTheme, isMobile }: { theme: Theme; setTheme: (theme: Th
         setSheetCount(null)
         loadingRef.current?.cancel()
         const loading = loadTerrainInWorker(bbox, {
-            source,
+            source: TERRAIN_SOURCE,
             retriangulate: RETRIANGULATE,
             onProgress: (phase, done, total) => {
                 if (generation === generationRef.current) setTerrainProgress(loadProgress(phase, done, total))
@@ -209,7 +210,7 @@ function App({ theme, setTheme, isMobile }: { theme: Theme; setTheme: (theme: Th
 
     useEffect(() => {
         initOlMap({
-            onSquareConfirmed: (bbox) => startTerrainLoad(bbox, terrainSourceRef.current),
+            onSquareConfirmed: startTerrainLoad,
             onSheets: setSheetCount,
             theme: TERRAIN_THEMES[INITIAL_THEME],
             basemap: INITIAL_BASEMAP,
@@ -299,13 +300,6 @@ function App({ theme, setTheme, isMobile }: { theme: Theme; setTheme: (theme: Th
         setStepInterval(next)
     }
 
-    /** 지형 데이터 출처를 바꾼다. 범위가 있으면 그 범위를 새 출처로 다시 받는다 */
-    const changeTerrainSource = (next: TerrainSource) => {
-        if (next === terrainSource) return
-        setTerrainSource(next)
-        if (selection) startTerrainLoad(selection, next)
-    }
-
     const onTerrainDone = (ok: boolean) => {
         setBusy(false)
         setTerrainProgress(null)
@@ -378,6 +372,19 @@ function App({ theme, setTheme, isMobile }: { theme: Theme; setTheme: (theme: Th
     const Toolbar = isMobile ? TabBar : Rail
     const Panel = isMobile ? BottomSheet : SidePanel
 
+    /**
+     * 모바일에서 탭 막대 위 왼쪽에 서는 알약: 작업 중이면 상태 알약, 아니면 지도 화면에서 "3D로 돌아가기".
+     * 시트가 열려 있으면 시트 위에 한 묶음으로 얹고(above), 아니면 혼자 선다
+     */
+    const mobilePill = progress ? (
+        <StatusPill label={progress.label} ratio={progress.ratio} />
+    ) : view === "map" && terrainReady && !busy ? (
+        <button type="button" className="ui-status-pill ui-glass" onClick={() => setView("3d")}>
+            3D로 돌아가기
+        </button>
+    ) : null
+    const panelAbove = isMobile ? mobilePill : undefined
+
     return (
         <>
             {mesh && (
@@ -410,13 +417,35 @@ function App({ theme, setTheme, isMobile }: { theme: Theme; setTheme: (theme: Th
                 onExpand={() => setView("map")}
                 attribution={basemapAttribution(basemap)}
                 collapsible={isMobile}
+                collapsed={minimapCollapsed}
+                onCollapsedChange={setMinimapCollapsed}
                 onResize={() => mapRef.current?.updateSize()}
             >
                 <div id="map" className="ui-map"></div>
             </MapFrame>
+            {/* 모바일 3D 화면의 빠른 메뉴(화면 시안 "모바일 · 3D"): 미니맵 아래에서 보기 모드를 바꾼다 */}
+            {isMobile && view === "3d" && terrainReady && (
+                <Menu positioning="below-end">
+                    <MenuTrigger disableButtonEnhancement>
+                        <button
+                            type="button"
+                            className={`ui-quick-menu ui-glass${minimapCollapsed ? " ui-quick-menu-collapsed" : ""}`}
+                            disabled={busy}
+                        >
+                            {mode === "stepped" ? "계단형" : "매끈한 면"} ▾
+                        </button>
+                    </MenuTrigger>
+                    <MenuPopover>
+                        <MenuList>
+                            <MenuItem onClick={() => changeMode("stepped")}>{mode === "stepped" ? "✓ " : ""}계단형</MenuItem>
+                            <MenuItem onClick={() => changeMode("tin")}>{mode === "tin" ? "✓ " : ""}매끈한 면</MenuItem>
+                        </MenuList>
+                    </MenuPopover>
+                </Menu>
+            )}
 
             {openPanel === "layers" && (
-                <Panel title="레이어" onClose={() => setOpenPanel(null)}>
+                <Panel title="레이어" onClose={() => setOpenPanel(null)} above={panelAbove}>
                     <LayersPanel
                         layers={layers}
                         onChange={setLayerFlag}
@@ -426,12 +455,12 @@ function App({ theme, setTheme, isMobile }: { theme: Theme; setTheme: (theme: Th
                 </Panel>
             )}
             {openPanel === "export" && (
-                <Panel title="내려받기" onClose={() => setOpenPanel(null)}>
+                <Panel title="내려받기" onClose={() => setOpenPanel(null)} above={panelAbove}>
                     <ExportPanel exporting={exporting} onExport={startExport} included={included} />
                 </Panel>
             )}
             {openPanel === "settings" && (
-                <Panel title="설정" onClose={() => setOpenPanel(null)}>
+                <Panel title="설정" onClose={() => setOpenPanel(null)} above={panelAbove}>
                     <SettingsPanel
                         theme={theme}
                         onTheme={setTheme}
@@ -442,12 +471,14 @@ function App({ theme, setTheme, isMobile }: { theme: Theme; setTheme: (theme: Th
                         modeDisabled={!terrainReady || busy}
                         stepInterval={stepInterval}
                         onStepInterval={changeStepInterval}
-                        terrainSource={terrainSource}
-                        onTerrainSource={changeTerrainSource}
                     />
                 </Panel>
             )}
 
+            {/* 모바일 지도 화면에서 아무것도 안 하고 있을 때: 첫 할 일 안내(화면 시안 "모바일 · 지도") */}
+            {isMobile && !selecting && view === "map" && !busy && (
+                <HintPill text='아래 "범위"를 누르고 지도를 끌어 그리세요' />
+            )}
             {selecting && view === "map" && (
                 !HAS_FINE_POINTER ? (
                     <HintPill text="지도를 끌어 범위를 그리세요" />
@@ -459,18 +490,8 @@ function App({ theme, setTheme, isMobile }: { theme: Theme; setTheme: (theme: Th
             )}
 
             {isMobile ? (
-                // 모바일: 작업 중에만 상태 알약, 아니면 지도 화면에서 "3D로 돌아가기" 알약
-                progress ? (
-                    <StatusPill label={progress.label} ratio={progress.ratio} />
-                ) : (
-                    view === "map" &&
-                    terrainReady &&
-                    !busy && (
-                        <button type="button" className="ui-status-pill ui-glass" onClick={() => setView("3d")}>
-                            3D로 돌아가기
-                        </button>
-                    )
-                )
+                // 시트가 열려 있으면 알약은 시트 위에 얹혀 있다(above)
+                openPanel ? null : mobilePill
             ) : (
                 <StatusBar progress={progress} stats={stats} menus={menus}>
                     {view === "map" && terrainReady && !busy && (

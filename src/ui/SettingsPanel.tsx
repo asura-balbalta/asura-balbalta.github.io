@@ -2,7 +2,6 @@ import { Button, Input } from "@fluentui/react-components"
 import React, { useEffect, useState } from "react"
 
 import { BASEMAP_PROVIDERS, BasemapProvider } from "../basemap"
-import type { TerrainSource } from "../terrainLoad.worker"
 import { Theme } from "../terrainTheme"
 import type { TerrainMode } from "../webgpu/terrainRenderer"
 
@@ -36,9 +35,13 @@ const Segment = <T extends string>({
     </div>
 )
 
+/** 계단 간격(m)의 허용 범위. 0.1 은 삼각형 메쉬 원형이 드러나 의미가 없어 0.3 부터 */
+const STEP_MIN = 0.3
+const STEP_MAX = 5
+
 /**
- * 설정 패널의 내용. 테마 · 바탕 지도 · 보기 모드 · 계단 간격 · 지형 데이터 출처. 값을 바꾸면 즉시 적용된다.
- * 계단 간격과 출처는 지형을 다시 만들므로 app 이 그 처리를 맡는다.
+ * 설정 패널의 내용. 테마 · 바탕 지도 · 보기 모드 · 계단 간격. 테마·바탕 지도·보기는 누르면 즉시 적용되고,
+ * 계단 간격은 숫자를 바꾼 뒤 "다시 만들기"(또는 Enter)를 눌러야 적용된다(계단형 지형을 다시 만드는 일이라 명시적으로).
  *
  * @param props.modeDisabled 아직 3D 지형이 없어 보기 모드를 바꿀 수 없을 때
  */
@@ -52,8 +55,6 @@ export const SettingsPanel = ({
     modeDisabled,
     stepInterval,
     onStepInterval,
-    terrainSource,
-    onTerrainSource,
 }: {
     theme: Theme
     onTheme: (theme: Theme) => void
@@ -64,16 +65,15 @@ export const SettingsPanel = ({
     modeDisabled?: boolean
     stepInterval: number
     onStepInterval: (step: number) => void
-    terrainSource: TerrainSource
-    onTerrainSource: (source: TerrainSource) => void
 }) => {
-    // 입력 중의 글자는 따로 두고, 유효한 숫자(0.1 ~ 5)일 때만 부모에 알린다
+    // 입력 중의 글자는 따로 두고, "다시 만들기" 를 눌렀을 때만 부모에 알린다
     const [stepText, setStepText] = useState(String(stepInterval))
     useEffect(() => setStepText(String(stepInterval)), [stepInterval])
+    const stepValue = Number(stepText)
+    const stepValid = Number.isFinite(stepValue) && stepValue >= STEP_MIN && stepValue <= STEP_MAX
+    const stepChanged = stepValid && stepValue !== stepInterval
     const commitStep = () => {
-        const v = Number(stepText)
-        if (Number.isFinite(v) && v >= 0.1 && v <= 5) onStepInterval(v)
-        else setStepText(String(stepInterval))
+        if (stepChanged) onStepInterval(stepValue)
     }
     return (
         <>
@@ -120,31 +120,24 @@ export const SettingsPanel = ({
                         id="setting-step"
                         size="small"
                         type="number"
-                        min={0.1}
-                        max={5}
+                        min={STEP_MIN}
+                        max={STEP_MAX}
                         step={0.1}
                         value={stepText}
                         onChange={(_, data) => setStepText(data.value)}
-                        onBlur={commitStep}
                         onKeyDown={(e) => e.key === "Enter" && commitStep()}
+                        aria-invalid={!stepValid}
                         style={{ width: 64 }}
                     />
                     <span className="ui-settings-unit">m</span>
+                    <Button size="small" appearance={stepChanged ? "primary" : "secondary"} disabled={!stepChanged} onClick={commitStep}>
+                        다시 만들기
+                    </Button>
                 </span>
             </div>
-            <div className="ui-settings-row">
-                <span>데이터 출처</span>
-                <Segment
-                    label="지형 데이터 출처"
-                    value={terrainSource}
-                    options={[
-                        { value: "ttp", label: "ttp" },
-                        { value: "ttm", label: "ttm" },
-                    ]}
-                    onChange={onTerrainSource}
-                />
+            <div className="ui-panel-footer">
+                계단 간격은 {STEP_MIN} ~ {STEP_MAX} m 입니다. 바꾼 뒤 "다시 만들기" 를 누르면 계단형 지형을 다시 만듭니다.
             </div>
-            <div className="ui-panel-footer">계단 간격은 계단형 지형을, 출처는 지형 전체를 다시 만든다.</div>
         </>
     )
 }

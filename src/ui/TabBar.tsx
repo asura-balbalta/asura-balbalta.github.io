@@ -1,18 +1,18 @@
-import { Button } from "@fluentui/react-components"
 import { ArrowDownloadRegular, LayerRegular, SettingsRegular, SquareRegular } from "@fluentui/react-icons"
 import React from "react"
 
 import { PanelId } from "./Rail"
 
 const PANELS: { id: PanelId; label: string; icon: React.ReactElement }[] = [
-    { id: "layers", label: "레이어", icon: <LayerRegular /> },
-    { id: "export", label: "내려받기", icon: <ArrowDownloadRegular /> },
-    { id: "settings", label: "설정", icon: <SettingsRegular /> },
+    { id: "layers", label: "레이어", icon: <LayerRegular fontSize={18} /> },
+    { id: "export", label: "내려받기", icon: <ArrowDownloadRegular fontSize={18} /> },
+    { id: "settings", label: "설정", icon: <SettingsRegular fontSize={18} /> },
 ]
 
 /**
- * 모바일 아래 가운데 탭 막대(56px 유리 알약). 레일의 모바일 변형이라 props 가 Rail 과 같다: 범위 그리기 토글 + 패널 버튼 셋.
- * 모양은 ui.css(.ui-tabbar). 버튼은 44px 원형(터치 최소 크기).
+ * 모바일 아래 탭 막대(화면 시안 "모바일" 4장): 좌우 12px 을 채운 56px 유리 알약 안에 72×44 버튼 넷, 아이콘 위에 10px 이름.
+ * 레일의 모바일 변형이라 props 가 Rail 과 같다. 범위 버튼은 그리기 중이면 강조 채움에 "취소", 열린 패널의 버튼은 옅은 강조
+ * 바탕에 굵은 글씨. 모양은 ui.css(.ui-tabbar). Fluent Button 은 아이콘·글자를 세로로 쌓기 어려워 직접 그린다
  *
  * @param props.drawing 범위 그리기 모드가 켜져 있으면 true
  * @param props.onToggleDraw 범위 그리기 버튼을 눌렀을 때
@@ -37,32 +37,31 @@ export const TabBar = ({
     panelDisabled?: Partial<Record<PanelId, boolean>>
 }) => (
     <nav className="ui-tabbar ui-glass" aria-label="도구">
-        <Button
-            className="ui-tab-button"
-            appearance={drawing ? "primary" : "subtle"}
-            size="large"
-            shape="circular"
-            icon={<SquareRegular />}
-            aria-label={drawing ? "그리기 취소" : "범위 그리기"}
+        <button
+            type="button"
+            className={drawing ? "ui-tab-button ui-tab-primary" : "ui-tab-button"}
             aria-pressed={drawing}
             disabled={drawDisabled}
             onClick={onToggleDraw}
-        />
+        >
+            <SquareRegular fontSize={18} />
+            {drawing ? "취소" : "범위"}
+        </button>
         {PANELS.map(({ id, label, icon }) => {
             const open = openPanel === id
             return (
-                <Button
+                <button
                     key={id}
+                    type="button"
                     className={open ? "ui-tab-button ui-tab-open" : "ui-tab-button"}
-                    appearance="subtle"
-                    size="large"
-                    shape="circular"
-                    icon={icon}
-                    aria-label={open ? `${label} 패널 닫기` : label}
                     aria-pressed={open}
+                    aria-label={open ? `${label} 패널 닫기` : undefined}
                     disabled={panelDisabled?.[id]}
                     onClick={() => onOpenPanel(open ? null : id)}
-                />
+                >
+                    {icon}
+                    {label}
+                </button>
             )
         })}
     </nav>

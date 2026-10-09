@@ -9,6 +9,7 @@ import React, { ReactNode } from "react"
  * @param props.title 머리글 제목
  * @param props.onClose 닫기 버튼
  * @param props.footer 꼬리말(안내 문장). 없으면 생략
+ * @param props.above 모바일 시트가 위에 얹는 요소(상태 알약). 데스크톱에서는 쓰지 않는다
  */
 export const SidePanel = ({
     title,
@@ -19,6 +20,7 @@ export const SidePanel = ({
     title: string
     onClose: () => void
     footer?: ReactNode
+    above?: ReactNode
     children: ReactNode
 }) => (
     <section className="ui-panel ui-sidepanel" aria-label={title}>

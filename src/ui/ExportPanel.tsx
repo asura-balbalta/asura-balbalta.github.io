@@ -50,8 +50,8 @@ export const ExportPanel = ({
             {included.length > 0
                 ? `담는 레이어: ${LAYER_DEFS.filter((d) => included.includes(d.id))
                       .map((d) => d.label)
-                      .join(" · ")}. 레이어 패널의 "내보내기" 체크를 따른다.`
-                : '담을 레이어가 없다. 레이어 패널에서 "내보내기" 를 하나 이상 체크한다.'}
+                      .join(" · ")}. 레이어 패널의 "내보내기" 체크를 따릅니다.`
+                : '담을 레이어가 없습니다. 레이어 패널에서 "내보내기" 를 하나 이상 체크하세요.'}
         </div>
     </>
 )

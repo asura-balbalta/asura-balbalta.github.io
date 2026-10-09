@@ -50,6 +50,6 @@ export const LayersPanel = ({
                 />
             </div>
         ))}
-        <div className="ui-panel-footer">내려받기는 "내보내기" 에 체크한 레이어만 담는다.</div>
+        <div className="ui-panel-footer">내려받기 파일에는 "내보내기" 에 체크한 레이어만 담깁니다.</div>
     </>
 )

@@ -38,11 +38,14 @@
     color: var(--ui-text);
 }
 
-/* 직접 만든 버튼(지도로·접기·상태 알약)의 키보드 포커스 링. Fluent 버튼은 자기 링(2px)을 그린다.
+/* 직접 만든 버튼(지도로·접기·상태 알약·탭 막대·빠른 메뉴)의 키보드 포커스 링. Fluent 버튼은 자기 링(2px)을 그린다.
    바깥 2px focus + 안쪽 1px focus-inner(디자인 시스템 focus 토큰) */
 .ui-minimap-button:focus-visible,
 .ui-minimap-collapse:focus-visible,
 button.ui-status-pill:focus-visible,
+.ui-tabbar .ui-tab-button:focus-visible,
+.ui-minimap-icon:focus-visible,
+.ui-quick-menu:focus-visible,
 .ui-minimap-collapsed:focus-visible {
     outline: 2px solid var(--ui-focus);
     outline-offset: 1px;
@@ -425,32 +428,60 @@ button.ui-status-pill:focus-visible,
 
 /* ---- 모바일 (< 768px): 탭 막대 · 바텀 시트 · 상태 알약 · 접히는 미니맵 ---- */
 
-/* 탭 막대: 아래 가운데 56px 유리 알약. 시트 위에 떠 있으므로 z-index 가 시트보다 높다 */
+/* 아래 여백: 탭 막대 아래 20px(+ safe-area)에 저작권 한 줄(9px)이 들어간다. 탭 막대 위에 두는 것은 --ui-above-tabbar 부터 */
+:root {
+    --ui-tabbar-bottom: calc(20px + env(safe-area-inset-bottom));
+    --ui-above-tabbar: calc(var(--ui-tabbar-bottom) + 56px + 8px);
+}
+
+/* 탭 막대: 좌우 12px 을 채운 56px 유리 알약(화면 시안). 시트 위에 떠 있으므로 z-index 가 시트보다 높다 */
 .ui-tabbar {
     position: fixed;
-    left: 50%;
-    bottom: calc(12px + env(safe-area-inset-bottom));
-    transform: translateX(-50%);
+    left: 12px;
+    right: 12px;
+    bottom: var(--ui-tabbar-bottom);
     z-index: 30;
     height: 56px;
     box-sizing: border-box;
-    padding: 6px;
+    padding: 0 8px;
     border-radius: 999px;
     display: flex;
     align-items: center;
-    gap: 4px;
+    justify-content: space-around;
 }
 
+/* 72×44 버튼: 아이콘 위, 10px 이름 아래 */
 .ui-tabbar .ui-tab-button {
-    width: 44px;
-    min-width: 44px;
+    width: 72px;
     height: 44px;
     padding: 0;
+    border: 0;
+    border-radius: 999px;
+    background: transparent;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+    font: 400 10px / 12px inherit;
+    font-family: inherit;
+    color: var(--ui-text);
+    cursor: pointer;
 }
-
-/* 열려 있는 패널의 버튼 */
+.ui-tabbar .ui-tab-button:disabled {
+    color: var(--ui-text-disabled);
+    cursor: default;
+}
+/* 그리기 중인 범위 버튼: 강조 채움 */
+.ui-tabbar .ui-tab-primary {
+    background: var(--ui-accent);
+    color: var(--ui-text-on-accent);
+    font-weight: 600;
+}
+/* 열려 있는 패널의 버튼: 옅은 강조 바탕 */
 .ui-tabbar .ui-tab-open {
     background: var(--ui-accent-tint);
+    font-weight: 600;
 }
 
 /* safe-area 위 여백을 JS(BottomSheet 의 fullHeight)도 읽을 수 있게 변수로 */
@@ -458,19 +489,30 @@ button.ui-status-pill:focus-visible,
     --ui-safe-top: env(safe-area-inset-top, 0px);
 }
 
-/* 바텀 시트: 아래에 붙은 단색 패널. 탭 막대가 위에 떠 있으므로 그만큼 아래 여백.
-   높이는 dvh(보이는 영역) 기준: iOS Safari 의 vh 는 주소창이 접힌 큰 화면 기준이라 시트가 화면 위로 넘친다 */
-.ui-sheet {
+/* 바텀 시트 묶음: 탭 막대 위에 뜬 카드와 그 위의 상태 알약(화면 시안 "모바일 · 3D"). 알약은 왼쪽 정렬, 카드는 가로를 채운다 */
+.ui-sheet-stack {
     position: fixed;
-    left: 0;
-    right: 0;
-    bottom: 0;
+    left: 12px;
+    right: 12px;
+    bottom: var(--ui-above-tabbar);
     z-index: 25;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+}
+.ui-sheet-stack .ui-status-pill {
+    position: static;
+}
+
+/* 시트 카드. 반쯤 높이는 dvh(보이는 영역) 기준: iOS Safari 의 vh 는 주소창이 접힌 큰 화면 기준이라 넘친다.
+   전체 높이는 BottomSheet 가 재서 인라인 height 로 준다 */
+.ui-sheet {
+    position: relative;
+    align-self: stretch;
     max-height: 50dvh;
     box-sizing: border-box;
-    padding-bottom: calc(80px + env(safe-area-inset-bottom));
-    border-radius: 12px 12px 0 0;
-    border-bottom: 0;
+    border-radius: 12px;
     display: flex;
     flex-direction: column;
     overflow: hidden;
@@ -478,10 +520,17 @@ button.ui-status-pill:focus-visible,
         transform 0.2s ease-out,
         height 0.2s ease-out;
 }
-/* 전체: 높이를 적지 않고 위·아래를 고정해 보이는 영역에 맞춘다 */
 .ui-sheet-expanded {
-    top: calc(12px + env(safe-area-inset-top));
     max-height: none;
+}
+.ui-sheet-header-right {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.ui-sheet-hint {
+    font-size: 11px;
+    color: var(--ui-text-secondary);
 }
 /* 끄는 중: 인라인 height 가 그대로 먹게 max-height 를 풀고, 손가락을 바로 따라가게 transition 없음 */
 .ui-sheet-dragging {
@@ -517,7 +566,7 @@ button.ui-status-pill:focus-visible,
 .ui-status-pill {
     position: fixed;
     left: 12px;
-    bottom: calc(80px + env(safe-area-inset-bottom));
+    bottom: var(--ui-above-tabbar);
     z-index: 26;
     display: flex;
     align-items: center;
@@ -541,21 +590,49 @@ button.ui-status-pill {
     min-width: 64px;
 }
 
-/* 미니맵 오른쪽 위 접기 버튼 */
-.ui-minimap-collapse {
+/* 모바일 미니맵의 아이콘 버튼: 왼쪽 아래 지도로, 오른쪽 아래 접기. 시안은 28px·아이콘 12px 인데 작아서 32px·16px 로 키움 */
+.ui-minimap-icon {
     position: absolute;
-    top: 6px;
-    right: 6px;
-    width: 24px;
-    height: 24px;
+    bottom: 4px;
+    width: 32px;
+    height: 32px;
     padding: 0;
     border: 0;
-    border-radius: 999px;
+    border-radius: 8px;
     display: flex;
     align-items: center;
     justify-content: center;
-    color: var(--ui-text-on-glass-secondary);
+    color: var(--ui-text);
     cursor: pointer;
+}
+.ui-minimap-icon-left {
+    left: 4px;
+}
+.ui-minimap-icon-right {
+    right: 4px;
+}
+
+/* 모바일 3D 화면의 빠른 메뉴: 미니맵(150px) 아래 8px. 미니맵이 접히면(96px) 따라 올라간다 */
+.ui-quick-menu {
+    position: fixed;
+    right: 12px;
+    top: calc(12px + env(safe-area-inset-top) + 150px + 8px);
+    z-index: 10;
+    height: 32px;
+    padding: 0 12px;
+    border: 0;
+    border-radius: 999px;
+    font: 400 12px / 16px inherit;
+    font-family: inherit;
+    color: var(--ui-text);
+    cursor: pointer;
+}
+.ui-quick-menu-collapsed {
+    top: calc(12px + env(safe-area-inset-top) + 96px + 8px);
+}
+.ui-quick-menu:disabled {
+    color: var(--ui-text-disabled);
+    cursor: default;
 }
 
 /* 접힌 미니맵: 96px 반투명 원. 탭하면 펼친다 */
@@ -580,21 +657,31 @@ button.ui-status-pill {
         width: 96px;
         height: 96px;
     }
+    /* 모바일 미니맵의 저작권: 아래 양쪽에 아이콘 버튼이 있으므로 왼쪽 위에 */
+    .ui-minimap .ui-map-attribution {
+        top: 4px;
+        bottom: auto;
+        left: 4px;
+        right: 4px;
+        text-align: left;
+    }
+    /* left: 50% 배치는 가용 폭이 화면 절반이 되므로 글자 폭(max-content)으로 잡고, 그래도 넘치면 접는다 */
     .ui-pill {
         top: calc(12px + env(safe-area-inset-top));
+        width: max-content;
         max-width: calc(100vw - 24px);
         box-sizing: border-box;
         white-space: normal;
         text-align: center;
     }
-    /* 전체 지도의 저작권: 탭 막대 위 오른쪽, 상태 알약(28px) 한 줄 위라 넓은 알약과도 겹치지 않는다. 좁으면 두 줄 */
+    /* 전체 지도의 저작권: 탭 막대 아래 왼쪽 9px 한 줄(화면 시안). 바탕 없이 글자만 */
     .ui-map-full .ui-map-attribution {
-        right: 12px;
-        bottom: calc(114px + env(safe-area-inset-bottom));
-        max-width: 45vw;
+        left: 16px;
+        right: auto;
+        bottom: calc(4px + env(safe-area-inset-bottom));
+        padding: 0;
+        background: none;
         font-size: 9px;
         line-height: 12px;
-        white-space: normal;
-        text-align: right;
     }
 }
