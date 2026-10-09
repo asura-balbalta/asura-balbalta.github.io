@@ -109,6 +109,9 @@ export const installSquareTool = (
 
     const onKeyDown = (e: KeyboardEvent) => {
         if (e.key !== "Escape") return
+        // 검색창 같은 입력란에서 누른 Esc 는 그쪽이 처리한다(검색어 지우기·닫기). 그리기 모드는 건드리지 않는다
+        const target = e.target as HTMLElement | null
+        if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) return
         if (anchor) setAnchor(null)
         else setActive(false)
     }

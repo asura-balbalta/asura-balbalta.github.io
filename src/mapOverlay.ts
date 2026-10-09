@@ -25,6 +25,14 @@ export const selectionStyle = (c: MapOverlayColors): FlatStyle => ({
     "stroke-width": 1.5,
 })
 
+/** 주소 검색 핀 스타일: 선택 박스와 같은 강조색 원, 흰 테두리 */
+export const pinStyle = (c: MapOverlayColors): FlatStyle => ({
+    "circle-radius": 7,
+    "circle-fill-color": c.selectionStroke,
+    "circle-stroke-color": "#ffffff",
+    "circle-stroke-width": 2,
+})
+
 /** 1K 도엽 외곽선 + 이름 스타일 */
 export const tileOutlineStyle = (c: MapOverlayColors): FlatStyle => ({
     "stroke-color": c.tileStroke,

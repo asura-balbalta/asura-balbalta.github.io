@@ -53,6 +53,7 @@
 .ui-minimap-button:focus-visible,
 .ui-minimap-collapse:focus-visible,
 button.ui-status-pill:focus-visible,
+.ui-search-clear:focus-visible,
 .ui-tabbar .ui-tab-button:focus-visible,
 .ui-minimap-icon:focus-visible,
 .ui-quick-menu:focus-visible,
@@ -311,13 +312,192 @@ button.ui-status-pill:focus-visible,
     white-space: normal;
 }
 
-/* ---- 안내 알약 (위 가운데) ---- */
+/* ---- 주소 검색: 위 가운데 유리 알약 + 아래 결과 패널 ---- */
 
-.ui-pill {
+.ui-search {
     position: fixed;
     left: 50%;
     top: 12px;
     transform: translateX(-50%);
+    z-index: 21;
+    width: 360px;
+    height: 36px;
+    box-sizing: border-box;
+    padding: 0 8px 0 12px;
+    border-radius: 16px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--ui-text-on-glass-secondary);
+}
+.ui-search-focused {
+    outline: 2px solid var(--ui-accent);
+    outline-offset: 1px;
+}
+.ui-search-input {
+    flex: 1 1 auto;
+    min-width: 0;
+    border: 0;
+    padding: 0;
+    background: transparent;
+    font: 400 13px / 18px inherit;
+    font-family: inherit;
+    color: var(--ui-text);
+    outline: none;
+}
+.ui-search-input::placeholder {
+    color: var(--ui-text-on-glass-secondary);
+}
+.ui-search-key {
+    flex: 0 0 auto;
+    padding: 1px 6px;
+    border: 1px solid currentColor;
+    border-radius: 4px;
+    font-size: 11px;
+    line-height: 14px;
+    opacity: 0.8;
+}
+.ui-search-clear {
+    flex: 0 0 auto;
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    border: 0;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--ui-text-on-glass-secondary);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.ui-search-clear:hover {
+    background: var(--ui-hover);
+}
+
+.ui-search-panel {
+    position: fixed;
+    left: 50%;
+    top: 56px;
+    transform: translateX(-50%);
+    z-index: 21;
+    width: 360px;
+    max-height: calc(100vh - 56px - 108px);
+    box-sizing: border-box;
+    padding-top: 4px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden auto;
+}
+.ui-search-row {
+    flex: 0 0 auto;
+    height: 44px;
+    padding: 0 14px;
+    border: 0;
+    background: transparent;
+    text-align: left;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-family: inherit;
+    color: var(--ui-text);
+}
+.ui-search-row:hover,
+.ui-search-row-active {
+    background: var(--ui-hover);
+}
+.ui-search-row-active {
+    box-shadow: inset 2px 0 0 var(--ui-accent);
+}
+.ui-search-row-icon {
+    flex: 0 0 auto;
+    color: var(--ui-accent);
+}
+.ui-search-row-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+.ui-search-row-name {
+    font-size: 13px;
+    line-height: 16px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.ui-search-row-addr {
+    font-size: 11px;
+    line-height: 14px;
+    color: var(--ui-text-secondary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.ui-search-note {
+    padding: 10px 14px 12px;
+    font-size: 12px;
+    line-height: 16px;
+    color: var(--ui-text-secondary);
+}
+.ui-search-note-strong {
+    margin-bottom: 4px;
+    font-size: 13px;
+    line-height: 18px;
+    color: var(--ui-text);
+}
+.ui-search-loading {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 14px 14px;
+    font-size: 13px;
+    color: var(--ui-text);
+    white-space: nowrap;
+}
+.ui-search-progress {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+.ui-search-foot {
+    display: flex;
+    justify-content: flex-end;
+    padding: 6px 14px 8px;
+    border-top: 1px solid var(--ui-divider);
+    font-size: 11px;
+    color: var(--ui-text-secondary);
+}
+
+/* 지도 위 검색 핀의 이름 칩(OpenLayers Overlay) */
+.ui-map-chip {
+    padding: 6px 10px;
+    border-radius: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    white-space: nowrap;
+    pointer-events: none;
+}
+.ui-map-chip-name {
+    font-size: 13px;
+    line-height: 16px;
+    font-weight: 600;
+}
+.ui-map-chip-address {
+    font-size: 11px;
+    line-height: 14px;
+    color: var(--ui-text-secondary);
+}
+
+/* ---- 안내 알약 (화면 가운데) ---- */
+
+/* 화면 가운데에서 48px 위(화면 시안 "주소 검색 · 선택 후"). 위 가운데는 검색 알약 자리, 정중앙은 검색 핀이 오는 자리라 비운다 */
+.ui-pill {
+    position: fixed;
+    left: 50%;
+    top: calc(50% - 48px);
+    transform: translate(-50%, -50%);
     z-index: 20;
     padding: 7px 14px;
     border-radius: 999px;
@@ -682,12 +862,35 @@ button.ui-status-pill {
     }
     /* left: 50% 배치는 가용 폭이 화면 절반이 되므로 글자 폭(max-content)으로 잡고, 그래도 넘치면 접는다 */
     .ui-pill {
-        top: calc(12px + env(safe-area-inset-top));
         width: max-content;
         max-width: calc(100vw - 24px);
         box-sizing: border-box;
         white-space: normal;
         text-align: center;
+    }
+    /* 검색 알약·패널은 좌우 12px 을 채우고 터치 높이 40px. 꼬리말의 키보드 안내는 숨긴다 */
+    .ui-search {
+        left: 12px;
+        right: 12px;
+        top: calc(12px + env(safe-area-inset-top));
+        width: auto;
+        height: 40px;
+        transform: none;
+    }
+    .ui-search-panel {
+        left: 12px;
+        right: 12px;
+        top: calc(60px + env(safe-area-inset-top));
+        width: auto;
+        max-height: calc(100dvh - 60px - env(safe-area-inset-top) - 24px);
+        transform: none;
+    }
+    .ui-search-row {
+        height: 48px;
+    }
+    .ui-search-foot,
+    .ui-search-key {
+        display: none;
     }
     /* 전체 지도의 저작권: 탭 막대 아래 왼쪽 9px 한 줄(화면 시안). 바탕 없이 글자만 */
     .ui-map-full .ui-map-attribution {

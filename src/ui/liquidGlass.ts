@@ -24,6 +24,7 @@ export const LIQUID_GLASS_ENABLED = new URLSearchParams(window.location.search).
  */
 const GLASS_TARGETS: [selector: string, config: { cornerRadius: number; zRadius: number }][] = [
     [".ui-dock", { cornerRadius: 16, zRadius: 5 }],
+    [".ui-search", { cornerRadius: 16, zRadius: 5 }],
     [".ui-pill", { cornerRadius: 16, zRadius: 5 }],
     [".ui-tabbar", { cornerRadius: 16, zRadius: 5 }],
     [".ui-status-pill", { cornerRadius: 14, zRadius: 5 }],

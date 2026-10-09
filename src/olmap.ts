@@ -6,7 +6,8 @@ import VectorLayer from "ol/layer/Vector"
 import { Extent } from "ol/extent"
 
 import { BasemapProvider, createBasemapSource, nextBasemapProvider, watchTileErrors } from "./basemap"
-import { selectionStyle, setMapOverlay, tileOutlineStyle } from "./mapOverlay"
+import { pinStyle, selectionStyle, setMapOverlay, tileOutlineStyle } from "./mapOverlay"
+import { SEARCH_PIN_LAYER_NAME } from "./searchPin"
 import { installSquareTool, SQUARE_RANGE_LAYER_NAME, SquarePhase, SquareTool } from "./squareTool"
 import { getTtpSheetsInBbox } from "./terrainIndex"
 import { TerrainTheme } from "./terrainTheme"
@@ -14,7 +15,7 @@ import { drawTileOutlines, TILE_LAYER_NAME } from "./tileOverlay"
 
 /**
  * 지도에 테마와 바탕 지도 출처를 적용한다(초기화·테마 전환·출처 전환). 바탕 타일을 바꾸고, 오버레이 색을 지도에 넣어
- * 두며, 이미 그려진 선택 박스·1K 외곽선 레이어가 있으면 그 색으로 다시 입힌다. 레이어 목록의 첫 TileLayer 가 바탕
+ * 두며, 이미 그려진 선택 박스·1K 외곽선·검색 핀 레이어가 있으면 그 색으로 다시 입힌다. 레이어 목록의 첫 TileLayer 가 바탕
  * 지도라는 전제. 바탕 타일 로딩이 연속 실패하면(무료 한도 초과 등) onBasemapFallback 에 다음 출처를 알린다
  *
  * @param map initOlMap 이 만든 지도
@@ -42,6 +43,7 @@ export const applyMapTheme = (
         const name = layer.get("name")
         if (name === SQUARE_RANGE_LAYER_NAME) layer.setStyle(selectionStyle(theme.mapOverlay))
         else if (name === TILE_LAYER_NAME) layer.setStyle(tileOutlineStyle(theme.mapOverlay))
+        else if (name === SEARCH_PIN_LAYER_NAME) layer.setStyle(pinStyle(theme.mapOverlay))
     }
 }
 

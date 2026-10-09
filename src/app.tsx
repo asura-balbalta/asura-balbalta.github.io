@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from "react"
 import { FluentProvider } from "@fluentui/react-components"
 import { Map } from "ol"
 import { Extent } from "ol/extent"
-import { toLonLat } from "ol/proj"
+import { fromLonLat, toLonLat } from "ol/proj"
 import { getDistance } from "ol/sphere"
 
 // Firebase 앱 초기화(부수효과). 값은 아직 쓰지 않는다
@@ -35,6 +35,10 @@ import { StatusPill } from "./ui/StatusPill"
 import { TabBar } from "./ui/TabBar"
 import { MOBILE_QUERY, useMediaQuery } from "./ui/useMediaQuery"
 import { LIQUID_GLASS_ENABLED, useLiquidGlass } from "./ui/liquidGlass"
+import { SearchBox, SearchStatus } from "./ui/SearchBox"
+import { VWORLD_KEY } from "./config"
+import { clearSearchPin, showSearchPin } from "./searchPin"
+import { SearchHandle, searchPlaces, SearchResult } from "./vworld"
 import { Button, Menu, MenuItem, MenuList, MenuPopover, MenuTrigger } from "@fluentui/react-components"
 import { TerrainMode } from "./webgpu/terrainRenderer"
 
@@ -181,6 +185,69 @@ function App({
     }, [view])
     // 리퀴드 글래스(?glass=0 으로 끔): 3D 화면에서만
     useLiquidGlass(LIQUID_GLASS_ENABLED && view === "3d" && !!mesh, rootRef)
+
+    // ---- 주소 검색 ----
+    /** 검색 알약의 글자 */
+    const [query, setQuery] = useState("")
+    const [searchStatus, setSearchStatus] = useState<SearchStatus>({ kind: "idle" })
+    /** 결과를 골라 핀을 찍은 상태면 그 이름. 글자가 이 이름 그대로면 다시 검색하지 않는다 */
+    const [pinnedName, setPinnedName] = useState<string | null>(null)
+    const searchRef = useRef<SearchHandle | null>(null)
+    useEffect(() => {
+        searchRef.current?.cancel()
+        const q = query.trim()
+        if (!q || q === pinnedName) {
+            setSearchStatus({ kind: "idle" })
+            return
+        }
+        setSearchStatus({ kind: "loading" })
+        // 300ms 디바운스. 그 안에 글자가 또 바뀌면 이전 타이머는 취소된다
+        const timer = window.setTimeout(() => {
+            const handle = searchPlaces(q, VWORLD_KEY)
+            searchRef.current = handle
+            handle.promise
+                .then((results) => setSearchStatus({ kind: "done", results }))
+                .catch((err: Error) => setSearchStatus({ kind: "error", message: err.message }))
+        }, 300)
+        return () => window.clearTimeout(timer)
+    }, [query, pinnedName])
+
+    /** 지도를 그 자리로 옮긴다(줌은 16 이상으로) */
+    const flyTo = (coord: [number, number]) => {
+        const view = mapRef.current?.getView()
+        if (!view) return
+        view.animate({ center: coord, zoom: Math.max(view.getZoom() ?? 16, 16), duration: 500 })
+    }
+    const selectSearchResult = (r: SearchResult) => {
+        setQuery(r.name)
+        setPinnedName(r.name)
+        flyTo(r.coord)
+        if (mapRef.current) showSearchPin(mapRef.current, r.coord, r.name, r.address)
+    }
+    const clearSearch = () => {
+        setQuery("")
+        setPinnedName(null)
+        if (mapRef.current) clearSearchPin(mapRef.current)
+    }
+    const changeQuery = (next: string) => {
+        setQuery(next)
+        if (pinnedName !== null && next !== pinnedName) {
+            setPinnedName(null)
+            if (mapRef.current) clearSearchPin(mapRef.current)
+        }
+    }
+    /** "현재 위치로 이동": 브라우저 위치 정보로 지도만 옮긴다(핀 없음) */
+    const locateMe = () => {
+        if (!("geolocation" in navigator)) {
+            toast.error("현재 위치를 가져오지 못했습니다", "이 브라우저는 위치 정보를 지원하지 않습니다.")
+            return
+        }
+        navigator.geolocation.getCurrentPosition(
+            (pos) => flyTo(fromLonLat([pos.coords.longitude, pos.coords.latitude]) as [number, number]),
+            (err) => toast.error("현재 위치를 가져오지 못했습니다", err.message),
+            { timeout: 10_000 },
+        )
+    }
     /** 지형 로딩·생성 진행. busy 인데 단계가 없으면(모드 전환 직후 등) 기본 문구를 쓴다 */
     const [terrainProgress, setTerrainProgress] = useState<Progress | null>(null)
     /** 진행 중인 지형 로딩. 새 선택이 오면 취소한다 */
@@ -488,6 +555,18 @@ function App({
                         onStepInterval={changeStepInterval}
                     />
                 </Panel>
+            )}
+
+            {/* 주소 검색은 지도 화면에서만. 3D 화면에서는 미니맵이 그 자리를 쓴다 */}
+            {view === "map" && (
+                <SearchBox
+                    query={query}
+                    onQueryChange={changeQuery}
+                    status={searchStatus}
+                    onSelect={selectSearchResult}
+                    onLocate={locateMe}
+                    onClear={clearSearch}
+                />
             )}
 
             {/* 모바일 지도 화면에서 아무것도 안 하고 있을 때: 첫 할 일 안내(화면 시안 "모바일 · 지도") */}
