@@ -26,28 +26,6 @@ const GlobalStyle = createGlobalStyle`
     font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans KR', sans-serif;
     font-variant-numeric: tabular-nums;
   }
-
-  /* OpenLayers 기본 CSS 를 넣지 않았으므로 저작권 표시(Attribution 컨트롤)만 직접 꾸민다 */
-  .ol-attribution {
-    position: absolute;
-    right: 0;
-    bottom: 0;
-    padding: 2px 6px;
-    background: rgba(255, 255, 255, 0.7);
-    font: 11px sans-serif;
-    color: #333;
-  }
-  .ol-attribution ul {
-    margin: 0;
-    padding: 0;
-    list-style: none;
-  }
-  .ol-attribution a {
-    color: inherit;
-  }
-  .ol-attribution button {
-    display: none;
-  }
 `
 
 // iOS Safari 는 viewport 의 user-scalable=no 를 무시하고 두 손가락 벌리기로 페이지를 확대한다. 3D 캔버스는

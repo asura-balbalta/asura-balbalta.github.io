@@ -1,6 +1,6 @@
 import { Button, Menu, MenuItem, MenuList, MenuPopover, MenuTrigger, ProgressBar } from "@fluentui/react-components"
 import { CheckmarkRegular } from "@fluentui/react-icons"
-import React from "react"
+import React, { ReactNode } from "react"
 
 /** 상태 표시줄 오른쪽의 드롭다운 하나(보기 모드·테마·바탕 지도) */
 export type StatusMenu = {
@@ -17,17 +17,20 @@ export type StatusMenu = {
  * @param props.stats 수치 항목("범위 2.4 × 2.4 km" 같은 완성된 문구)
  * @param props.menus 오른쪽 드롭다운들
  * @param props.attribution 바탕 지도 저작권 문구(태그 없는 글자)
+ * @param props.children 수치 뒤에 둘 추가 항목("3D로 돌아가기" 같은 작은 버튼)
  */
 export const StatusBar = ({
     progress,
     stats,
     menus,
     attribution,
+    children,
 }: {
     progress?: { label: string; ratio?: number } | null
     stats: string[]
     menus: StatusMenu[]
     attribution?: string
+    children?: ReactNode
 }) => (
     <footer className="ui-statusbar ui-glass-strong">
         {progress && (
@@ -51,6 +54,7 @@ export const StatusBar = ({
                 {text}
             </span>
         ))}
+        {children}
         <span className="ui-statusbar-spacer" />
         {menus.map((menu, i) => (
             <Menu key={i} positioning="above-end">

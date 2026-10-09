@@ -68,6 +68,7 @@ const initialCamera = ({ min, max }: MeshBounds): OrbitCamera => ({
  * @param props.onDone 메쉬를 GPU 에 올리는 작업이 끝났을 때(성공 true, 실패 false). 부모가 레이아웃 전환·잠금 해제에 쓴다
  * @param props.onProgress stepped 모드의 변환 진행률(처리한 원본 삼각형 비율 0 ~ 1). 약 100ms 간격으로 불리고 끝에 1 이 온다
  * @param props.onFirstChunk stepped 모드에서 첫 조각이 화면에 올라갔을 때. 부모가 지도를 미니맵으로 옮기는 데 쓴다
+ * @param props.hidden true 면 캔버스를 보이지 않게 한다(지도 화면으로 돌아갔을 때). 렌더러·메쉬는 그대로라 다시 보이면 즉시 그려진다
  */
 export const TerrainViewCanvas = ({
     mesh,
@@ -79,6 +80,7 @@ export const TerrainViewCanvas = ({
     onDone,
     onProgress,
     onFirstChunk,
+    hidden = false,
 }: {
     mesh: TinMesh
     buildings?: TinMesh | null
@@ -89,6 +91,7 @@ export const TerrainViewCanvas = ({
     onDone?: (ok: boolean) => void
     onProgress?: (ratio: number) => void
     onFirstChunk?: () => void
+    hidden?: boolean
 }) => {
     // 콜백이 렌더마다 새로 만들어져도 메쉬 effect 를 다시 돌리지 않도록 ref 로 받는다
     const onDoneRef = useRef(onDone)
@@ -295,6 +298,7 @@ export const TerrainViewCanvas = ({
                 inset: 0,
                 width: size.width,
                 height: size.height,
+                visibility: hidden ? "hidden" : "visible",
                 cursor: "grab",
                 // 터치를 브라우저의 스크롤·핀치 제스처로 넘기지 않는다. 없으면 세로 끌기에 주소 표시줄이 반응하며
                 // pointercancel 로 입력이 끊기고, 두 손가락 벌리기는 페이지 확대가 된다

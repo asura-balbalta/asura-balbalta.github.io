@@ -1,194 +1,205 @@
-import React, { CSSProperties, useEffect, useRef, useState } from "react"
+import React, { useEffect, useRef, useState } from "react"
 import { FluentProvider } from "@fluentui/react-components"
 import { Map } from "ol"
 import { Extent } from "ol/extent"
+import { toLonLat } from "ol/proj"
+import { getDistance } from "ol/sphere"
 
 import { firebaseApp } from "./fb"
-import { BASEMAP_PROVIDERS, BasemapProvider, nextBasemapProvider } from "./basemap"
+import { BASEMAP_PROVIDERS, basemapAttribution, BasemapProvider } from "./basemap"
 import { loadBuildingsInWorker } from "./buildingsClient"
 import { BuildingsLoadPhase } from "./buildingsData"
+import { TerrainViewCanvas } from "./components/TerrainViewCanvas"
+import type { ExportKind } from "./export/download"
+import { exportableLayers, runExport } from "./export/runExport"
 import { INITIAL_LAYER_STATES, LAYER_DEFS, LayerId, LayerStates } from "./layers"
 import { applyMapTheme, initOlMap } from "./olmap"
 import { SquareTool } from "./squareTool"
-import { TERRAIN_THEMES, Theme } from "./terrainTheme"
 import { LoadPhase, TinMesh } from "./terrainData"
-import { loadTerrainInWorker } from "./terrainLoadClient"
-import { ExportButtons } from "./export/ExportButtons"
 import { TerrainSource } from "./terrainLoad.worker"
-import { TerrainViewCanvas } from "./components/TerrainViewCanvas"
+import { loadTerrainInWorker } from "./terrainLoadClient"
+import { TERRAIN_THEMES, Theme } from "./terrainTheme"
+import { ExportPanel } from "./ui/ExportPanel"
+import { HintPill } from "./ui/HintPill"
+import { LayersPanel } from "./ui/LayersPanel"
+import { MapFrame } from "./ui/MapFrame"
+import { PanelId, Rail } from "./ui/Rail"
+import { SettingsPanel } from "./ui/SettingsPanel"
+import { SidePanel } from "./ui/SidePanel"
+import { StatusBar, StatusMenu } from "./ui/StatusBar"
 import { fluentTheme, uiCssVars } from "./ui/theme"
+import { AppToaster, useAppToast } from "./ui/Toasts"
+import { Button } from "@fluentui/react-components"
 import { TerrainMode } from "./webgpu/terrainRenderer"
 
-/** 처음 보여 줄 지형 표현 방식. "tin": 삼각형 메쉬 그대로, "stepped": 등고선 모형처럼 계단형. 화면의 버튼으로 바꿀 수 있다 */
+/** 처음 보여 줄 지형 표현 방식. "tin": 삼각형 메쉬 그대로, "stepped": 등고선 모형처럼 계단형. 설정 패널·상태 표시줄에서 바꾼다 */
 const INITIAL_TERRAIN_MODE: TerrainMode = "tin"
-/** 처음 색 테마(지도 타일 + 3D). 화면의 버튼으로 바꿀 수 있다 */
+/** 처음 색 테마(지도 타일 + 3D + UI). 설정 패널·상태 표시줄에서 바꾼다 */
 const INITIAL_THEME: Theme = "light"
-/** 처음 바탕 지도 출처(basemap.ts). 화면의 버튼으로 바꿀 수 있고, 타일이 안 나오면 자동으로 다음 출처로 넘어간다 */
+/** 처음 바탕 지도 출처(basemap.ts). 설정에서 바꿀 수 있고, 타일이 안 나오면 자동으로 다음 출처로 넘어간다 */
 const INITIAL_BASEMAP: BasemapProvider = "stadia"
-/** 계단형일 때 층 간격(m). 0.1 ~ 5 정도로 조정 */
-const STEP_INTERVAL = 1
-/** 지형 데이터 출처. "ttp": 점·등고선 조각을 받아 프론트가 삼각분할(기본), "ttm": v1 도엽별 메쉬(비교용) */
-const TERRAIN_SOURCE: TerrainSource = "ttp"
+/** 계단형일 때 처음 층 간격(m). 설정 패널에서 0.1 ~ 5 로 바꾼다 */
+const INITIAL_STEP_INTERVAL = 1
+/** 처음 지형 데이터 출처. "ttp": 점·등고선 조각을 받아 프론트가 삼각분할(기본), "ttm": v1 도엽별 메쉬(비교용). 설정에서 바꾼다 */
+const INITIAL_TERRAIN_SOURCE: TerrainSource = "ttp"
 /** ttm 일 때, 합친 뒤 도엽 경계 없이 다시 삼각분할할지(terrainRetri). ttp 는 항상 삼각분할한다 */
 const RETRIANGULATE = true
-/** 지형 생성 완료 후 지도 클릭을 계속 무시하는 시간(ms). OpenLayers 가 클릭을 250ms 늦게 발생시키는 것보다 넉넉하게 */
-/** 로딩 단계를 배지 문구로 */
-const loadStatusText = (phase: LoadPhase, done: number, total: number) => {
+
+/** 상태 표시줄 왼쪽에 보일 진행 상태. ratio 가 없으면 진행 막대가 불확정으로 움직인다 */
+type Progress = { label: string; ratio?: number }
+
+/** 지형 로딩 단계 → 진행 상태 문구 */
+const loadProgress = (phase: LoadPhase, done: number, total: number): Progress => {
+    const ratio = total > 0 ? done / total : undefined
     switch (phase) {
         case "sheets":
-            return "도엽 목록 조회 중"
+            return { label: "도엽 목록 확인 중" }
         case "download":
-            return `지형 데이터 받는 중 ${done}/${total}`
+            return { label: `지형 받는 중 ${done} / ${total}`, ratio }
         case "merge":
-            return `도엽 합치는 중 ${done}/${total}`
+            return { label: `도엽 잇는 중 ${done} / ${total}`, ratio }
         case "retriangulate":
-            return "재삼각분할 중"
+            return { label: "지형 다듬는 중" }
     }
 }
 
-/** 건물 레이어 로딩 단계를 배지 문구로 */
-const buildingsStatusText = (phase: BuildingsLoadPhase, done: number, total: number) => {
+/** 건물 레이어 로딩 단계 → 진행 상태 문구 */
+const buildingsProgress = (phase: BuildingsLoadPhase, done: number, total: number): Progress => {
+    const ratio = total > 0 ? done / total : undefined
     switch (phase) {
         case "index":
-            return "건물 목록 조회 중"
+            return { label: "건물 목록 확인 중" }
         case "download":
-            return `건물 데이터 받는 중 ${done}/${total}`
+            return { label: `건물 받는 중 ${done} / ${total}`, ratio }
         case "build":
-            return `건물 세우는 중 ${done}/${total}`
+            return { label: `건물 만드는 중 ${done} / ${total}`, ratio }
     }
 }
 
-// 3D 캔버스(position: fixed)가 준비되기 전까지 지도가 그 위에 보이도록 지도에 z-index 를 준다
-const fullMapStyle: CSSProperties = {
-    position: "relative",
-    zIndex: 10,
-    width: "100%",
-    height: "100vh",
+/** 선택 범위의 가로·세로를 km 로. EPSG:3857 의 왜곡을 피하려고 경위도로 바꿔 지표 거리를 잰다 */
+const extentKmText = (extent: Extent) => {
+    const [x1, y1, x2, y2] = extent
+    const w = getDistance(toLonLat([x1, y1]), toLonLat([x2, y1]))
+    const h = getDistance(toLonLat([x1, y1]), toLonLat([x1, y2]))
+    return `범위 ${(w / 1000).toFixed(1)} × ${(h / 1000).toFixed(1)} km`
 }
 
-const miniMapStyle: CSSProperties = {
-    position: "fixed",
-    top: 16,
-    right: 16,
-    width: 320,
-    height: 220,
-    zIndex: 10,
-    borderRadius: 8,
-    overflow: "hidden",
-    border: "2px solid rgba(255, 255, 255, 0.35)",
-    boxShadow: "0 4px 16px rgba(0, 0, 0, 0.5)",
+/**
+ * 앱 뿌리. 테마를 들고 Fluent Provider 와 CSS 변수(--ui-*)를 건다. 화면 자체는 App 이 그린다.
+ * Provider 가 그리는 div 가 지도·캔버스를 가리지 않도록 배경은 투명하게 둔다
+ */
+export default function AppRoot() {
+    const [theme, setTheme] = useState<Theme>(INITIAL_THEME)
+    return (
+        <FluentProvider theme={fluentTheme(theme)} style={{ ...uiCssVars(theme), background: "transparent" }}>
+            <App theme={theme} setTheme={setTheme} />
+            <AppToaster />
+        </FluentProvider>
+    )
 }
 
-/** 왼쪽 위에 가로로 놓이는 배지·버튼 줄 */
-const topLeftBarStyle: CSSProperties = {
-    position: "fixed",
-    top: 16,
-    left: 16,
-    zIndex: 20,
-    display: "flex",
-    flexWrap: "wrap",
-    gap: 8,
-}
-
-const busyBadgeStyle: CSSProperties = {
-    padding: "8px 12px",
-    borderRadius: 6,
-    background: "rgba(0, 0, 0, 0.65)",
-    color: "#fff",
-    font: "14px sans-serif",
-}
-
-/** 배지와 같은 모양의 버튼(표현 방식·테마 전환) */
-const barButtonStyle: CSSProperties = {
-    ...busyBadgeStyle,
-    border: "1px solid rgba(255, 255, 255, 0.35)",
-    cursor: "pointer",
-}
-
-/** 왼쪽 아래의 레이어 패널. 레이어마다 보기·내보내기 체크 */
-const layerPanelStyle: CSSProperties = {
-    ...busyBadgeStyle,
-    position: "fixed",
-    left: 16,
-    bottom: 16,
-    zIndex: 20,
-    display: "grid",
-    gridTemplateColumns: "auto auto auto",
-    columnGap: 12,
-    rowGap: 4,
-    alignItems: "center",
-}
-
-const layerPanelHeaderStyle: CSSProperties = { opacity: 0.7, fontSize: 12 }
-
-export default function App() {
+/**
+ * 화면. 지도(또는 3D) 위에 레일 · 사이드 패널 · 상태 표시줄 · 미니맵 · 안내 알약이 뜬다(docs/design-code-plan.md).
+ *
+ * 흐름: 지도 화면 → 범위 그리기 → 로딩(상태 표시줄에 진행) → 3D 화면(지도는 미니맵으로) → 내려받기. 미니맵의 "지도로" 는
+ * 3D 를 숨기고 지도 화면으로 돌아가며, 상태 표시줄의 "3D로 돌아가기" 로 되돌아온다. 로딩 중에는 버튼을 숨기지 않고 비활성으로 둔다
+ */
+function App({ theme, setTheme }: { theme: Theme; setTheme: (theme: Theme) => void }) {
+    const toast = useAppToast()
     const mapRef = useRef<Map | null>(null)
-    /** 사각형 선택 도구. "영역 선택" 버튼으로 모드를 켜고 끈다 */
+    /** 사각형 선택 도구. 레일 맨 위 버튼으로 모드를 켜고 끈다 */
     const squareToolRef = useRef<SquareTool | null>(null)
-    /** 선택 모드가 켜져 있으면 true(버튼 문구·안내 배지용) */
+    /** 선택 모드가 켜져 있으면 true(레일 버튼 강조·안내 알약) */
     const [selecting, setSelecting] = useState(false)
     /** 사각형 확정마다 1씩 오르는 번호. 늦게 돌아온 이전 선택의 결과를 버리는 데 쓴다 */
     const generationRef = useRef(0)
-    /** 다운로드~3D 업로드 완료까지 true. 그동안 배지를 보이고 버튼을 감춘다 */
+    /** 다운로드~3D 업로드 완료까지 true. 그동안 레일의 범위 그리기와 보기 모드 전환을 막는다 */
     const [busy, setBusy] = useState(false)
     const [selection, setSelection] = useState<Extent | null>(null)
+    /** 선택 범위에 걸치는 1K 도엽 수(olmap 이 비동기로 알려 준다) */
+    const [sheetCount, setSheetCount] = useState<number | null>(null)
     const [mesh, setMesh] = useState<TinMesh | null>(null)
     /** 건물 레이어 메쉬(지형과 같은 원점). 지형이 바뀌면 null 로 비우고 다시 만든다 */
     const [buildings, setBuildings] = useState<TinMesh | null>(null)
-    /** 건물 레이어 로딩 중 배지 문구. 지형과 별개로 진행되므로 따로 보인다 */
-    const [buildingsStatus, setBuildingsStatus] = useState<string | null>(null)
+    /** 세운 건물 수(상태 표시줄 표시용) */
+    const [buildingCount, setBuildingCount] = useState<number | null>(null)
+    /** 건물 레이어 로딩 진행. 지형과 별개로 진행되므로 따로 든다 */
+    const [buildingsLoading, setBuildingsLoading] = useState<Progress | null>(null)
     /** 진행 중인 건물 로딩. 새 지형이 오면 취소한다 */
     const buildingsLoadingRef = useRef<{ cancel: () => void } | null>(null)
     /** 레이어별 보기·내보내기 포함 상태 */
     const [layers, setLayers] = useState<LayerStates>(INITIAL_LAYER_STATES)
-    /** 현재 지형 표현 방식. 버튼으로 바꾸면 같은 mesh 를 다시 올린다 */
+    /** 현재 지형 표현 방식. 바꾸면 같은 mesh 를 다시 올린다 */
     const [mode, setMode] = useState<TerrainMode>(INITIAL_TERRAIN_MODE)
-    /** 색 테마. 지도 타일과 3D 색표·배경을 함께 바꾼다 */
-    const [theme, setTheme] = useState<Theme>(INITIAL_THEME)
-    /** 바탕 지도 출처. 버튼으로 바꾸거나, 타일 로딩이 계속 실패하면(무료 한도 초과) 자동으로 다음 출처로 넘어간다 */
+    /** 계단형 층 간격(m). 바꾸면 계단형 지형을 다시 만든다 */
+    const [stepInterval, setStepInterval] = useState(INITIAL_STEP_INTERVAL)
+    /** 지형 데이터 출처. 바꾸면 현재 범위의 지형을 다시 받는다 */
+    const [terrainSource, setTerrainSource] = useState<TerrainSource>(INITIAL_TERRAIN_SOURCE)
+    const terrainSourceRef = useRef(terrainSource)
+    terrainSourceRef.current = terrainSource
+    /** 바탕 지도 출처. 설정으로 바꾸거나, 타일 로딩이 계속 실패하면(무료 한도 초과) 자동으로 다음 출처로 넘어간다 */
     const [basemap, setBasemap] = useState<BasemapProvider>(INITIAL_BASEMAP)
-    /** 3D 지형이 화면에 올라간 뒤 true. 이때부터 지도를 미니맵으로 옮긴다 */
+    /** 3D 지형이 한 번이라도 화면에 올라갔으면 true. 레이어·내려받기 패널과 보기 모드 전환을 연다 */
     const [terrainReady, setTerrainReady] = useState(false)
-    /** 배지에 보일 진행 문구. 단계가 없으면(모드 전환 직후 등) null 이고 기본 문구를 쓴다 */
-    const [status, setStatus] = useState<string | null>(null)
+    /** 보이는 화면. 3D 가 준비되면 "3d" 로 넘어가고, 미니맵의 "지도로" 가 "map" 으로 되돌린다 */
+    const [view, setView] = useState<"map" | "3d">("map")
+    /** 열려 있는 사이드 패널 */
+    const [openPanel, setOpenPanel] = useState<PanelId | null>(null)
+    /** 지형 로딩·생성 진행. busy 인데 단계가 없으면(모드 전환 직후 등) 기본 문구를 쓴다 */
+    const [terrainProgress, setTerrainProgress] = useState<Progress | null>(null)
     /** 진행 중인 지형 로딩. 새 선택이 오면 취소한다 */
     const loadingRef = useRef<{ cancel: () => void } | null>(null)
+    /** 만드는 중인 내보내기 형식과 진행률 */
+    const [exporting, setExporting] = useState<{ kind: ExportKind; ratio?: number } | null>(null)
+
+    /**
+     * 범위의 지형을 Worker 로 받아 mesh 로 만든다. 사각형 확정과 데이터 출처 변경이 부른다.
+     * 이전 로딩은 취소하고, 늦게 돌아온 결과는 generation 으로 버린다
+     */
+    const startTerrainLoad = (bbox: Extent, source: TerrainSource) => {
+        const generation = ++generationRef.current
+        setBusy(true)
+        setTerrainProgress(null)
+        setSelection(bbox)
+        setSheetCount(null)
+        loadingRef.current?.cancel()
+        const loading = loadTerrainInWorker(bbox, {
+            source,
+            retriangulate: RETRIANGULATE,
+            onProgress: (phase, done, total) => {
+                if (generation === generationRef.current) setTerrainProgress(loadProgress(phase, done, total))
+            },
+        })
+        loadingRef.current = loading
+        loading.promise
+            .then((loaded) => {
+                if (generation !== generationRef.current) return
+                setTerrainProgress(null)
+                setMesh(loaded)
+                loadBuildingsLayer(bbox, loaded, generation)
+            })
+            .catch((err) => {
+                console.error(err)
+                if (generation !== generationRef.current) return
+                setBusy(false)
+                setTerrainProgress(null)
+                toast.error("지형 데이터를 받지 못했습니다", err.message)
+            })
+    }
 
     useEffect(() => {
-        initOlMap(
-            (bbox) => {
-                const generation = ++generationRef.current
-                setBusy(true)
-                setStatus(null)
-                setSelection(bbox)
-                loadingRef.current?.cancel()
-                const loading = loadTerrainInWorker(bbox, {
-                    source: TERRAIN_SOURCE,
-                    retriangulate: RETRIANGULATE,
-                    onProgress: (phase, done, total) => {
-                        if (generation === generationRef.current) setStatus(loadStatusText(phase, done, total))
-                    },
-                })
-                loadingRef.current = loading
-                loading.promise
-                    .then((loaded) => {
-                        if (generation !== generationRef.current) return
-                        setStatus(null)
-                        setMesh(loaded)
-                        loadBuildingsLayer(bbox, loaded, generation)
-                    })
-                    .catch((err) => {
-                        console.error(err)
-                        if (generation === generationRef.current) setBusy(false)
-                    })
-            },
-            TERRAIN_THEMES[INITIAL_THEME],
-            INITIAL_BASEMAP,
-            setSelecting,
-            setBasemap,
-        ).then(({ map, squareTool }) => {
+        initOlMap({
+            onSquareConfirmed: (bbox) => startTerrainLoad(bbox, terrainSourceRef.current),
+            onSheets: setSheetCount,
+            theme: TERRAIN_THEMES[INITIAL_THEME],
+            basemap: INITIAL_BASEMAP,
+            onSelectingChange: setSelecting,
+            onBasemapFallback: setBasemap,
+        }).then(({ map, squareTool }) => {
             mapRef.current = map
             squareToolRef.current = squareTool
+            // #map 의 높이는 CSS(.ui-map 100%)로 정해져 지도 생성 시점에 아직 0 일 수 있다. 다음 프레임에 크기를 다시 잰다
+            requestAnimationFrame(() => map.updateSize())
         })
     }, [])
 
@@ -201,12 +212,12 @@ export default function App() {
     useEffect(() => {
         const map = mapRef.current
         if (!map) return
-        // 지도 div 크기가 바뀌면 OpenLayers 에 알려야 다시 그린다
+        // 지도 div 크기가 바뀌면(전체 ↔ 미니맵) OpenLayers 에 알려야 다시 그린다
         map.updateSize()
-        if (terrainReady && selection) {
+        if (view === "3d" && selection) {
             map.getView().fit(selection, { padding: [20, 20, 20, 20] })
         }
-    }, [terrainReady, selection])
+    }, [view, selection])
 
     /**
      * 지형이 올라온 뒤 그 위에 세울 건물 레이어를 Worker 로 만든다. 지형과 별개로 진행되어 지형이 먼저 보이고
@@ -215,10 +226,11 @@ export default function App() {
     const loadBuildingsLayer = (bbox: Extent, terrain: TinMesh, generation: number) => {
         buildingsLoadingRef.current?.cancel()
         setBuildings(null)
+        setBuildingCount(null)
         const started = performance.now()
         const loading = loadBuildingsInWorker(bbox, terrain, {
             onProgress: (phase, done, total) => {
-                if (generation === generationRef.current) setBuildingsStatus(buildingsStatusText(phase, done, total))
+                if (generation === generationRef.current) setBuildingsLoading(buildingsProgress(phase, done, total))
             },
         })
         buildingsLoadingRef.current = loading
@@ -229,10 +241,14 @@ export default function App() {
                     `건물 레이어: ${result.built}개 세움(지형 밖 ${result.skipped}), 삼각형 ${(result.mesh.indices.length / 3).toLocaleString()}, ${Math.round(performance.now() - started)}ms`,
                 )
                 setBuildings(result.mesh)
+                setBuildingCount(result.built)
             })
-            .catch((err) => console.error("건물 레이어 실패:", err))
+            .catch((err) => {
+                console.error("건물 레이어 실패:", err)
+                if (generation === generationRef.current) toast.warning("건물 데이터를 받지 못했습니다", "지형만 보입니다.")
+            })
             .finally(() => {
-                if (generation === generationRef.current) setBuildingsStatus(null)
+                if (generation === generationRef.current) setBuildingsLoading(null)
             })
     }
 
@@ -241,95 +257,183 @@ export default function App() {
         setLayers((prev) => ({ ...prev, [id]: { ...prev[id], [key]: value } }))
 
     /** 표현 방식을 바꾼다. 다시 올리는 동안 busy 로 두고, 끝나면 onTerrainDone 이 푼다 */
-    const toggleMode = () => {
-        setBusy(true)
-        setStatus(null)
-        setMode((m) => (m === "stepped" ? "tin" : "stepped"))
+    const changeMode = (next: TerrainMode) => {
+        if (next === mode) return
+        if (mesh) {
+            setBusy(true)
+            setTerrainProgress(null)
+        }
+        setMode(next)
     }
 
-    // 예전에는 계산으로 멈춘 동안 큐에 쌓인 지도 클릭이 새 선택을 만들지 않도록 완료 뒤 잠시 클릭을 걸렀다.
-    // 지금은 선택이 "영역 선택" 모드에서 끌기로만 만들어지므로 그런 클릭은 아무 일도 하지 않아 잠금이 필요 없다
+    /** 계단 간격을 바꾼다. 계단형이면 TerrainViewCanvas 가 같은 mesh 를 다시 변환한다 */
+    const changeStepInterval = (next: number) => {
+        if (next === stepInterval) return
+        if (mesh && mode === "stepped") {
+            setBusy(true)
+            setTerrainProgress(null)
+        }
+        setStepInterval(next)
+    }
+
+    /** 지형 데이터 출처를 바꾼다. 범위가 있으면 그 범위를 새 출처로 다시 받는다 */
+    const changeTerrainSource = (next: TerrainSource) => {
+        if (next === terrainSource) return
+        setTerrainSource(next)
+        if (selection) startTerrainLoad(selection, next)
+    }
+
     const onTerrainDone = (ok: boolean) => {
         setBusy(false)
-        setStatus(null)
+        setTerrainProgress(null)
         // stepped 모드는 첫 조각에서 이미 전환됐고(onFirstChunk), tin 모드는 여기서 전환한다
-        if (ok) setTerrainReady(true)
+        if (ok) showTerrain()
+        else toast.error("3D 지형을 만들지 못했습니다")
     }
 
+    /** 3D 가 준비됐을 때: 레이어·내려받기를 열고 3D 화면으로 */
+    const showTerrain = () => {
+        setTerrainReady(true)
+        setView("3d")
+    }
+
+    /** "내보내기" 에 체크된 레이어를 한 파일로 만들어 내려받는다. 결과는 토스트로 알린다 */
+    const startExport = (kind: ExportKind) => {
+        if (exporting || !mesh) return
+        const label = kind.toUpperCase()
+        const meshes = { terrain: mesh, buildings }
+        if (exportableLayers(meshes, layers).length === 0) {
+            toast.warning(`${label} 에 넣을 레이어가 없습니다`, '레이어 패널에서 "내보내기" 를 하나 이상 체크하세요.')
+            return
+        }
+        setExporting({ kind })
+        runExport(kind, meshes, layers, {
+            mode,
+            step: stepInterval,
+            onProgress: (ratio) => setExporting({ kind, ratio }),
+        })
+            .then(({ included }) => {
+                const names = LAYER_DEFS.filter((d) => included.includes(d.id)).map((d) => d.label)
+                const note =
+                    !included.includes("buildings") && layers.buildings.export && buildingsLoading
+                        ? "지형만 담았습니다. 건물은 받는 중입니다."
+                        : `${names.join(" · ")} 를 담았습니다.`
+                toast.success(`${label} 파일을 내려받았습니다`, note)
+            })
+            .catch((err) => {
+                console.error(err)
+                toast.error(`${label} 파일을 만들지 못했습니다`, err.message)
+            })
+            .finally(() => setExporting(null))
+    }
+
+    // ---- 상태 표시줄 내용 ----
+    const exportLabel = exporting ? `${exporting.kind.toUpperCase()} 만드는 중` : null
+    const progress: Progress | null = busy
+        ? (terrainProgress ?? { label: "3D 지형 만드는 중" })
+        : exporting
+          ? { label: exportLabel! + (exporting.ratio === undefined ? "" : ` ${Math.floor(exporting.ratio * 100)}%`), ratio: exporting.ratio }
+          : buildingsLoading
+    const stats: string[] = []
+    if (selection) stats.push(extentKmText(selection))
+    if (sheetCount !== null) stats.push(`도엽 ${sheetCount}`)
+    if (mesh) stats.push(`삼각형 ${(mesh.indices.length / 3).toLocaleString()}`)
+    if (buildingCount !== null) stats.push(`건물 ${buildingCount.toLocaleString()}`)
+    if (stats.length === 0 && !selecting) stats.push("범위 없음")
+    if (selecting) stats.unshift("범위 그리는 중")
+
+    const menus: StatusMenu[] = []
+    if (terrainReady) {
+        menus.push({
+            label: mode === "stepped" ? "계단형" : "매끈한 면",
+            items: [
+                { label: "계단형", selected: mode === "stepped", onSelect: () => changeMode("stepped") },
+                { label: "매끈한 면", selected: mode === "tin", onSelect: () => changeMode("tin") },
+            ],
+        })
+    }
+    menus.push({
+        label: theme === "dark" ? "다크" : "라이트",
+        items: [
+            { label: "라이트", selected: theme === "light", onSelect: () => setTheme("light") },
+            { label: "다크", selected: theme === "dark", onSelect: () => setTheme("dark") },
+        ],
+    })
+    menus.push({
+        label: BASEMAP_PROVIDERS.find((p) => p.id === basemap)?.label ?? basemap,
+        items: BASEMAP_PROVIDERS.map((p) => ({ label: p.label, selected: p.id === basemap, onSelect: () => setBasemap(p.id) })),
+    })
+
+    const included = mesh ? exportableLayers({ terrain: mesh, buildings }, layers) : []
+
     return (
-        // Fluent 컨트롤은 테마 객체로, 직접 그리는 그릇은 CSS 변수(--ui-*)로 같은 색을 받는다(ui/theme.ts).
-        // Provider 가 그리는 div 가 지도·캔버스를 가리지 않도록 배경은 투명하게 둔다
-        <FluentProvider theme={fluentTheme(theme)} style={{ ...uiCssVars(theme), background: "transparent" }}>
+        <>
             {mesh && (
                 <TerrainViewCanvas
                     mesh={mesh}
                     buildings={buildings}
                     layers={layers}
                     mode={mode}
-                    stepInterval={STEP_INTERVAL}
+                    stepInterval={stepInterval}
                     theme={theme}
+                    hidden={view === "map"}
                     onDone={onTerrainDone}
-                    onProgress={(ratio) => setStatus(`지형 생성 중… ${Math.floor(ratio * 100)}%`)}
-                    onFirstChunk={() => setTerrainReady(true)}
+                    onProgress={(ratio) =>
+                        setTerrainProgress({ label: `3D 지형 만드는 중 ${Math.floor(ratio * 100)}%`, ratio })
+                    }
+                    onFirstChunk={showTerrain}
                 />
             )}
-            <div id="map" style={terrainReady ? miniMapStyle : fullMapStyle}></div>
-            <div style={topLeftBarStyle}>
-                {busy ? (
-                    <div style={busyBadgeStyle}>{status ?? "지형 생성 중…"}</div>
-                ) : (
-                    <>
-                        <button style={barButtonStyle} onClick={() => squareToolRef.current?.setActive(!selecting)}>
-                            {selecting ? "선택 취소" : "영역 선택"}
-                        </button>
-                        {selecting && <div style={busyBadgeStyle}>지도를 끌어 사각형을 그리세요</div>}
-                        {terrainReady && (
-                            <button style={barButtonStyle} onClick={toggleMode}>
-                                {mode === "stepped" ? "삼각 메쉬로 보기" : "계단형으로 보기"}
-                            </button>
-                        )}
-                    </>
+            <MapFrame mode={view === "3d" ? "mini" : "full"} onExpand={() => setView("map")}>
+                <div id="map" className="ui-map"></div>
+            </MapFrame>
+
+            <Rail
+                drawing={selecting}
+                onToggleDraw={() => squareToolRef.current?.setActive(!selecting)}
+                drawDisabled={busy}
+                openPanel={openPanel}
+                onOpenPanel={setOpenPanel}
+                panelDisabled={{ layers: !terrainReady, export: !terrainReady }}
+            />
+
+            {openPanel === "layers" && (
+                <SidePanel title="레이어" onClose={() => setOpenPanel(null)}>
+                    <LayersPanel layers={layers} onChange={setLayerFlag} loading={{ buildings: !!buildingsLoading }} />
+                </SidePanel>
+            )}
+            {openPanel === "export" && (
+                <SidePanel title="내려받기" onClose={() => setOpenPanel(null)}>
+                    <ExportPanel exporting={exporting} onExport={startExport} included={included} />
+                </SidePanel>
+            )}
+            {openPanel === "settings" && (
+                <SidePanel title="설정" onClose={() => setOpenPanel(null)}>
+                    <SettingsPanel
+                        theme={theme}
+                        onTheme={setTheme}
+                        basemap={basemap}
+                        onBasemap={setBasemap}
+                        mode={mode}
+                        onMode={changeMode}
+                        modeDisabled={!terrainReady || busy}
+                        stepInterval={stepInterval}
+                        onStepInterval={changeStepInterval}
+                        terrainSource={terrainSource}
+                        onTerrainSource={changeTerrainSource}
+                    />
+                </SidePanel>
+            )}
+
+            {selecting && view === "map" && <HintPill text="지도를 끌어 범위를 그리세요" />}
+
+            <StatusBar progress={progress} stats={stats} menus={menus} attribution={basemapAttribution(basemap)}>
+                {view === "map" && terrainReady && !busy && (
+                    <Button appearance="subtle" size="small" className="ui-statusbar-action" onClick={() => setView("3d")}>
+                        3D로 돌아가기
+                    </Button>
                 )}
-                {/* 내보내기 버튼·배지. 형식 추가는 src/export 안에서만 */}
-                <ExportButtons
-                    meshes={{ terrain: mesh, buildings }}
-                    layers={layers}
-                    mode={mode}
-                    step={STEP_INTERVAL}
-                    active={terrainReady && !busy}
-                    buttonStyle={barButtonStyle}
-                    badgeStyle={busyBadgeStyle}
-                />
-                {buildingsStatus && <div style={busyBadgeStyle}>{buildingsStatus}</div>}
-                <button style={barButtonStyle} onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}>
-                    {theme === "dark" ? "라이트 테마" : "다크 테마"}
-                </button>
-                <button style={barButtonStyle} onClick={() => setBasemap((b) => nextBasemapProvider(b))}>
-                    지도: {BASEMAP_PROVIDERS.find((p) => p.id === basemap)?.label}
-                </button>
-            </div>
-            {terrainReady && (
-                <div style={layerPanelStyle}>
-                    <span style={layerPanelHeaderStyle}>레이어</span>
-                    <span style={layerPanelHeaderStyle}>보기</span>
-                    <span style={layerPanelHeaderStyle}>내보내기</span>
-                    {LAYER_DEFS.map(({ id, label }) => (
-                        <React.Fragment key={id}>
-                            <span>{label}</span>
-                            <input
-                                type="checkbox"
-                                checked={layers[id].visible}
-                                onChange={(e) => setLayerFlag(id, "visible", e.target.checked)}
-                            />
-                            <input
-                                type="checkbox"
-                                checked={layers[id].export}
-                                onChange={(e) => setLayerFlag(id, "export", e.target.checked)}
-                            />
-                        </React.Fragment>
-                    ))}
-                </div>
-            )}
-        </FluentProvider>
+            </StatusBar>
+        </>
     )
 }

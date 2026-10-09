@@ -12,8 +12,6 @@ import { MapBrowserEvent, MapEvent } from "ol"
 
 import { Extent } from "ol/extent"
 
-import Attribution from "ol/control/Attribution"
-
 import { BasemapProvider, createBasemapSource, nextBasemapProvider, watchTileErrors } from "./basemap"
 import { selectionStyle, setMapOverlay, tileOutlineStyle } from "./mapOverlay"
 import { installSquareTool, SQUARE_RANGE_LAYER_NAME, SquareTool } from "./squareTool"
@@ -57,20 +55,29 @@ export const applyMapTheme = (
 /**
  * 지도를 만들고 사각형 선택 도구를 단다.
  *
- * @param onSquareConfirmed 사각형이 확정됐을 때 (EPSG:3857 bbox)
- * @param theme 처음 테마(지도 톤·오버레이 색)
- * @param basemap 처음 바탕 지도 출처
- * @param onSelectingChange 선택 모드가 켜지거나 꺼질 때
- * @param onBasemapFallback 바탕 지도 출처가 죽었을 때 다음 출처를 받는 콜백(applyMapTheme 참고)
+ * @param options.onSquareConfirmed 사각형이 확정됐을 때 (EPSG:3857 bbox)
+ * @param options.onSheets 확정된 범위에 걸치는 1K 도엽 수를 알았을 때(상태 표시줄 표시용). 확정 뒤 비동기로 온다
+ * @param options.theme 처음 테마(지도 톤·오버레이 색)
+ * @param options.basemap 처음 바탕 지도 출처
+ * @param options.onSelectingChange 선택 모드가 켜지거나 꺼질 때
+ * @param options.onBasemapFallback 바탕 지도 출처가 죽었을 때 다음 출처를 받는 콜백(applyMapTheme 참고)
  * @returns 지도와 선택 도구(모드 켜고 끄기)
  */
-export const initOlMap = async (
-    onSquareConfirmed: (bbox: Extent) => void,
-    theme: TerrainTheme,
-    basemap: BasemapProvider,
-    onSelectingChange?: (active: boolean) => void,
-    onBasemapFallback?: (next: BasemapProvider) => void,
-): Promise<{ map: Map; squareTool: SquareTool }> => {
+export const initOlMap = async ({
+    onSquareConfirmed,
+    onSheets,
+    theme,
+    basemap,
+    onSelectingChange,
+    onBasemapFallback,
+}: {
+    onSquareConfirmed: (bbox: Extent) => void
+    onSheets?: (count: number) => void
+    theme: TerrainTheme
+    basemap: BasemapProvider
+    onSelectingChange?: (active: boolean) => void
+    onBasemapFallback?: (next: BasemapProvider) => void
+}): Promise<{ map: Map; squareTool: SquareTool }> => {
     let center = [14136104.293764262, 4514380.225694263] // 위치정보 허용 안할 경우 기본 좌표 (녹사평역 인근)
     const map = new Map({
         target: "map",
@@ -93,8 +100,8 @@ export const initOlMap = async (
             projection: "EPSG:3857",
             // rotation: Math.PI / 2 // 시계방향 90
         }),
-        // 저작권 표시. Stadia·CARTO·OSM 모두 무료 사용 조건이다(스타일은 index.tsx 전역 CSS)
-        controls: [new Attribution({ collapsible: false })],
+        // 저작권 표시는 OpenLayers 컨트롤 대신 앱의 상태 표시줄이 맡는다(basemap.ts basemapAttribution). 컨트롤 없음
+        controls: [],
     })
     applyMapTheme(map, theme, basemap, onBasemapFallback)
 
@@ -119,7 +126,10 @@ export const initOlMap = async (
         onConfirmed: (bbox) => {
             // 도엽 외곽선도 지형과 같은 정적 인덱스(R2)에서 찾아 개발 서버 없이 동작한다
             getTtpSheetsInBbox(bbox)
-                .then(({ tiles }) => drawTileOutlines(map, tiles))
+                .then(({ tiles }) => {
+                    drawTileOutlines(map, tiles)
+                    onSheets?.(tiles.length)
+                })
                 .catch((err) => console.error(err))
             onSquareConfirmed(bbox)
         },

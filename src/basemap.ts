@@ -24,6 +24,13 @@ export const BASEMAP_PROVIDERS: { id: BasemapProvider; label: string }[] = [
     { id: "carto", label: "CARTO" },
 ]
 
+/**
+ * 출처별 저작권 문구(상태 표시줄용, 태그 없는 글자). Stadia 는 Stadia Maps·OpenMapTiles·OSM, CARTO 는 OSM·CARTO 를
+ * 표기해야 한다. 링크는 두지 않고 글자만 보인다
+ */
+export const basemapAttribution = (provider: BasemapProvider): string =>
+    provider === "stadia" ? "© Stadia Maps · © OpenMapTiles · © OpenStreetMap" : "© OpenStreetMap · © CARTO"
+
 /** 목록에서 다음 출처(마지막이면 처음으로) */
 export const nextBasemapProvider = (id: BasemapProvider): BasemapProvider => {
     const i = BASEMAP_PROVIDERS.findIndex((p) => p.id === id)

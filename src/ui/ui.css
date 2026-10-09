@@ -264,3 +264,111 @@
     margin-left: 6px;
     color: var(--ui-text-on-glass-secondary);
 }
+
+/* ---- 레이어 패널 ---- */
+
+.ui-layer-head {
+    display: grid;
+    grid-template-columns: 1fr 48px 64px;
+    align-items: center;
+    padding: 0 8px 0 14px;
+    height: 20px;
+    font-size: 11px;
+    line-height: 16px;
+    color: var(--ui-text-secondary);
+    text-align: center;
+}
+
+.ui-layer-row {
+    display: grid;
+    grid-template-columns: 1fr 48px 64px;
+    justify-items: center;
+}
+.ui-layer-row > :first-child {
+    justify-self: start;
+}
+
+.ui-layer-note {
+    margin-left: 6px;
+    font-size: 11px;
+    color: var(--ui-text-secondary);
+}
+
+/* ---- 내려받기 패널 ---- */
+
+.ui-export-row {
+    min-height: 36px;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.ui-export-name {
+    display: flex;
+    flex-direction: column;
+    line-height: 16px;
+}
+
+.ui-export-desc {
+    font-size: 11px;
+    color: var(--ui-text-secondary);
+}
+
+.ui-export-progress {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 96px;
+}
+
+.ui-export-percent {
+    width: 32px;
+    text-align: right;
+    font-size: 11px;
+    color: var(--ui-text-secondary);
+}
+
+/* ---- 설정 패널 ---- */
+
+.ui-settings-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    min-height: 36px;
+    padding: 0 14px;
+    font-size: 13px;
+    line-height: 20px;
+}
+
+.ui-settings-head {
+    padding: 6px 14px 2px;
+}
+
+.ui-settings-divider {
+    height: 1px;
+    margin: 4px 14px;
+    background: var(--ui-divider);
+}
+
+.ui-segment {
+    display: flex;
+    gap: 4px;
+}
+
+.ui-settings-input {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.ui-settings-unit {
+    font-size: 12px;
+    color: var(--ui-text-secondary);
+}
+
+/* 상태 표시줄 왼쪽의 "3D로 돌아가기" 같은 글자 버튼 */
+.ui-statusbar .ui-statusbar-action {
+    min-width: 0;
+    height: 22px;
+    padding: 0 8px;
+    font-size: 12px;
+}
