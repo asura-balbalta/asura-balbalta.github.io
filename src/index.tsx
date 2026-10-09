@@ -1,4 +1,4 @@
-import React, { Provider } from "react"
+import React from "react"
 import { createRoot } from "react-dom/client"
 import { createGlobalStyle } from "styled-components"
 import reset from "styled-reset"

@@ -1,15 +1,8 @@
 import Map from "ol/Map"
 import View from "ol/View"
 import TileLayer from "ol/layer/Tile"
-import { Projection, transform } from "ol/proj"
-import Feature, { FeatureLike } from "ol/Feature"
-import Point from "ol/geom/Point"
+import { transform } from "ol/proj"
 import VectorLayer from "ol/layer/Vector"
-import VectorSource from "ol/source/Vector"
-import { Coordinate } from "ol/coordinate"
-import GeoJSON from "ol/format/GeoJSON.js"
-import { MapBrowserEvent, MapEvent } from "ol"
-
 import { Extent } from "ol/extent"
 
 import { BasemapProvider, createBasemapSource, nextBasemapProvider, watchTileErrors } from "./basemap"

@@ -38,6 +38,17 @@
     color: var(--ui-text);
 }
 
+/* 직접 만든 버튼(지도로·접기·상태 알약)의 키보드 포커스 링. Fluent 버튼은 자기 링(2px)을 그린다.
+   바깥 2px focus + 안쪽 1px focus-inner(디자인 시스템 focus 토큰) */
+.ui-minimap-button:focus-visible,
+.ui-minimap-collapse:focus-visible,
+button.ui-status-pill:focus-visible,
+.ui-minimap-collapsed:focus-visible {
+    outline: 2px solid var(--ui-focus);
+    outline-offset: 1px;
+    box-shadow: 0 0 0 1px var(--ui-focus-inner);
+}
+
 /* ---- 글자 ---- */
 
 /* 패널 머리글: 11px 600, 자간 0.04em, 보조 글자색 */

@@ -5,7 +5,8 @@ import { Extent } from "ol/extent"
 import { toLonLat } from "ol/proj"
 import { getDistance } from "ol/sphere"
 
-import { firebaseApp } from "./fb"
+// Firebase 앱 초기화(부수효과). 값은 아직 쓰지 않는다
+import "./fb"
 import { basemapAttribution, BasemapProvider } from "./basemap"
 import { loadBuildingsInWorker } from "./buildingsClient"
 import { BuildingsLoadPhase } from "./buildingsData"
@@ -395,6 +396,15 @@ function App({ theme, setTheme, isMobile }: { theme: Theme; setTheme: (theme: Th
                     onFirstChunk={showTerrain}
                 />
             )}
+            {/* 레일(탭 막대)이 지도 틀보다 앞에 와야 Tab 키가 도구부터 닿는다. 겹침은 z-index 가 정한다 */}
+            <Toolbar
+                drawing={selecting}
+                onToggleDraw={() => squareToolRef.current?.setActive(!selecting)}
+                drawDisabled={busy}
+                openPanel={openPanel}
+                onOpenPanel={setOpenPanel}
+                panelDisabled={{ layers: !terrainReady, export: !terrainReady }}
+            />
             <MapFrame
                 mode={view === "3d" ? "mini" : "full"}
                 onExpand={() => setView("map")}
@@ -404,15 +414,6 @@ function App({ theme, setTheme, isMobile }: { theme: Theme; setTheme: (theme: Th
             >
                 <div id="map" className="ui-map"></div>
             </MapFrame>
-
-            <Toolbar
-                drawing={selecting}
-                onToggleDraw={() => squareToolRef.current?.setActive(!selecting)}
-                drawDisabled={busy}
-                openPanel={openPanel}
-                onOpenPanel={setOpenPanel}
-                panelDisabled={{ layers: !terrainReady, export: !terrainReady }}
-            />
 
             {openPanel === "layers" && (
                 <Panel title="레이어" onClose={() => setOpenPanel(null)}>
