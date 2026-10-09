@@ -6,7 +6,7 @@ import { toLonLat } from "ol/proj"
 import { getDistance } from "ol/sphere"
 
 import { firebaseApp } from "./fb"
-import { BASEMAP_PROVIDERS, basemapAttribution, BasemapProvider } from "./basemap"
+import { basemapAttribution, BasemapProvider } from "./basemap"
 import { loadBuildingsInWorker } from "./buildingsClient"
 import { BuildingsLoadPhase } from "./buildingsData"
 import { TerrainViewCanvas } from "./components/TerrainViewCanvas"
@@ -346,35 +346,20 @@ function App({ theme, setTheme }: { theme: Theme; setTheme: (theme: Theme) => vo
         : exporting
           ? { label: exportLabel! + (exporting.ratio === undefined ? "" : ` ${Math.floor(exporting.ratio * 100)}%`), ratio: exporting.ratio }
           : buildingsLoading
+    // 수치는 선택에 관한 것(범위·도엽)만. 삼각형·건물 수는 레이어 패널의 행에 보인다
     const stats: string[] = []
     if (selection) stats.push(extentKmText(selection))
     if (sheetCount !== null) stats.push(`도엽 ${sheetCount}`)
-    if (mesh) stats.push(`삼각형 ${(mesh.indices.length / 3).toLocaleString()}`)
-    if (buildingCount !== null) stats.push(`건물 ${buildingCount.toLocaleString()}`)
     if (stats.length === 0 && !selecting) stats.push("범위 없음")
     if (selecting) stats.unshift("범위 그리는 중")
 
+    // 오른쪽 메뉴는 설정 패널과 겹쳐 비워 둔다. 나중에 다른 정보나 메뉴가 들어갈 자리
     const menus: StatusMenu[] = []
-    if (terrainReady) {
-        menus.push({
-            label: mode === "stepped" ? "계단형" : "매끈한 면",
-            items: [
-                { label: "계단형", selected: mode === "stepped", onSelect: () => changeMode("stepped") },
-                { label: "매끈한 면", selected: mode === "tin", onSelect: () => changeMode("tin") },
-            ],
-        })
-    }
-    menus.push({
-        label: theme === "dark" ? "다크" : "라이트",
-        items: [
-            { label: "라이트", selected: theme === "light", onSelect: () => setTheme("light") },
-            { label: "다크", selected: theme === "dark", onSelect: () => setTheme("dark") },
-        ],
-    })
-    menus.push({
-        label: BASEMAP_PROVIDERS.find((p) => p.id === basemap)?.label ?? basemap,
-        items: BASEMAP_PROVIDERS.map((p) => ({ label: p.label, selected: p.id === basemap, onSelect: () => setBasemap(p.id) })),
-    })
+
+    /** 레이어 패널 행의 보조 문구 */
+    const layerNotes: Partial<Record<LayerId, string>> = {}
+    if (mesh) layerNotes.terrain = `삼각형 ${(mesh.indices.length / 3).toLocaleString()}`
+    if (buildingCount !== null) layerNotes.buildings = `${buildingCount.toLocaleString()} 동`
 
     const included = mesh ? exportableLayers({ terrain: mesh, buildings }, layers) : []
 
@@ -396,7 +381,11 @@ function App({ theme, setTheme }: { theme: Theme; setTheme: (theme: Theme) => vo
                     onFirstChunk={showTerrain}
                 />
             )}
-            <MapFrame mode={view === "3d" ? "mini" : "full"} onExpand={() => setView("map")}>
+            <MapFrame
+                mode={view === "3d" ? "mini" : "full"}
+                onExpand={() => setView("map")}
+                attribution={basemapAttribution(basemap)}
+            >
                 <div id="map" className="ui-map"></div>
             </MapFrame>
 
@@ -411,7 +400,12 @@ function App({ theme, setTheme }: { theme: Theme; setTheme: (theme: Theme) => vo
 
             {openPanel === "layers" && (
                 <SidePanel title="레이어" onClose={() => setOpenPanel(null)}>
-                    <LayersPanel layers={layers} onChange={setLayerFlag} loading={{ buildings: !!buildingsLoading }} />
+                    <LayersPanel
+                        layers={layers}
+                        onChange={setLayerFlag}
+                        loading={{ buildings: !!buildingsLoading }}
+                        notes={layerNotes}
+                    />
                 </SidePanel>
             )}
             {openPanel === "export" && (
@@ -447,7 +441,7 @@ function App({ theme, setTheme }: { theme: Theme; setTheme: (theme: Theme) => vo
                 )
             )}
 
-            <StatusBar progress={progress} stats={stats} menus={menus} attribution={basemapAttribution(basemap)}>
+            <StatusBar progress={progress} stats={stats} menus={menus}>
                 {view === "map" && terrainReady && !busy && (
                     <Button appearance="subtle" size="small" className="ui-statusbar-action" onClick={() => setView("3d")}>
                         3D로 돌아가기

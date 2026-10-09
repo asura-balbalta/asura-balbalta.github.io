@@ -254,6 +254,33 @@
     cursor: pointer;
 }
 
+/* 바탕 지도 저작권. 전체 지도에서는 오른쪽 아래(상태 표시줄 28px 위), 미니맵에서는 "지도로" 버튼 오른쪽 영역에 작게 */
+.ui-map-attribution {
+    position: absolute;
+    right: 8px;
+    bottom: 34px;
+    z-index: 11;
+    padding: 1px 6px;
+    border-radius: 4px;
+    background: var(--ui-glass-strong);
+    font-size: 11px;
+    line-height: 14px;
+    color: var(--ui-text-secondary);
+    white-space: nowrap;
+    pointer-events: none;
+}
+.ui-minimap .ui-map-attribution {
+    left: 80px;
+    right: 4px;
+    bottom: 6px;
+    padding: 0 4px;
+    font-size: 9px;
+    line-height: 12px;
+    text-align: right;
+    /* 280px 폭에 한 줄로 안 들어가므로 두 줄로 접는다. 저작권은 잘리면 안 된다 */
+    white-space: normal;
+}
+
 /* ---- 안내 알약 (위 가운데) ---- */
 
 .ui-pill {

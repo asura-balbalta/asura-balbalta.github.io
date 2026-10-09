@@ -9,15 +9,18 @@ import { LAYER_DEFS, LayerId, LayerStates } from "../layers"
  * @param props.layers 레이어별 보기·내보내기 상태
  * @param props.onChange 체크를 바꿨을 때
  * @param props.loading 아직 받는 중인 레이어(이름 옆에 "받는 중")
+ * @param props.notes 레이어별 보조 문구("삼각형 895,264", "51,075 동"). 받는 중이면 "받는 중" 이 우선
  */
 export const LayersPanel = ({
     layers,
     onChange,
     loading,
+    notes,
 }: {
     layers: LayerStates
     onChange: (id: LayerId, key: "visible" | "export", value: boolean) => void
     loading?: Partial<Record<LayerId, boolean>>
+    notes?: Partial<Record<LayerId, string>>
 }) => (
     <>
         <div className="ui-layer-head">
@@ -29,7 +32,11 @@ export const LayersPanel = ({
             <div key={id} className="ui-row ui-layer-row">
                 <span>
                     {label}
-                    {loading?.[id] && <span className="ui-layer-note">받는 중</span>}
+                    {loading?.[id] ? (
+                        <span className="ui-layer-note">받는 중</span>
+                    ) : (
+                        notes?.[id] && <span className="ui-layer-note">{notes[id]}</span>
+                    )}
                 </span>
                 <Checkbox
                     checked={layers[id].visible}
