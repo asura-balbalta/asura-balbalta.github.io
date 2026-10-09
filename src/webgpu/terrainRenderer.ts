@@ -6,6 +6,9 @@ import { initWebGPU } from "./device"
 import { createBuildingShader, createSmoothTerrainShader, createSteppedTerrainShader } from "./shaders"
 
 const DEPTH_FORMAT: GPUTextureFormat = "depth24plus"
+
+/** 깊이 텍스처 홀더. pass 들이 공유하며, 캔버스 크기가 바뀌면 resizeUpdater 가 안의 텍스처·view 를 바꿔 끼운다 */
+type DepthHolder = { texture: GPUTexture; view: GPUTextureView; width: number; height: number }
 const NORMAL_SMOOTH_ITERATIONS = 2
 const STOPS_OFFSET = 96 // 표고 색표 array<vec4f, STOP_COUNT> 의 시작 (shaders.ts 의 Uniforms 와 같아야 한다)
 const BUILDING_COLOR_OFFSET = STOPS_OFFSET + 16 * STOP_COUNT // 건물색 vec4f
@@ -27,11 +30,11 @@ export type MeshBounds = {
  * 배경 pass 함수를 만든다. 프레임마다 가장 먼저 실행되어 색 버퍼와 깊이 버퍼를 비운다.
  *
  * @param bg 배경색 홀더(0 ~ 1). color 를 바꾸면 다음 프레임부터 반영된다(backgroundUpdater)
- * @param depthView 깊이 텍스처 view. 뒤이은 pass 들이 같은 view 를 load 해서 쓴다
+ * @param depth 깊이 텍스처 홀더. 뒤이은 pass 들이 같은 view 를 load 해서 쓴다. 캔버스 크기가 바뀌면 resizeUpdater 가 바꿔 끼운다
  * @returns `(encoder, context) => void` pass 함수
  */
 const renderBackgroundPassFactory =
-    (bg: { color: { r: number; g: number; b: number } }, depthView: GPUTextureView) =>
+    (bg: { color: { r: number; g: number; b: number } }, depth: DepthHolder) =>
     (encoder: GPUCommandEncoder, context: GPUCanvasContext) => {
         const backgroundPass = encoder.beginRenderPass({
             colorAttachments: [
@@ -43,7 +46,7 @@ const renderBackgroundPassFactory =
                 },
             ],
             depthStencilAttachment: {
-                view: depthView,
+                view: depth.view,
                 depthLoadOp: "clear",
                 depthClearValue: 1,
                 depthStoreOp: "store",
@@ -249,16 +252,19 @@ const float32x3Layout = (shaderLocation: number): GPUVertexBufferLayout => ({
  *
  * @param device GPU device
  * @param format 캔버스 텍스처 포맷
- * @param depthView 배경 pass 와 공유하는 깊이 텍스처 view
- * @param aspect 화면 가로/세로 비율(카메라 투영용)
+ * @param depth 배경 pass 와 공유하는 깊이 텍스처 홀더
+ * @param initialAspect 처음 화면 가로/세로 비율(카메라 투영용). 캔버스 크기가 바뀌면 aspectUpdater 로 갱신한다
  * @returns scenePass 와 updater 들
  */
 const createTerrainDrawingPassAndUpdaters = (
     device: GPUDevice,
     format: GPUTextureFormat,
-    depthView: GPUTextureView,
-    aspect: number,
+    depth: DepthHolder,
+    initialAspect: number,
 ) => {
+    let aspect = initialAspect
+    /** 마지막으로 올린 카메라. 비율이 바뀌면 같은 카메라로 viewProj 를 다시 쓴다 */
+    let lastCamera: OrbitCamera | null = null
     const uniformBuffer = device.createBuffer({
         label: "terrain uniforms",
         size: UNIFORM_SIZE,
@@ -483,8 +489,20 @@ const createTerrainDrawingPassAndUpdaters = (
      * @param camera 궤도 카메라 상태
      */
     const cameraUpdater = (camera: OrbitCamera) => {
+        lastCamera = camera
         device.queue.writeBuffer(uniformBuffer, 0, orbitViewProj(camera, aspect))
         device.queue.writeBuffer(uniformBuffer, 80, new Float32Array(orbitEye(camera)))
+    }
+
+    /**
+     * 화면 가로/세로 비율을 바꾼다(캔버스 크기 변경). 카메라가 이미 있으면 같은 카메라로 투영을 다시 쓴다.
+     *
+     * @param next 새 비율(너비 / 높이)
+     */
+    const aspectUpdater = (next: number) => {
+        if (next === aspect) return
+        aspect = next
+        if (lastCamera) cameraUpdater(lastCamera)
     }
 
     /**
@@ -526,7 +544,7 @@ const createTerrainDrawingPassAndUpdaters = (
                 },
             ],
             depthStencilAttachment: {
-                view: depthView,
+                view: depth.view,
                 depthLoadOp: "load",
                 depthStoreOp: "store",
             },
@@ -552,6 +570,7 @@ const createTerrainDrawingPassAndUpdaters = (
         layerMeshUpdater,
         layerVisibilityUpdater,
         cameraUpdater,
+        aspectUpdater,
         paletteUpdater,
     }
 }
@@ -563,12 +582,15 @@ const createTerrainDrawingPassAndUpdaters = (
  * 2. 캔버스 크기의 깊이 텍스처 생성
  * 3. 배경 pass, 장면 pass·updater 생성
  *
+ * 캔버스 크기가 바뀌면 resizeUpdater 로 알린다. 색 텍스처는 WebGPU 가 canvas 속성 크기를 따라 다시 잡지만, 깊이 텍스처와
+ * 투영 비율은 여기서 직접 다시 만들어야 한다.
+ *
  * @param options.canvasId 대상 canvas 요소의 id
  * @param options.width 캔버스 실제 픽셀 너비(canvas width 속성과 같아야 한다)
  * @param options.height 캔버스 실제 픽셀 높이
  * @param options.backgroundColor 처음 배경색(0 ~ 1). backgroundUpdater 로 바꿀 수 있다
  * @returns render(한 프레임 그리기), updaters(meshUpdater, meshStreamStarter, streamedMeshUpdater, layerMeshUpdater,
- *   layerVisibilityUpdater, cameraUpdater, paletteUpdater, backgroundUpdater), destroy(device 해제)
+ *   layerVisibilityUpdater, cameraUpdater, paletteUpdater, backgroundUpdater, resizeUpdater), destroy(device 해제)
  */
 export const createTerrainRenderFunctionAndUpdateFunctions = async ({
     canvasId,
@@ -583,20 +605,46 @@ export const createTerrainRenderFunctionAndUpdateFunctions = async ({
 }) => {
     const { context, device, format } = await initWebGPU(canvasId)
 
-    const depthView = device
-        .createTexture({
-            size: [width, height],
+    /** 캔버스 픽셀 크기의 깊이 텍스처를 만든다 */
+    const createDepth = (w: number, h: number): DepthHolder => {
+        const texture = device.createTexture({
+            size: [w, h],
             format: DEPTH_FORMAT,
             usage: GPUTextureUsage.RENDER_ATTACHMENT,
         })
-        .createView()
+        return { texture, view: texture.createView(), width: w, height: h }
+    }
+    const first = createDepth(width, height)
+    // pass 들은 이 홀더를 붙들고 그릴 때마다 view 를 읽는다. 크기가 바뀌면 안의 텍스처만 바꿔 끼운다
+    const depth: DepthHolder = { ...first }
 
     const background = { color: backgroundColor }
-    const backgroundPass = renderBackgroundPassFactory(background, depthView)
-    const { scenePass, ...sceneUpdaters } = createTerrainDrawingPassAndUpdaters(device, format, depthView, width / height)
+    const backgroundPass = renderBackgroundPassFactory(background, depth)
+    const { scenePass, aspectUpdater, ...sceneUpdaters } = createTerrainDrawingPassAndUpdaters(
+        device,
+        format,
+        depth,
+        width / height,
+    )
     /** 배경색을 바꾼다(다음 프레임부터). 테마 전환용 */
     const backgroundUpdater = (color: { r: number; g: number; b: number }) => {
         background.color = color
+    }
+
+    /**
+     * 캔버스 픽셀 크기가 바뀌었을 때. 깊이 텍스처를 새 크기로 다시 만들고(이전 것은 해제) 투영 비율을 갱신한다.
+     * canvas 의 width·height 속성을 먼저 바꾼 뒤 불러야 색 텍스처와 깊이 텍스처 크기가 맞는다. 같은 크기면 아무것도 안 한다
+     *
+     * @param w 캔버스 실제 픽셀 너비
+     * @param h 캔버스 실제 픽셀 높이
+     */
+    const resizeUpdater = (w: number, h: number) => {
+        if (w === depth.width && h === depth.height) return
+        if (w <= 0 || h <= 0) return
+        const next = createDepth(w, h)
+        depth.texture.destroy()
+        Object.assign(depth, next)
+        aspectUpdater(w / h)
     }
 
     /** 한 프레임을 그린다: 배경 pass → 장면 pass 순으로 기록해 제출한다 */
@@ -607,7 +655,7 @@ export const createTerrainRenderFunctionAndUpdateFunctions = async ({
         device.queue.submit([encoder.finish()])
     }
 
-    const updaters = { ...sceneUpdaters, backgroundUpdater }
+    const updaters = { ...sceneUpdaters, backgroundUpdater, resizeUpdater }
 
     /** GPU device 와 그에 속한 버퍼·텍스처를 모두 해제한다. 컴포넌트 언마운트 때 호출 */
     const destroy = () => device.destroy()

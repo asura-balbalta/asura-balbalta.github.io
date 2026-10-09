@@ -14,7 +14,7 @@ import type { ExportKind } from "./export/download"
 import { exportableLayers, runExport } from "./export/runExport"
 import { INITIAL_LAYER_STATES, LAYER_DEFS, LayerId, LayerStates } from "./layers"
 import { applyMapTheme, initOlMap } from "./olmap"
-import { SquareTool } from "./squareTool"
+import { SquarePhase, SquareTool } from "./squareTool"
 import { LoadPhase, TinMesh } from "./terrainData"
 import { TerrainSource } from "./terrainLoad.worker"
 import { loadTerrainInWorker } from "./terrainLoadClient"
@@ -44,6 +44,13 @@ const INITIAL_STEP_INTERVAL = 1
 const INITIAL_TERRAIN_SOURCE: TerrainSource = "ttp"
 /** ttm 일 때, 합친 뒤 도엽 경계 없이 다시 삼각분할할지(terrainRetri). ttp 는 항상 삼각분할한다 */
 const RETRIANGULATE = true
+
+/**
+ * 마우스·트랙패드처럼 정밀한 포인터가 있는 기기인지. 처음 들어오면 범위 그리기 모드를 바로 켜고, 안내 문구를 클릭 방식으로
+ * 고르는 데 쓴다(터치 기기는 끌기 안내). 선택 자체는 squareTool 이 입력마다 pointerType 으로 가르므로 터치 가능한 노트북에서도
+ * 손가락 끌기는 동작한다
+ */
+const HAS_FINE_POINTER = typeof matchMedia === "function" && matchMedia("(pointer: fine)").matches
 
 /** 상태 표시줄 왼쪽에 보일 진행 상태. ratio 가 없으면 진행 막대가 불확정으로 움직인다 */
 type Progress = { label: string; ratio?: number }
@@ -111,6 +118,8 @@ function App({ theme, setTheme }: { theme: Theme; setTheme: (theme: Theme) => vo
     const squareToolRef = useRef<SquareTool | null>(null)
     /** 선택 모드가 켜져 있으면 true(레일 버튼 강조·안내 알약) */
     const [selecting, setSelecting] = useState(false)
+    /** 클릭 방식 선택의 단계. 첫 모서리를 찍었으면 "anchored"(안내 문구가 바뀐다) */
+    const [selectPhase, setSelectPhase] = useState<SquarePhase>("idle")
     /** 사각형 확정마다 1씩 오르는 번호. 늦게 돌아온 이전 선택의 결과를 버리는 데 쓴다 */
     const generationRef = useRef(0)
     /** 다운로드~3D 업로드 완료까지 true. 그동안 레일의 범위 그리기와 보기 모드 전환을 막는다 */
@@ -194,10 +203,13 @@ function App({ theme, setTheme }: { theme: Theme; setTheme: (theme: Theme) => vo
             theme: TERRAIN_THEMES[INITIAL_THEME],
             basemap: INITIAL_BASEMAP,
             onSelectingChange: setSelecting,
+            onSelectPhaseChange: setSelectPhase,
             onBasemapFallback: setBasemap,
         }).then(({ map, squareTool }) => {
             mapRef.current = map
             squareToolRef.current = squareTool
+            // 데스크톱은 첫 할 일이 범위 그리기이므로 모드를 켜 둔 채 시작한다. 터치 기기는 레일 버튼으로 켠다
+            if (HAS_FINE_POINTER) squareTool.setActive(true)
             // #map 의 높이는 CSS(.ui-map 100%)로 정해져 지도 생성 시점에 아직 0 일 수 있다. 다음 프레임에 크기를 다시 잰다
             requestAnimationFrame(() => map.updateSize())
         })
@@ -425,7 +437,15 @@ function App({ theme, setTheme }: { theme: Theme; setTheme: (theme: Theme) => vo
                 </SidePanel>
             )}
 
-            {selecting && view === "map" && <HintPill text="지도를 끌어 범위를 그리세요" />}
+            {selecting && view === "map" && (
+                !HAS_FINE_POINTER ? (
+                    <HintPill text="지도를 끌어 범위를 그리세요" />
+                ) : selectPhase === "anchored" ? (
+                    <HintPill text="다시 클릭하면 범위가 정해집니다" hint="Esc 취소" />
+                ) : (
+                    <HintPill text="지도를 클릭해 범위의 첫 모서리를 찍으세요" />
+                )
+            )}
 
             <StatusBar progress={progress} stats={stats} menus={menus} attribution={basemapAttribution(basemap)}>
                 {view === "map" && terrainReady && !busy && (

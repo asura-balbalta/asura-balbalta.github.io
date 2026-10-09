@@ -14,7 +14,7 @@ import { Extent } from "ol/extent"
 
 import { BasemapProvider, createBasemapSource, nextBasemapProvider, watchTileErrors } from "./basemap"
 import { selectionStyle, setMapOverlay, tileOutlineStyle } from "./mapOverlay"
-import { installSquareTool, SQUARE_RANGE_LAYER_NAME, SquareTool } from "./squareTool"
+import { installSquareTool, SQUARE_RANGE_LAYER_NAME, SquarePhase, SquareTool } from "./squareTool"
 import { getTtpSheetsInBbox } from "./terrainIndex"
 import { TerrainTheme } from "./terrainTheme"
 import { drawTileOutlines, TILE_LAYER_NAME } from "./tileOverlay"
@@ -60,6 +60,7 @@ export const applyMapTheme = (
  * @param options.theme 처음 테마(지도 톤·오버레이 색)
  * @param options.basemap 처음 바탕 지도 출처
  * @param options.onSelectingChange 선택 모드가 켜지거나 꺼질 때
+ * @param options.onSelectPhaseChange 클릭 방식 선택의 단계(첫 모서리 전·후)가 바뀔 때(안내 문구용)
  * @param options.onBasemapFallback 바탕 지도 출처가 죽었을 때 다음 출처를 받는 콜백(applyMapTheme 참고)
  * @returns 지도와 선택 도구(모드 켜고 끄기)
  */
@@ -69,6 +70,7 @@ export const initOlMap = async ({
     theme,
     basemap,
     onSelectingChange,
+    onSelectPhaseChange,
     onBasemapFallback,
 }: {
     onSquareConfirmed: (bbox: Extent) => void
@@ -76,6 +78,7 @@ export const initOlMap = async ({
     theme: TerrainTheme
     basemap: BasemapProvider
     onSelectingChange?: (active: boolean) => void
+    onSelectPhaseChange?: (phase: SquarePhase) => void
     onBasemapFallback?: (next: BasemapProvider) => void
 }): Promise<{ map: Map; squareTool: SquareTool }> => {
     let center = [14136104.293764262, 4514380.225694263] // 위치정보 허용 안할 경우 기본 좌표 (녹사평역 인근)
@@ -134,6 +137,7 @@ export const initOlMap = async ({
             onSquareConfirmed(bbox)
         },
         onActiveChange: onSelectingChange,
+        onPhaseChange: onSelectPhaseChange,
     })
 
     return { map, squareTool }

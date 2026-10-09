@@ -22,6 +22,13 @@ const STEPS_WORKER_URL = "terrainSteps.worker.js"
  */
 const STEPPED_CHUNK_BYTES = 64 * 1048576
 
+/** 창 크기와 devicePixelRatio. canvas 속성은 width·height × dpr, style 은 width·height */
+const readViewportSize = () => ({
+    width: window.innerWidth,
+    height: window.innerHeight,
+    dpr: window.devicePixelRatio || 1,
+})
+
 type TRenderer = Awaited<
     ReturnType<typeof createTerrainRenderFunctionAndUpdateFunctions>
 >
@@ -102,12 +109,8 @@ export const TerrainViewCanvas = ({
     onFirstChunkRef.current = onFirstChunk
     const canvasId = `terrain-canvas-${useId()}`
     const canvasRef = useRef<HTMLCanvasElement | null>(null)
-    // canvas 속성은 실제 픽셀 수(× devicePixelRatio), style 은 화면에 보이는 크기
-    const [size] = useState(() => ({
-        width: window.innerWidth,
-        height: window.innerHeight,
-        dpr: window.devicePixelRatio || 1,
-    }))
+    // canvas 속성은 실제 픽셀 수(× devicePixelRatio), style 은 화면에 보이는 크기. 창 크기가 바뀌면 다시 잰다
+    const [size, setSize] = useState(readViewportSize)
     const [renderer, setRenderer] = useState<TRenderer | null>(null)
     const cameraRef = useRef<OrbitCamera | null>(null)
     /** 직전 effect 가 올린 mesh. 같은 mesh 로 다시 돌면(mode 전환) 카메라를 유지한다 */
@@ -147,6 +150,24 @@ export const TerrainViewCanvas = ({
             created?.destroy()
         }
     }, [])
+
+    // 창 크기(개발자 도구 열기, 창 조절, 다른 화면으로 이동에 따른 devicePixelRatio 변화)를 따라간다
+    useEffect(() => {
+        const onResize = () => {
+            const next = readViewportSize()
+            setSize((prev) =>
+                prev.width === next.width && prev.height === next.height && prev.dpr === next.dpr ? prev : next,
+            )
+        }
+        window.addEventListener("resize", onResize)
+        return () => window.removeEventListener("resize", onResize)
+    }, [])
+
+    // size 가 바뀌면 React 가 canvas 의 width·height 속성을 먼저 바꾸고, 그 뒤 이 effect 가 깊이 텍스처와 투영 비율을 맞춘다
+    useEffect(() => {
+        if (!renderer) return
+        renderer.updaters.resizeUpdater(Math.round(size.width * size.dpr), Math.round(size.height * size.dpr))
+    }, [renderer, size])
 
     useEffect(() => {
         if (!renderer) return

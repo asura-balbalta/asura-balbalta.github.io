@@ -27,7 +27,7 @@ export const uiCssVars = (theme: Theme): CSSProperties => {
     vars["--ui-shadow-menu"] = dark
         ? "0 0 2px rgba(0,0,0,0.24), 0 4px 8px rgba(0,0,0,0.28)"
         : "0 0 2px rgba(0,0,0,0.12), 0 4px 8px rgba(0,0,0,0.14)"
-    vars["--ui-glass-blur"] = "18px"
+    vars["--ui-glass-blur"] = "12px"
     vars["--ui-glass-saturate"] = dark ? "1.4" : "1.6"
     return vars as CSSProperties
 }
