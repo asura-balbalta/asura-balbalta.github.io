@@ -29,6 +29,10 @@ import { SidePanel } from "./ui/SidePanel"
 import { StatusBar, StatusMenu } from "./ui/StatusBar"
 import { fluentTheme, uiCssVars } from "./ui/theme"
 import { AppToaster, useAppToast } from "./ui/Toasts"
+import { BottomSheet } from "./ui/BottomSheet"
+import { StatusPill } from "./ui/StatusPill"
+import { TabBar } from "./ui/TabBar"
+import { MOBILE_QUERY, useMediaQuery } from "./ui/useMediaQuery"
 import { Button } from "@fluentui/react-components"
 import { TerrainMode } from "./webgpu/terrainRenderer"
 
@@ -97,21 +101,27 @@ const extentKmText = (extent: Extent) => {
  */
 export default function AppRoot() {
     const [theme, setTheme] = useState<Theme>(INITIAL_THEME)
+    const isMobile = useMediaQuery(MOBILE_QUERY)
     return (
         <FluentProvider theme={fluentTheme(theme)} style={{ ...uiCssVars(theme), background: "transparent" }}>
-            <App theme={theme} setTheme={setTheme} />
-            <AppToaster />
+            <App theme={theme} setTheme={setTheme} isMobile={isMobile} />
+            {/* 모바일은 탭 막대(56px + 여백 12px × 2) 위에 */}
+            <AppToaster bottom={isMobile ? 92 : 40} />
         </FluentProvider>
     )
 }
 
 /**
  * 화면. 지도(또는 3D) 위에 레일 · 사이드 패널 · 상태 표시줄 · 미니맵 · 안내 알약이 뜬다(docs/design-code-plan.md).
+ * 모바일(< 768px)은 같은 상태로 그릇만 바꾼다: 레일 → 탭 막대, 사이드 패널 → 바텀 시트, 상태 표시줄 → 상태 알약(작업 중에만),
+ * 미니맵은 접을 수 있다.
  *
  * 흐름: 지도 화면 → 범위 그리기 → 로딩(상태 표시줄에 진행) → 3D 화면(지도는 미니맵으로) → 내려받기. 미니맵의 "지도로" 는
  * 3D 를 숨기고 지도 화면으로 돌아가며, 상태 표시줄의 "3D로 돌아가기" 로 되돌아온다. 로딩 중에는 버튼을 숨기지 않고 비활성으로 둔다
+ *
+ * @param props.isMobile 모바일 그릇을 쓸지
  */
-function App({ theme, setTheme }: { theme: Theme; setTheme: (theme: Theme) => void }) {
+function App({ theme, setTheme, isMobile }: { theme: Theme; setTheme: (theme: Theme) => void; isMobile: boolean }) {
     const toast = useAppToast()
     const mapRef = useRef<Map | null>(null)
     /** 사각형 선택 도구. 레일 맨 위 버튼으로 모드를 켜고 끈다 */
@@ -363,6 +373,10 @@ function App({ theme, setTheme }: { theme: Theme; setTheme: (theme: Theme) => vo
 
     const included = mesh ? exportableLayers({ terrain: mesh, buildings }, layers) : []
 
+    // 폭에 따라 그릇만 바꾼다. props 는 같다
+    const Toolbar = isMobile ? TabBar : Rail
+    const Panel = isMobile ? BottomSheet : SidePanel
+
     return (
         <>
             {mesh && (
@@ -385,11 +399,13 @@ function App({ theme, setTheme }: { theme: Theme; setTheme: (theme: Theme) => vo
                 mode={view === "3d" ? "mini" : "full"}
                 onExpand={() => setView("map")}
                 attribution={basemapAttribution(basemap)}
+                collapsible={isMobile}
+                onResize={() => mapRef.current?.updateSize()}
             >
                 <div id="map" className="ui-map"></div>
             </MapFrame>
 
-            <Rail
+            <Toolbar
                 drawing={selecting}
                 onToggleDraw={() => squareToolRef.current?.setActive(!selecting)}
                 drawDisabled={busy}
@@ -399,22 +415,22 @@ function App({ theme, setTheme }: { theme: Theme; setTheme: (theme: Theme) => vo
             />
 
             {openPanel === "layers" && (
-                <SidePanel title="레이어" onClose={() => setOpenPanel(null)}>
+                <Panel title="레이어" onClose={() => setOpenPanel(null)}>
                     <LayersPanel
                         layers={layers}
                         onChange={setLayerFlag}
                         loading={{ buildings: !!buildingsLoading }}
                         notes={layerNotes}
                     />
-                </SidePanel>
+                </Panel>
             )}
             {openPanel === "export" && (
-                <SidePanel title="내려받기" onClose={() => setOpenPanel(null)}>
+                <Panel title="내려받기" onClose={() => setOpenPanel(null)}>
                     <ExportPanel exporting={exporting} onExport={startExport} included={included} />
-                </SidePanel>
+                </Panel>
             )}
             {openPanel === "settings" && (
-                <SidePanel title="설정" onClose={() => setOpenPanel(null)}>
+                <Panel title="설정" onClose={() => setOpenPanel(null)}>
                     <SettingsPanel
                         theme={theme}
                         onTheme={setTheme}
@@ -428,7 +444,7 @@ function App({ theme, setTheme }: { theme: Theme; setTheme: (theme: Theme) => vo
                         terrainSource={terrainSource}
                         onTerrainSource={changeTerrainSource}
                     />
-                </SidePanel>
+                </Panel>
             )}
 
             {selecting && view === "map" && (
@@ -441,13 +457,28 @@ function App({ theme, setTheme }: { theme: Theme; setTheme: (theme: Theme) => vo
                 )
             )}
 
-            <StatusBar progress={progress} stats={stats} menus={menus}>
-                {view === "map" && terrainReady && !busy && (
-                    <Button appearance="subtle" size="small" className="ui-statusbar-action" onClick={() => setView("3d")}>
-                        3D로 돌아가기
-                    </Button>
-                )}
-            </StatusBar>
+            {isMobile ? (
+                // 모바일: 작업 중에만 상태 알약, 아니면 지도 화면에서 "3D로 돌아가기" 알약
+                progress ? (
+                    <StatusPill label={progress.label} ratio={progress.ratio} />
+                ) : (
+                    view === "map" &&
+                    terrainReady &&
+                    !busy && (
+                        <button type="button" className="ui-status-pill ui-glass" onClick={() => setView("3d")}>
+                            3D로 돌아가기
+                        </button>
+                    )
+                )
+            ) : (
+                <StatusBar progress={progress} stats={stats} menus={menus}>
+                    {view === "map" && terrainReady && !busy && (
+                        <Button appearance="subtle" size="small" className="ui-statusbar-action" onClick={() => setView("3d")}>
+                            3D로 돌아가기
+                        </Button>
+                    )}
+                </StatusBar>
+            )}
         </>
     )
 }

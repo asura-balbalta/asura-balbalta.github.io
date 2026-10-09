@@ -172,8 +172,10 @@
     background: var(--ui-accent);
 }
 
+/* Fluent ProgressBar 의 width 는 런타임에 주입되어 이기므로 flex 기준 폭으로 준다 */
 .ui-statusbar-progress {
-    width: 80px;
+    flex: 0 0 80px;
+    min-width: 80px;
 }
 
 .ui-statusbar-sep {
@@ -408,4 +410,180 @@
     height: 22px;
     padding: 0 8px;
     font-size: 12px;
+}
+
+/* ---- 모바일 (< 768px): 탭 막대 · 바텀 시트 · 상태 알약 · 접히는 미니맵 ---- */
+
+/* 탭 막대: 아래 가운데 56px 유리 알약. 시트 위에 떠 있으므로 z-index 가 시트보다 높다 */
+.ui-tabbar {
+    position: fixed;
+    left: 50%;
+    bottom: calc(12px + env(safe-area-inset-bottom));
+    transform: translateX(-50%);
+    z-index: 30;
+    height: 56px;
+    box-sizing: border-box;
+    padding: 6px;
+    border-radius: 999px;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.ui-tabbar .ui-tab-button {
+    width: 44px;
+    min-width: 44px;
+    height: 44px;
+    padding: 0;
+}
+
+/* 열려 있는 패널의 버튼 */
+.ui-tabbar .ui-tab-open {
+    background: var(--ui-accent-tint);
+}
+
+/* safe-area 위 여백을 JS(BottomSheet 의 fullHeight)도 읽을 수 있게 변수로 */
+:root {
+    --ui-safe-top: env(safe-area-inset-top, 0px);
+}
+
+/* 바텀 시트: 아래에 붙은 단색 패널. 탭 막대가 위에 떠 있으므로 그만큼 아래 여백.
+   높이는 dvh(보이는 영역) 기준: iOS Safari 의 vh 는 주소창이 접힌 큰 화면 기준이라 시트가 화면 위로 넘친다 */
+.ui-sheet {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 25;
+    max-height: 50dvh;
+    box-sizing: border-box;
+    padding-bottom: calc(80px + env(safe-area-inset-bottom));
+    border-radius: 12px 12px 0 0;
+    border-bottom: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    transition:
+        transform 0.2s ease-out,
+        height 0.2s ease-out;
+}
+/* 전체: 높이를 적지 않고 위·아래를 고정해 보이는 영역에 맞춘다 */
+.ui-sheet-expanded {
+    top: calc(12px + env(safe-area-inset-top));
+    max-height: none;
+}
+/* 끄는 중: 인라인 height 가 그대로 먹게 max-height 를 풀고, 손가락을 바로 따라가게 transition 없음 */
+.ui-sheet-dragging {
+    max-height: none;
+    transition: none;
+}
+
+/* 손잡이: 36×4 막대. 손잡이·머리글은 끌기 영역이라 브라우저 스크롤 제스처를 막는다 */
+.ui-sheet-grip {
+    display: flex;
+    justify-content: center;
+    padding: 8px 0 0;
+    touch-action: none;
+    cursor: grab;
+}
+.ui-sheet-handle {
+    width: 36px;
+    height: 4px;
+    border-radius: 2px;
+    background: var(--ui-border);
+}
+.ui-sheet .ui-panel-header {
+    touch-action: none;
+    cursor: grab;
+}
+
+/* 시트 안 행은 터치 최소 높이 40px */
+.ui-sheet .ui-row {
+    min-height: 40px;
+}
+
+/* 상태 알약: 탭 막대 위 왼쪽. 작업 중에만 보이고, 아니면 같은 자리에 "3D로 돌아가기" 버튼이 선다 */
+.ui-status-pill {
+    position: fixed;
+    left: 12px;
+    bottom: calc(80px + env(safe-area-inset-bottom));
+    z-index: 26;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    height: 28px;
+    max-width: calc(100vw - 24px);
+    padding: 0 12px;
+    border: 0;
+    border-radius: 999px;
+    font: 400 12px / 16px inherit;
+    font-family: inherit;
+    color: var(--ui-text);
+    white-space: nowrap;
+    cursor: default;
+}
+button.ui-status-pill {
+    cursor: pointer;
+}
+.ui-status-pill-progress {
+    flex: 0 0 64px;
+    min-width: 64px;
+}
+
+/* 미니맵 오른쪽 위 접기 버튼 */
+.ui-minimap-collapse {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    border: 0;
+    border-radius: 999px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--ui-text-on-glass-secondary);
+    cursor: pointer;
+}
+
+/* 접힌 미니맵: 96px 반투명 원. 탭하면 펼친다 */
+.ui-minimap-collapsed {
+    width: 96px;
+    height: 96px;
+    border-radius: 48px;
+    opacity: 0.85;
+    cursor: pointer;
+}
+
+@media (max-width: 767px) {
+    .ui-map-full {
+        height: 100dvh;
+    }
+    .ui-minimap {
+        top: calc(12px + env(safe-area-inset-top));
+        width: 220px;
+        height: 150px;
+    }
+    .ui-minimap.ui-minimap-collapsed {
+        width: 96px;
+        height: 96px;
+    }
+    .ui-pill {
+        top: calc(12px + env(safe-area-inset-top));
+        max-width: calc(100vw - 24px);
+        box-sizing: border-box;
+        white-space: normal;
+        text-align: center;
+    }
+    /* 전체 지도의 저작권: 탭 막대 위 오른쪽, 상태 알약(28px) 한 줄 위라 넓은 알약과도 겹치지 않는다. 좁으면 두 줄 */
+    .ui-map-full .ui-map-attribution {
+        right: 12px;
+        bottom: calc(114px + env(safe-area-inset-bottom));
+        max-width: 45vw;
+        font-size: 9px;
+        line-height: 12px;
+        white-space: normal;
+        text-align: right;
+    }
 }
