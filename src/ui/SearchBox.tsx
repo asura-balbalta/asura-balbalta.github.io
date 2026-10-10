@@ -94,6 +94,8 @@ export const SearchBox = ({
     }
 
     const onKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+        // 한글 조합 중의 Enter·↑↓ 는 입력기가 글자를 확정하는 데 쓰는 키다. 선택으로 받지 않는다
+        if (e.nativeEvent.isComposing) return
         if (e.key === "ArrowDown" || e.key === "ArrowUp") {
             if (rowCount === 0) return
             e.preventDefault()

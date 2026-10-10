@@ -117,29 +117,58 @@ const normalize = (type: "place" | "address", data: VworldResponse): SearchResul
     return out
 }
 
+/** 끝에 남은 자음·모음 하나("이태ㅇ", 호환 자모 U+3131~U+318E)는 조합 중인 글자라 빼고 검색한다 */
+export const trimDanglingJamo = (q: string) => q.replace(/[\u3131-\u318E]+$/, "")
+
+/** 최대 결과 수 */
+const MAX_RESULTS = 10
+
 /**
- * 장소와 주소를 함께 검색한다. 장소 결과가 앞, 주소 결과가 뒤이고 이름+주소가 같은 것은 하나만 남긴다.
- *
- * @param query 검색어(비어 있으면 빈 결과)
- * @param key VWorld 인증키(config.ts). 비어 있으면 예외
+ * 관련성 등급(작을수록 앞). 이름이 검색어와 같음 0, 검색어로 시작 1, 검색어 포함 2, 주소에만 포함 3, 그 밖 4.
+ * VWorld 의 순서는 관련성이 아니라 내부 순서라 우리가 다시 정렬한다
  */
-export const searchPlaces = (query: string, key: string): SearchHandle => {
+const relevance = (r: SearchResult, q: string) => {
+    const name = r.name.toLowerCase()
+    const query = q.toLowerCase()
+    if (name === query) return 0
+    if (name.startsWith(query)) return 1
+    if (name.includes(query)) return 2
+    if (r.address.toLowerCase().includes(query)) return 3
+    return 4
+}
+
+/**
+ * 장소와 주소를 함께 검색한다. 이름+주소가 같은 것은 하나만 남기고, 관련성 등급 → 현재 지도 중심에 가까운 순으로 정렬해
+ * MAX_RESULTS 건까지 돌려준다.
+ *
+ * @param query 검색어(비어 있으면 빈 결과). 끝의 미완성 자모는 뺀다
+ * @param key VWorld 인증키(config.ts). 비어 있으면 예외
+ * @param near 현재 지도 중심(EPSG:3857). 같은 등급 안에서 가까운 것을 앞에. 없으면 VWorld 순서 유지
+ */
+export const searchPlaces = (query: string, key: string, near?: [number, number]): SearchHandle => {
     if (!key) {
         return { promise: Promise.reject(new Error("검색 키가 설정되지 않았습니다")), cancel: () => {} }
     }
-    const q = query.trim()
+    const q = trimDanglingJamo(query.trim())
     if (!q) return { promise: Promise.resolve([]), cancel: () => {} }
     const place = searchOne("place", q, key)
     const address = searchOne("address", q, key)
     const promise = Promise.all([place.promise, address.promise]).then(([p, a]) => {
         const merged = [...normalize("place", p), ...normalize("address", a)]
         const seen = new Set<string>()
-        return merged.filter((r) => {
+        const unique = merged.filter((r) => {
             const k = `${r.name}|${r.address}`
             if (seen.has(k)) return false
             seen.add(k)
             return true
         })
+        const dist = (r: SearchResult) => (near ? Math.hypot(r.coord[0] - near[0], r.coord[1] - near[1]) : 0)
+        // sort 는 안정 정렬이라 등급·거리가 같으면 VWorld 순서(장소 → 주소)가 유지된다
+        return unique
+            .map((r, i) => ({ r, grade: relevance(r, q), d: dist(r), i }))
+            .sort((x, y) => x.grade - y.grade || x.d - y.d || x.i - y.i)
+            .slice(0, MAX_RESULTS)
+            .map((x) => x.r)
     })
     return {
         promise,

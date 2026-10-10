@@ -38,7 +38,7 @@ import { LIQUID_GLASS_ENABLED, useLiquidGlass } from "./ui/liquidGlass"
 import { SearchBox, SearchStatus } from "./ui/SearchBox"
 import { VWORLD_KEY } from "./config"
 import { clearSearchPin, showSearchPin } from "./searchPin"
-import { SearchHandle, searchPlaces, SearchResult } from "./vworld"
+import { SearchHandle, searchPlaces, SearchResult, trimDanglingJamo } from "./vworld"
 import { Button, Menu, MenuItem, MenuList, MenuPopover, MenuTrigger } from "@fluentui/react-components"
 import { TerrainMode } from "./webgpu/terrainRenderer"
 
@@ -195,7 +195,8 @@ function App({
     const searchRef = useRef<SearchHandle | null>(null)
     useEffect(() => {
         searchRef.current?.cancel()
-        const q = query.trim()
+        // 조합 중인 자모("이태ㅇ")는 빼고 본다. 빼고 나서 비면 검색하지 않는다
+        const q = trimDanglingJamo(query.trim())
         if (!q || q === pinnedName) {
             setSearchStatus({ kind: "idle" })
             return
@@ -203,7 +204,8 @@ function App({
         setSearchStatus({ kind: "loading" })
         // 300ms 디바운스. 그 안에 글자가 또 바뀌면 이전 타이머는 취소된다
         const timer = window.setTimeout(() => {
-            const handle = searchPlaces(q, VWORLD_KEY)
+            const center = mapRef.current?.getView().getCenter() as [number, number] | undefined
+            const handle = searchPlaces(q, VWORLD_KEY, center)
             searchRef.current = handle
             handle.promise
                 .then((results) => setSearchStatus({ kind: "done", results }))
@@ -212,11 +214,32 @@ function App({
         return () => window.clearTimeout(timer)
     }, [query, pinnedName])
 
-    /** 지도를 그 자리로 옮긴다(줌은 16 이상으로) */
+    /**
+     * 지도를 그 자리로 옮긴다(줌은 16 이상으로). 멀면 OpenLayers 의 "fly" 방식: 중심은 직선으로 가고, 줌은 두 지점이 한 화면에
+     * 들어오는 수준(최소 10)까지 빠졌다가 목표 줌으로 들어온다. 줌 16 그대로 직선 이동하면 경로 위의 줌 16 타일이 프레임마다
+     * 요청되어 목적지 타일이 뒤로 밀렸다(OpenLayers 10 은 애니메이션 중에도 타일을 받고, 시작된 요청은 취소하지 않는다).
+     * 화면 폭 안쪽의 가까운 거리면 그냥 이동만 한다
+     */
     const flyTo = (coord: [number, number]) => {
-        const view = mapRef.current?.getView()
-        if (!view) return
-        view.animate({ center: coord, zoom: Math.max(view.getZoom() ?? 16, 16), duration: 500 })
+        const map = mapRef.current
+        const view = map?.getView()
+        const center = view?.getCenter()
+        const size = map?.getSize()
+        if (!map || !view || !center || !size) return
+        const targetZoom = Math.max(view.getZoom() ?? 16, 16)
+        const distance = Math.hypot(coord[0] - center[0], coord[1] - center[1])
+        const resolution = view.getResolution() ?? 1
+        const viewportPx = Math.min(size[0], size[1])
+        if (distance < resolution * viewportPx) {
+            view.animate({ center: coord, zoom: targetZoom, duration: 500 })
+            return
+        }
+        // 두 지점(거리 d)이 화면의 짧은 변 안에 여유 있게 들어오는 해상도 → 그 줌까지 빠진다
+        const outResolution = (distance * 1.5) / viewportPx
+        const outZoom = Math.max(10, Math.min(view.getZoomForResolution(outResolution) ?? 10, targetZoom - 1))
+        const duration = Math.min(1200, Math.max(600, distance / resolution / 2))
+        view.animate({ center: coord, duration })
+        view.animate({ zoom: outZoom, duration: duration / 2 }, { zoom: targetZoom, duration: duration / 2 })
     }
     const selectSearchResult = (r: SearchResult) => {
         setQuery(r.name)
