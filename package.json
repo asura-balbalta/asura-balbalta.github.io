@@ -10,7 +10,8 @@
         "predev": "mkdir -p dist/export && cp node_modules/rhino3dm/rhino3dm.min.js node_modules/rhino3dm/rhino3dm.wasm dist/export/",
         "dev": "esbuild --bundle src/index.tsx src/*.worker.ts src/export/*.worker.ts --outdir=dist --sourcemap --watch",
         "test": "echo \"Error: no test specified\" && exit 1",
-        "typecheck": "tsc --noEmit"
+        "typecheck": "tsc --noEmit",
+        "postinstall": "patch-package"
     },
     "author": "",
     "license": "ISC",
@@ -42,6 +43,7 @@
         "@webgpu/types": "^0.1.74",
         "esbuild": "^0.28.2",
         "firebase-tools": "^15.30.1",
+        "patch-package": "^8.0.1",
         "typescript": "6.0.3"
     }
 }
