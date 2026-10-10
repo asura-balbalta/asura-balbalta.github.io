@@ -236,15 +236,37 @@ function App({
             if (mapRef.current) clearSearchPin(mapRef.current)
         }
     }
-    /** "현재 위치로 이동": 브라우저 위치 정보로 지도만 옮긴다(핀 없음) */
-    const locateMe = () => {
+    /**
+     * "현재 위치로 이동": 브라우저 위치 정보로 지도만 옮긴다(핀 없음).
+     * 브라우저는 한 번 "차단" 한 사이트에는 다시 묻지 않고 즉시 거부하므로, 권한 상태를 먼저 조회해 차단이면 사이트 설정에서
+     * 허용하는 방법을 안내한다. 미정이면 브라우저가 묻고, 거절하면 경고 토스트(5초 뒤 사라짐)
+     */
+    const locateMe = async () => {
         if (!("geolocation" in navigator)) {
-            toast.error("현재 위치를 가져오지 못했습니다", "이 브라우저는 위치 정보를 지원하지 않습니다.")
+            toast.warning("현재 위치를 가져오지 못했습니다", "이 브라우저는 위치 정보를 지원하지 않습니다.")
             return
+        }
+        try {
+            const status = await navigator.permissions?.query({ name: "geolocation" })
+            if (status?.state === "denied") {
+                toast.warning(
+                    "위치 정보가 차단되어 있습니다",
+                    "브라우저 주소창의 사이트 설정에서 위치 정보를 허용한 뒤 다시 눌러 주세요.",
+                )
+                return
+            }
+        } catch {
+            // permissions API 가 없거나 geolocation 을 모르는 브라우저(Safari 일부). 바로 요청해 본다
         }
         navigator.geolocation.getCurrentPosition(
             (pos) => flyTo(fromLonLat([pos.coords.longitude, pos.coords.latitude]) as [number, number]),
-            (err) => toast.error("현재 위치를 가져오지 못했습니다", err.message),
+            (err) => {
+                if (err.code === err.PERMISSION_DENIED) {
+                    toast.warning("위치 정보 사용을 허용하지 않았습니다", "허용하면 현재 위치로 이동합니다.")
+                } else {
+                    toast.warning("현재 위치를 가져오지 못했습니다", err.message)
+                }
+            },
             { timeout: 10_000 },
         )
     }

@@ -1,4 +1,4 @@
-import { Toast, ToastBody, Toaster, ToastIntent, ToastTitle, useToastController } from "@fluentui/react-components"
+import { Link, Toast, ToastBody, Toaster, ToastIntent, ToastTitle, ToastTrigger, useToastController } from "@fluentui/react-components"
 import React, { useMemo } from "react"
 
 /** 앱에 하나뿐인 Toaster 의 id. useAppToast 가 같은 id 로 띄운다 */
@@ -16,6 +16,8 @@ export const AppToaster = ({ bottom = 40 }: { bottom?: number }) => (
 
 /**
  * 토스트 띄우기. window.alert 를 대체한다.
+ * 오류(error)는 닫을 때까지 남으므로 제목 옆에 "닫기" 를 둔다. 사용자가 바로 다시 시도할 수 있는 실패(위치 정보 거부 등)는
+ * error 가 아니라 warning 으로 띄워 5초 뒤 사라지게 한다.
  *
  * @returns show(intent, 제목, 설명?) 와 success/warning/error 단축
  */
@@ -25,7 +27,17 @@ export const useAppToast = () => {
         const show = (intent: ToastIntent, title: string, body?: string) =>
             dispatchToast(
                 <Toast>
-                    <ToastTitle>{title}</ToastTitle>
+                    <ToastTitle
+                        action={
+                            intent === "error" ? (
+                                <ToastTrigger>
+                                    <Link>닫기</Link>
+                                </ToastTrigger>
+                            ) : undefined
+                        }
+                    >
+                        {title}
+                    </ToastTitle>
                     {body && <ToastBody>{body}</ToastBody>}
                 </Toast>,
                 { intent, timeout: intent === "error" ? -1 : 5000 },
