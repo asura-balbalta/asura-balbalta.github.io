@@ -2,7 +2,9 @@ import { LiquidGlass } from "../vendor/liquidglass/index.js"
 import { RefObject, useEffect } from "react"
 
 /**
- * 리퀴드 글래스(3D 화면의 유리 그릇). 기본으로 켜고, 비교·디버그용으로 URL 에 ?glass=0 을 주면 CSS 유리로 돌아간다.
+ * 리퀴드 글래스(3D 화면의 유리 그릇). Chromium 엔진에서만 켠다: WebKit(iOS 전체·데스크톱 Safari)은 WebGPU 캔버스를
+ * drawImage 로 읽으면 그 프레임의 화면 표시가 건너뛰어져 3D 가 멈춘 것처럼 보였다(2026-10-10 iPhone 확인, ?glass=0 이면 정상).
+ * Firefox 는 확인 전이라 같이 뺀다. URL ?glass=0 은 끄기, ?glass=1 은 판별과 무관하게 켜기(디버그).
  *
  * 라이브러리는 루트의 직계 자식을 캔버스로 떠서(일반 DOM 은 html-to-image, canvas 는 drawImage) 유리 요소 위치에 WebGL 로
  * 굴절·흐림을 그린다. 3D 화면에서만 켠다: WebGPU 캔버스는 루트 직계 자식이라 data-dynamic 을 주면 매 프레임 drawImage 로
@@ -14,7 +16,16 @@ import { RefObject, useEffect } from "react"
  * 상태 표시줄은 작은 글자가 많아 대상에서 빼고 CSS 유리(glass-strong)를 유지한다.
  * 측정용으로 window.__lg 에 인스턴스를 둔다(fps 속성).
  */
-export const LIQUID_GLASS_ENABLED = new URLSearchParams(window.location.search).get("glass") !== "0"
+/** Chromium 엔진인지. userAgentData 가 있으면 brands 에 Chromium 이 있는지, 없으면 UA 의 "Chrome/"(iOS 의 CriOS 는 WebKit 이라 제외) */
+const isChromium = () => {
+    const brands = (navigator as { userAgentData?: { brands?: { brand: string }[] } }).userAgentData?.brands
+    if (brands) return brands.some((b) => /chromium/i.test(b.brand))
+    const ua = navigator.userAgent
+    return /Chrome\/\d+/.test(ua) && !/CriOS|FxiOS|EdgiOS/.test(ua)
+}
+
+const glassParam = new URLSearchParams(window.location.search).get("glass")
+export const LIQUID_GLASS_ENABLED = glassParam === "1" || (glassParam !== "0" && isChromium())
 
 /**
  * 유리 요소 선택자 → 모서리 반지름(ui.css 의 border-radius 와 같게)과 베벨 깊이 zRadius(px).

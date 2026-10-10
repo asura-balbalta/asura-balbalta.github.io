@@ -74,7 +74,11 @@ export type TerrainTheme = {
 /** "#RRGGBB" → 0 ~ 1 rgb */
 export const hexToRgb = (hex: string) => {
     const n = parseInt(hex.slice(1), 16)
-    return { r: ((n >> 16) & 255) / 255, g: ((n >> 8) & 255) / 255, b: (n & 255) / 255 }
+    return {
+        r: ((n >> 16) & 255) / 255,
+        g: ((n >> 8) & 255) / 255,
+        b: (n & 255) / 255,
+    }
 }
 
 /**
@@ -115,7 +119,7 @@ export const TERRAIN_THEMES: Record<Theme, TerrainTheme> = {
             "border-disabled": "#e0e0e0",
             focus: "#000000",
             "focus-inner": "#ffffff",
-            glass: "rgba(255, 255, 255, 0.35)",
+            glass: "rgba(255, 255, 255, 0.22)",
             "glass-strong": "rgba(255, 255, 255, 0.8)",
             "glass-edge": "rgba(255, 255, 255, 0.45)",
             "glass-highlight": "rgba(255, 255, 255, 0.55)",
@@ -164,7 +168,7 @@ export const TERRAIN_THEMES: Record<Theme, TerrainTheme> = {
             "border-disabled": "#424242",
             focus: "#ffffff",
             "focus-inner": "#000000",
-            glass: "rgba(26, 26, 26, 0.4)",
+            glass: "rgba(26, 26, 26, 0.3)",
             "glass-strong": "rgba(31, 31, 31, 0.7)",
             "glass-edge": "rgba(255, 255, 255, 0.1)",
             "glass-highlight": "rgba(255, 255, 255, 0.08)",
@@ -188,7 +192,10 @@ export const TERRAIN_THEMES: Record<Theme, TerrainTheme> = {
  * @param stops 단계 STOP_COUNT 개(높이 오름차순)
  */
 export const stopsToUniform = (stops: ElevationStop[]) => {
-    if (stops.length !== STOP_COUNT) throw new Error(`색표 단계는 ${STOP_COUNT}개여야 함 (${stops.length}개)`)
+    if (stops.length !== STOP_COUNT)
+        throw new Error(
+            `색표 단계는 ${STOP_COUNT}개여야 함 (${stops.length}개)`,
+        )
     const out = new Float32Array(4 * STOP_COUNT)
     stops.forEach((s, i) => {
         const { r, g, b } = hexToRgb(s.hex)

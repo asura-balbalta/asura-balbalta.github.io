@@ -1,4 +1,8 @@
-import { Theme as FluentTheme, webDarkTheme, webLightTheme } from "@fluentui/react-components"
+import {
+    Theme as FluentTheme,
+    webDarkTheme,
+    webLightTheme,
+} from "@fluentui/react-components"
 import { CSSProperties } from "react"
 
 import { TERRAIN_THEMES, Theme } from "../terrainTheme"
@@ -12,10 +16,10 @@ export const UI_FONT_FAMILY =
 
 /**
  * 유리의 backdrop-filter 흐림(px). 디자인 시스템 tokens.json 의 glass-blur 와 같은 값.
- * 3D 화면에서 레일·상태 표시줄의 흐림이 프레임을 먹는지 쟀을 때(28k 삼각형, 12px 과 0px) 차이가 없어 그대로 둔다.
- * 느린 기기에서 문제가 되면 이 값을 0 으로 내리면 흐림 없는 반투명이 된다
+ * 12px 이었으나 뒤 형태가 거의 지워져 Chromium 의 WebGL 유리(약한 흐림 + 굴절)와 달라 보여 2px 로(2026-10-10, 확인 by @nanangqq).
+ * 프레임 비용은 12px 과 0px 을 쟀을 때도 차이가 없었다
  */
-const GLASS_BLUR_PX = 12
+const GLASS_BLUR_PX = 2
 
 /**
  * 테마의 UI 색을 CSS 변수(--ui-<토큰 이름>)로 만든다. App 루트 요소의 style 에 걸어 두면 직접 그리는 그릇(레일·패널·
@@ -25,7 +29,8 @@ const GLASS_BLUR_PX = 12
  */
 export const uiCssVars = (theme: Theme): CSSProperties => {
     const vars: Record<string, string> = {}
-    for (const [name, value] of Object.entries(TERRAIN_THEMES[theme].ui)) vars[`--ui-${name}`] = value
+    for (const [name, value] of Object.entries(TERRAIN_THEMES[theme].ui))
+        vars[`--ui-${name}`] = value
     // 색이 아닌 재질 값(디자인 시스템 tokens.json 의 shadow·material 가족). 그림자는 Fluent shadow16·shadow8 값
     const dark = theme === "dark"
     vars["--ui-shadow-float"] = dark
@@ -35,7 +40,8 @@ export const uiCssVars = (theme: Theme): CSSProperties => {
         ? "0 0 2px rgba(0,0,0,0.24), 0 4px 8px rgba(0,0,0,0.28)"
         : "0 0 2px rgba(0,0,0,0.12), 0 4px 8px rgba(0,0,0,0.14)"
     vars["--ui-glass-blur"] = `${GLASS_BLUR_PX}px`
-    vars["--ui-glass-saturate"] = dark ? "1.4" : "1.6"
+    // WebGL 유리(Chromium)는 채도를 올리지 않으므로 CSS 유리도 거의 올리지 않는다
+    vars["--ui-glass-saturate"] = dark ? "1.1" : "1.2"
     return vars as CSSProperties
 }
 
@@ -47,7 +53,8 @@ export const uiCssVars = (theme: Theme): CSSProperties => {
  * @param theme 색 테마
  */
 export const fluentTheme = (theme: Theme): FluentTheme => {
-    if (theme === "light") return { ...webLightTheme, fontFamilyBase: UI_FONT_FAMILY }
+    if (theme === "light")
+        return { ...webLightTheme, fontFamilyBase: UI_FONT_FAMILY }
     const ui = TERRAIN_THEMES.dark.ui
     return {
         ...webDarkTheme,
