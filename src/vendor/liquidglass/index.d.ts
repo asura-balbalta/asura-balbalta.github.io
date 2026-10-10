@@ -1,6 +1,8 @@
 /**
  * @ybouane/liquidglass 1.0.3 의 최소 타입 선언(원본 dist/*.d.ts 에서 쓰는 부분만 옮김).
- * index.js 는 npm 패키지의 dist/index.js 를 그대로 복사한 번들(html-to-image 포함, 의존성 없음). LICENSE.md 참고
+ * index.js 는 npm 패키지의 dist/index.js 를 복사한 번들(html-to-image 포함, 의존성 없음). LICENSE.md 참고.
+ * 우리가 손댄 곳(2026-10-10): 셰이더에 고정돼 있던 틴트 색 vec3(0.92, 0.95, 1.05) 를 uniform u_tintColor 로 빼고
+ * GlassConfig.tintColor 로 받는다(DEFAULTS·uniform 목록·uniform3f 호출 추가). 패키지를 다시 받으면 같은 네 곳을 다시 고쳐야 한다
  */
 
 /** 유리 요소 하나의 설정. 요소의 dataset.config(JSON) 또는 init 의 defaults 로 준다 */
@@ -27,8 +29,10 @@ export interface GlassConfig {
     opacity: number
     /** 채도 -1 ~ 1 */
     saturation: number
-    /** 푸른 유리 틴트 */
+    /** 유리 틴트 세기. 색에 tintColor 를 이만큼 섞어 곱한다(1 을 넘으면 선형으로 더 강하게) */
     tintStrength: number
+    /** 틴트 색(RGB 곱 계수). 원본은 vec3(0.92, 0.95, 1.05) 고정이었다(우리 패치) */
+    tintColor: [number, number, number]
     /** 밝기 -0.5 ~ 0.5 */
     brightness: number
     /** 그림자 불투명도 */

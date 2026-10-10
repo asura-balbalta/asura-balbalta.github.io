@@ -12,6 +12,7 @@ var DEFAULTS = {
   opacity: 1,
   saturation: 0,
   tintStrength: 0,
+  tintColor: [0.92, 0.95, 1.05],
   brightness: 0,
   shadowOpacity: 0.3,
   shadowSpread: 10,
@@ -1255,6 +1256,7 @@ uniform float u_distort;
 uniform float u_alpha;
 uniform float u_sat;
 uniform float u_tint;
+uniform vec3 u_tintColor;
 uniform float u_zRadius;
 uniform float u_brightness;
 uniform float u_shadowAlpha;
@@ -1386,7 +1388,7 @@ void main() {
 	col = mix(vec3(lum), col, 1.0 + u_sat);
 
 	// \u2500\u2500 Cool glass tint \u2500\u2500
-	col = mix(col, col * vec3(0.92, 0.95, 1.05), u_tint);
+	col = mix(col, col * u_tintColor, u_tint);
 	col *= 1.0 + 0.06 * depth;
 
 	// \u2500\u2500 Fresnel \u2500\u2500
@@ -1504,6 +1506,7 @@ var GlassRenderer = class {
       "u_alpha",
       "u_sat",
       "u_tint",
+      "u_tintColor",
       "u_zRadius",
       "u_brightness",
       "u_shadowAlpha",
@@ -1626,6 +1629,7 @@ var GlassRenderer = class {
     gl.uniform1f(this.glassU.u_alpha, config.opacity);
     gl.uniform1f(this.glassU.u_sat, config.saturation);
     gl.uniform1f(this.glassU.u_tint, config.tintStrength);
+    gl.uniform3f(this.glassU.u_tintColor, config.tintColor[0], config.tintColor[1], config.tintColor[2]);
     gl.uniform1f(this.glassU.u_zRadius, config.zRadius * dpr);
     gl.uniform1f(this.glassU.u_brightness, config.brightness);
     gl.uniform1f(this.glassU.u_shadowAlpha, config.shadowOpacity);

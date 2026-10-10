@@ -107,6 +107,15 @@ button.ui-status-pill:focus-visible,
     box-shadow: inset 0 -2px 0 var(--ui-accent);
 }
 
+/* 독·탭 막대 아이콘 선 두께. Fluent Regular 아이콘은 1 단위(viewBox 20) 두께의 선을 채운 path 라 stroke-width 만으로는 못 바꾸고,
+   path 윤곽에 같은 색 stroke 를 둘러 선을 두껍게 한다(선 1 → 1.5 단위, 20px 에서 1.5px). 2026-10-10 요청 by @nanangqq */
+.ui-dock .ui-dock-button svg path,
+.ui-tabbar .ui-tab-button svg path {
+    stroke: currentColor;
+    stroke-width: 0.5;
+    stroke-linejoin: round;
+}
+
 .ui-dock-divider {
     width: 1px;
     height: 28px;

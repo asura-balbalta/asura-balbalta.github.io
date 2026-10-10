@@ -119,7 +119,8 @@ export const TERRAIN_THEMES: Record<Theme, TerrainTheme> = {
             "border-disabled": "#e0e0e0",
             focus: "#000000",
             "focus-inner": "#ffffff",
-            glass: "rgba(255, 255, 255, 0.22)",
+            // 옅은 하늘색(accent 와 같은 색상 약 208°): 3D 화면의 WebGL 유리 틴트(liquidGlass.ts)와 같은 톤. 무색 흰색은 회색 건물 위에서 묻혔다
+            glass: "rgba(212, 233, 251, 0.3)",
             "glass-strong": "rgba(255, 255, 255, 0.8)",
             "glass-edge": "rgba(255, 255, 255, 0.45)",
             "glass-highlight": "rgba(255, 255, 255, 0.55)",
@@ -168,7 +169,7 @@ export const TERRAIN_THEMES: Record<Theme, TerrainTheme> = {
             "border-disabled": "#424242",
             focus: "#ffffff",
             "focus-inner": "#000000",
-            glass: "rgba(26, 26, 26, 0.3)",
+            glass: "rgba(18, 32, 46, 0.35)",
             "glass-strong": "rgba(31, 31, 31, 0.7)",
             "glass-edge": "rgba(255, 255, 255, 0.1)",
             "glass-highlight": "rgba(255, 255, 255, 0.08)",
