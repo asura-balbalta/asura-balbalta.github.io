@@ -1,9 +1,10 @@
 import { create, type Point3 } from "openskp"
 
+import type { BuildingParts } from "../buildingsMesh"
 import { LAYER_DEFS } from "../layers"
 import type { TinMesh } from "../terrainData"
 import type { TerrainMode } from "../webgpu/terrainRenderer"
-import type { LayerMeshes } from "./stlClient"
+import type { ExportMesh, LayerMeshes } from "./stlClient"
 import { buildTerrainBands, P2 } from "./terrainBands"
 
 /**
@@ -142,11 +143,103 @@ const addTerrainSlabs = (builder: Builder, mesh: TinMesh, step: number, progress
 }
 
 /**
+ * 건물 레이어를 "건물마다 지붕·바닥·벽 면으로 닫은 그룹" 들을 모은 "buildings" 그룹으로 넣는다. SketchUp 에서 footprint 를
+ * 건물 높이만큼 push 한 것과 같은 구조라, 건물 하나를 골라 옮기거나 지울 수 있다. 모든 변은 hard 다.
+ *
+ * 건물 k 의 고리는 합쳐진 메쉬에서 parts 표로 꺼낸다(아래 고리 n 개 + 위 고리 n 개, 점 순서는 외곽 → 구멍들).
+ * 바닥 z 는 아래 고리의 z(지형 속으로 WALL_SINK_M 만큼 묻힌 높이), 지붕 z 는 위 고리의 z 다. 고리 방향은 데이터에 따라
+ * 다를 수 있어 넓이 부호로 외곽은 반시계, 구멍은 시계로 맞춘 뒤 지붕은 그대로, 바닥은 뒤집어 넣고, 벽은 영역을 왼쪽에 두고
+ * 걷는 변 p→q 에 [p아래, q아래, q위, p위] 로 넣어 바깥을 향하게 한다(addTerrainSlabs 와 같은 규칙).
+ * 정의 이름은 "building-<전국 고유 번호>", 그룹 인스턴스 이름은 번호다. 면 생성이 실패한(점이 겹치거나 일직선인) 면은 건너뛴다.
+ *
+ * @param progress 이 레이어 안의 진행률(0 ~ 1)
+ * @returns 건너뛴 면 수
+ */
+const addBuildingGroups = (builder: Builder, mesh: TinMesh, parts: BuildingParts, progress: (ratio: number) => void) => {
+    const started = performance.now()
+    const { positions } = mesh
+    const count = parts.heads.length / 3
+    const pt = (i: number, z: number): Point3 => [positions[i * 3] * INCH_PER_METER, positions[i * 3 + 1] * INCH_PER_METER, z * INCH_PER_METER]
+    /** 고리(정점 인덱스 목록)의 부호 있는 넓이 ×2. 양수 = 반시계 */
+    const area2 = (ring: number[]) => {
+        let s = 0
+        for (let i = 0; i < ring.length; i++) {
+            const a = ring[i] * 3, b = ring[(i + 1) % ring.length] * 3
+            s += positions[a] * positions[b + 1] - positions[b] * positions[a + 1]
+        }
+        return s
+    }
+    let faces = 0
+    let skipped = 0
+    let holeAt = 0
+    const defs: ReturnType<Builder["addComponentDefinition"]>[] = []
+    const names: string[] = []
+    for (let k = 0; k < count; k++) {
+        const base = parts.heads[3 * k], n = parts.heads[3 * k + 1], nHoles = parts.heads[3 * k + 2]
+        const starts = [0]
+        for (let h = 0; h < nHoles; h++) starts.push(parts.holeStarts[holeAt++])
+        starts.push(n)
+        const zBottom = positions[base * 3 + 2]
+        const zTop = positions[(base + n) * 3 + 2]
+        // 아래 고리 인덱스로 고리를 만들고 방향을 맞춘다(외곽 반시계, 구멍 시계)
+        const rings: number[][] = []
+        for (let r = 0; r + 1 < starts.length; r++) {
+            const ring: number[] = []
+            for (let i = starts[r]; i < starts[r + 1]; i++) ring.push(base + i)
+            if (ring.length < 3) continue
+            const a = area2(ring)
+            if ((r === 0 && a < 0) || (r > 0 && a > 0)) ring.reverse()
+            rings.push(ring)
+        }
+        if (rings.length === 0) continue
+        const name = String(parts.ids[k])
+        names.push(name)
+        defs.push(
+            builder.addComponentDefinition(`building-${name}`, (def) => {
+                const face = (points: Point3[], holes?: Point3[][]) => {
+                    try {
+                        def.addFace(points, holes && holes.length > 0 ? { holes } : undefined)
+                        faces++
+                    } catch {
+                        skipped++
+                    }
+                }
+                const [outer, ...holes] = rings
+                face(
+                    outer.map((i) => pt(i, zTop)),
+                    holes.map((h) => h.map((i) => pt(i, zTop))),
+                )
+                face(
+                    [...outer].reverse().map((i) => pt(i, zBottom)),
+                    holes.map((h) => [...h].reverse().map((i) => pt(i, zBottom))),
+                )
+                for (const ring of rings) {
+                    for (let j = 0; j < ring.length; j++) {
+                        const p = ring[j], q = ring[(j + 1) % ring.length]
+                        face([pt(p, zBottom), pt(q, zBottom), pt(q, zTop), pt(p, zTop)])
+                    }
+                }
+            }),
+        )
+        if (k % 500 === 499) progress((k + 1) / count)
+    }
+    builder.addGroup(
+        (group) => {
+            defs.forEach((def, i) => group.addGroupInstance(def, { name: names[i] }))
+        },
+        { name: "buildings" },
+    )
+    progress(1)
+    console.log(`SKP 건물: ${defs.length}동, 면 ${faces}개, ${Math.round(performance.now() - started)}ms`)
+    return skipped
+}
+
+/**
  * openskp(SDK 없이 .skp 를 쓰는 라이브러리)로 레이어들을 SketchUp 2017 포맷 파일 하나로 만든다. 메인 스레드 밖에서 돈다.
  *
  * LAYER_DEFS 순서로 레이어마다 그룹(레이어 id 이름)을 하나씩 둔다. 지형 tin 은 삼각형 면을 soft·smooth 로 두어 SketchUp 이
- * 선을 숨기고 음영을 매끄럽게 하고, 지형 stepped 는 띠마다 판 그룹(addTerrainSlabs), 다른 레이어는 삼각형 면을 soft 만 두어
- * 선은 숨기되 평면 음영은 유지한다.
+ * 선을 숨기고 음영을 매끄럽게 하고, 지형 stepped 는 띠마다 판 그룹(addTerrainSlabs), 건물은 parts 가 있으면 건물마다 면 그룹
+ * (addBuildingGroups), 그 밖의 레이어(또는 parts 없는 건물)는 삼각형 면을 soft 만 두어 선은 숨기되 평면 음영은 유지한다.
  * 진행률은 레이어의 원본 삼각형 수로 가중해 0 ~ 1 로 낸다. 취소는 메인에서 terminate 로 한다(요청마다 Worker 를 새로 만든다).
  * 오류는 메인의 worker.onerror 로 전달된다.
  */
@@ -171,11 +264,13 @@ self.onmessage = (e: MessageEvent<SkpExportRequest>) => {
     const builder = create()
     let skipped = 0
     for (const { id } of LAYER_DEFS) {
-        const mesh = layers[id]
+        const mesh: ExportMesh | null = layers[id]
         if (!mesh) continue
         const w = weight(mesh)
         if (id === "terrain" && mode === "stepped") {
             skipped += addTerrainSlabs(builder, mesh, step, (ratio) => progress(ratio, w))
+        } else if (id === "buildings" && mesh.parts) {
+            skipped += addBuildingGroups(builder, mesh, mesh.parts, (ratio) => progress(ratio, w))
         } else {
             const options: FaceOptions = id === "terrain" ? { softEdges: true, smoothEdges: true } : { softEdges: true }
             builder.addGroup((def) => void (skipped += addPlain(def, mesh, options)), { name: id })

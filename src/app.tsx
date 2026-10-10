@@ -8,7 +8,7 @@ import { getDistance } from "ol/sphere"
 // Firebase 앱 초기화(부수효과). 값은 아직 쓰지 않는다
 import "./fb"
 import { basemapAttribution, BasemapProvider } from "./basemap"
-import { loadBuildingsInWorker } from "./buildingsClient"
+import { BuildingsMesh, loadBuildingsInWorker } from "./buildingsClient"
 import { BuildingsLoadPhase } from "./buildingsData"
 import { TerrainViewCanvas } from "./components/TerrainViewCanvas"
 import type { ExportKind } from "./export/download"
@@ -157,7 +157,7 @@ function App({
     const [sheetCount, setSheetCount] = useState<number | null>(null)
     const [mesh, setMesh] = useState<TinMesh | null>(null)
     /** 건물 레이어 메쉬(지형과 같은 원점). 지형이 바뀌면 null 로 비우고 다시 만든다 */
-    const [buildings, setBuildings] = useState<TinMesh | null>(null)
+    const [buildings, setBuildings] = useState<BuildingsMesh | null>(null)
     /** 세운 건물 수(상태 표시줄 표시용) */
     const [buildingCount, setBuildingCount] = useState<number | null>(null)
     /** 건물 레이어 로딩 진행. 지형과 별개로 진행되므로 따로 든다 */

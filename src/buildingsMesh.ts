@@ -70,6 +70,20 @@ export const createTerrainSampler = (positions: Float32Array, indices: Uint32Arr
     }
 }
 
+/**
+ * 합쳐진 건물 메쉬에서 건물 하나씩을 다시 꺼내기 위한 표(내보내기용). 건물 k 의 정점은 heads 의 시작 인덱스부터
+ * n 개가 아래 고리, 이어 n 개가 위 고리이고, 점 순서는 Building.xy 와 같다(외곽 → 구멍들). 아래·위 고리의 z 가 곧
+ * 바닥·지붕 높이다. SKP 내보내기가 이 표로 건물마다 지붕·바닥·벽 면 그룹을 만든다
+ */
+export type BuildingParts = {
+    /** 건물마다 [정점 시작 인덱스, 점 수 n, 구멍 수]. 3개씩 */
+    heads: Uint32Array
+    /** 구멍마다 고리 안에서의 시작 점 번호. heads 순서대로 이어 붙인다 */
+    holeStarts: Uint32Array
+    /** 건물마다 전국 고유 번호(그룹 이름용). 2^32 를 넘을 수 있어 float64 */
+    ids: Float64Array
+}
+
 /** 고리의 부호 있는 넓이 ×2 (양수 = 반시계) */
 const ringArea2 = (xy: Float64Array, start: number, end: number) => {
     let s = 0
@@ -91,14 +105,14 @@ const ringArea2 = (xy: Float64Array, start: number, end: number) => {
  * @param terrain 같은 원점의 지형 메쉬(바닥 높이 조회용)
  * @param storeyByUse 용도 u8 인덱스 → 층고(m)
  * @param onProgress 세운 건물 수 알림(약 2,000개마다와 끝에)
- * @returns 지형과 같은 원점의 메쉬(positions·indices), 세운 수, 건너뛴 수
+ * @returns 지형과 같은 원점의 메쉬(positions·indices), 건물별 표(parts), 세운 수, 건너뛴 수
  */
 export const buildBuildingsMesh = (
     buildings: Building[],
     terrain: TinMesh,
     storeyByUse: Float32Array,
     onProgress?: (done: number, total: number) => void,
-): { mesh: TinMesh; built: number; skipped: number } => {
+): { mesh: TinMesh; parts: BuildingParts; built: number; skipped: number } => {
     const sample = createTerrainSampler(terrain.positions, terrain.indices)
     // 상한: 정점 2n, 삼각형 ≤ 벽 2n + 지붕 (n + 2·구멍 수)
     let vCap = 0, iCap = 0
@@ -110,6 +124,11 @@ export const buildBuildingsMesh = (
     const positions = new Float32Array(3 * vCap)
     const indices = new Uint32Array(iCap)
     let v = 0, idx = 0, built = 0, skipped = 0
+    // 건물별 표. 상한은 건물 수와 구멍 수 합
+    const heads = new Uint32Array(3 * buildings.length)
+    const holeStarts = new Uint32Array(buildings.reduce((s, b) => s + b.holes.length, 0))
+    const ids = new Float64Array(buildings.length)
+    let holeCount = 0
 
     for (const [k, b] of buildings.entries()) {
         const n = b.xy.length / 2
@@ -195,12 +214,19 @@ export const buildBuildingsMesh = (
                 }
             }
         }
+        heads[3 * built] = base
+        heads[3 * built + 1] = n
+        heads[3 * built + 2] = b.holes.length
+        // ringStarts 는 구멍이 없어도 [0, n] 두 항목이므로, 구멍 수만큼만 두 번째 항목부터 옮긴다
+        for (let h = 0; h < b.holes.length; h++) holeStarts[holeCount++] = ringStarts[h + 1]
+        ids[built] = b.id
         built++
         if (k % 2000 === 1999) onProgress?.(k + 1, buildings.length)
     }
     onProgress?.(buildings.length, buildings.length)
     return {
         mesh: { origin: terrain.origin, positions: positions.subarray(0, v), indices: indices.subarray(0, idx) },
+        parts: { heads: heads.slice(0, 3 * built), holeStarts: holeStarts.slice(0, holeCount), ids: ids.slice(0, built) },
         built,
         skipped,
     }

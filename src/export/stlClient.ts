@@ -1,3 +1,4 @@
+import type { BuildingParts } from "../buildingsMesh"
 import type { LayerId } from "../layers"
 import type { TinMesh } from "../terrainData"
 import type { TerrainMode } from "../webgpu/terrainRenderer"
@@ -7,8 +8,11 @@ import type { StlExportRequest, StlExportResponse } from "./stl.worker"
 /** esbuild 가 src/export/stl.worker.ts 를 별도 entry 로 묶어 내는 파일. dist/index.js 기준 상대 경로 */
 const STL_WORKER_URL = "export/stl.worker.js"
 
+/** 내보낼 메쉬. 건물 레이어는 parts(건물별 표)를 함께 주면 SKP 가 건물마다 면 그룹을 만든다. 다른 형식은 무시한다 */
+export type ExportMesh = TinMesh & { parts?: BuildingParts }
+
 /** 내보낼 레이어별 메쉬. null 이면 그 레이어는 뺀다. 모두 같은 원점이어야 한다 */
-export type LayerMeshes = Record<LayerId, TinMesh | null>
+export type LayerMeshes = Record<LayerId, ExportMesh | null>
 
 /** 내보내기 공통 옵션 */
 export type ExportOptions = {
@@ -29,8 +33,13 @@ export const copyLayerMeshes = (layers: LayerMeshes, transfer: ArrayBuffer[]): L
             out[id] = null
             continue
         }
-        const c: TinMesh = { origin: mesh.origin, positions: mesh.positions.slice(), indices: mesh.indices.slice() }
+        const c: ExportMesh = { origin: mesh.origin, positions: mesh.positions.slice(), indices: mesh.indices.slice() }
         transfer.push(c.positions.buffer as ArrayBuffer, c.indices.buffer as ArrayBuffer)
+        if (mesh.parts) {
+            const p = mesh.parts
+            c.parts = { heads: p.heads.slice(), holeStarts: p.holeStarts.slice(), ids: p.ids.slice() }
+            transfer.push(c.parts.heads.buffer as ArrayBuffer, c.parts.holeStarts.buffer as ArrayBuffer, c.parts.ids.buffer as ArrayBuffer)
+        }
         out[id] = c
     }
     return out
