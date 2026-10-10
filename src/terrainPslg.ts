@@ -100,6 +100,32 @@ export const parseTtp = (buf: ArrayBuffer) => {
 const KEY_X_SPAN = 2 ** 27
 const KEY_Y_SPAN = 2 ** 26
 
+/** 범위 초과 오류 문구(km). 받기 전 검사와 합치기 검사가 같은 문구를 쓴다 */
+const extentError = (wMm: number, hMm: number) =>
+    new Error(`범위 초과: 가로 ${(wMm / 1e6).toFixed(1)}km × 세로 ${(hMm / 1e6).toFixed(1)}km (한도 134km × 67km)`)
+
+/**
+ * 인덱스의 1K 꼭짓점(5179 m)만으로 범위를 미리 재서 한도를 넘으면 파일을 받기 전에 막는다. 꼭짓점은 점 좌표를 감싸므로
+ * 여기서 통과하면 mergeTtpTiles 의 검사도 통과한다(그쪽은 안전망으로 남긴다)
+ *
+ * @param tiles 선택 범위에 걸친 1K(corners 는 EPSG:5179 m)
+ */
+const assertExtentWithinLimit = (tiles: { corners: [number, number][] }[]) => {
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+    for (const t of tiles) {
+        for (const [x, y] of t.corners) {
+            if (x < minX) minX = x
+            if (x > maxX) maxX = x
+            if (y < minY) minY = y
+            if (y > maxY) maxY = y
+        }
+    }
+    if (tiles.length === 0) return
+    const wMm = (maxX - minX) * 1000
+    const hMm = (maxY - minY) * 1000
+    if (wMm >= KEY_X_SPAN || hMm >= KEY_Y_SPAN) throw extentError(wMm, hMm)
+}
+
 /**
  * 선택한 1K 들의 점·조각을 공통 원점 기준으로 합쳐 제약 Delaunay 입력을 만들고 삼각분할한다. 규칙: 서버 README 7.2
  *
@@ -152,11 +178,7 @@ const mergeTtpTiles = (
         }
     }
     if (capacity === 0) throw new Error("선택 범위에 점이 없음")
-    if (maxX - minX >= KEY_X_SPAN || maxY - minY >= KEY_Y_SPAN) {
-        throw new Error(
-            `범위 초과: 가로 ${((maxX - minX) / 1e6).toFixed(1)}km × 세로 ${((maxY - minY) / 1e6).toFixed(1)}km (한도 134km × 67km)`,
-        )
-    }
+    if (maxX - minX >= KEY_X_SPAN || maxY - minY >= KEY_Y_SPAN) throw extentError(maxX - minX, maxY - minY)
 
     // 2) 점 합치기
     const coords = new Float64Array(2 * capacity)
@@ -255,7 +277,7 @@ const mergeTtpTiles = (
 /**
  * 지도에서 고른 범위의 지형 메쉬를 ttp(terrain_tile_pslg) 파일로 만든다. loadTerrainTtm 의 ttp 판.
  *
- * 1. 정적 인덱스(R2, terrainIndex)로 범위에 걸친 1K 와 5K 파일(path) 조회
+ * 1. 정적 인덱스(R2, terrainIndex)로 범위에 걸친 1K 와 5K 파일(path) 조회. 1K 꼭짓점으로 범위 한도를 먼저 검사
  * 2. 5K 파일들을 병렬로 받아 풀기
  * 3. 범위에 걸친 1K 만 골라 공통 원점으로 합치고 재삼각분할(mergeTtpTiles)
  * 4. 선택 사각형(5179 로 바꾼 네 모서리)으로 잘라 그린 범위만 남김(clipMeshToConvexPolygon)
@@ -272,6 +294,8 @@ export const loadTerrainTtp = async (
     const t0 = performance.now()
     onProgress?.("sheets", 0, 1)
     const q = await getTtpSheetsInBbox(bbox3857)
+    // 범위 한도는 파일을 받기 전에 인덱스의 꼭짓점으로 미리 잰다(받고 나서 알려 주면 그 시간이 아깝다)
+    assertExtentWithinLimit(q.tiles)
     const t1 = performance.now()
     let downloaded = 0
     onProgress?.("download", 0, q.sheets.length)
