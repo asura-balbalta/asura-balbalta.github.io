@@ -5,7 +5,7 @@ import { LAYER_DEFS } from "../layers"
 import type { TinMesh } from "../terrainData"
 import type { TerrainMode } from "../webgpu/terrainRenderer"
 import type { ExportMesh, LayerMeshes } from "./stlClient"
-import { buildTerrainBands, P2 } from "./terrainBands"
+import { buildTerrainSlabs, P2 } from "./terrainSlabs"
 
 /**
  * 메인 → Worker: SKP 생성 요청. 레이어마다 넣을지 말지를 메인이 정해 메쉬를 주거나(null 이면 뺌) 만다.
@@ -13,7 +13,7 @@ import { buildTerrainBands, P2 } from "./terrainBands"
  */
 export type SkpExportRequest = {
     layers: LayerMeshes
-    /** 지형(terrain)을 "tin" 이면 삼각형 그대로, "stepped" 면 띠마다 두께 step 의 판 그룹으로 넣는다. 다른 레이어는 그대로 */
+    /** 지형(terrain)을 "tin" 이면 삼각형 그대로, "stepped" 면 레벨마다 두께 step 의 판 그룹을 쌓아 넣는다. 다른 레이어는 그대로 */
     mode: TerrainMode
     /** stepped 일 때 층 간격(m) */
     step: number
@@ -67,24 +67,26 @@ const addTriangles = (
 }
 
 /**
- * 계단형 지형을 "띠마다 두께 step 의 판" 그룹들을 모은 "terrain" 그룹으로 넣는다. SketchUp 에서 등고선 판을 하나씩 push 해
- * 쌓은 모형과 같은 구조라, 판을 골라 옮기거나 지울 수 있고 띠끼리는 그룹이 달라 맞닿은 면이 서로 합쳐지지 않는다.
+ * 계단형 지형을 "레벨 k 이상 영역을 두께 step 으로 push 한 판" 그룹들을 모은 "terrain" 그룹으로 넣는다. 건축 모형처럼 맨 아래
+ * 판(메쉬 전체) 위에 다음 레벨 판을 차례로 쌓는 구조라, 판을 골라 옮기거나 지울 수 있고 판끼리는 그룹이 달라 맞닿은 면이
+ * 서로 합쳐지지 않는다. 아래 판의 윗면 중 위 판에 덮인 부분은 모형 속에 숨는다.
  *
  * 판 하나는 윗면(z = k·step)·아랫면(z = (k − 1)·step) 다각형 면(구멍 포함)과 둘레 변마다 벽 사각형이다. 모든 변은 hard 다.
  * openskp 의 면 법선은 점 순서로 정해지므로(Newell) 윗면은 반시계, 아랫면은 뒤집어 넣고, 벽은 영역을 왼쪽에 두고 걷는
  * 변 p→q 에 [p아래, q아래, q위, p위] 순으로 넣어 바깥을 향하게 한다. 구멍 고리는 시계 방향이라 같은 순서로 넣으면 역시 바깥(구멍 쪽)이다.
  *
  * openskp 는 중첩 그룹을 인라인으로 못 만들고, 정의(addComponentDefinition)를 먼저 만든 뒤 바깥 그룹 안에서
- * addGroupInstance 로 배치해야 한다. 그래서 띠마다 정의 하나("terrain-<높이>m")를 만들고 "terrain" 그룹이 그것들을 담는다.
+ * addGroupInstance 로 배치해야 한다. 그래서 판마다 정의 하나("terrain-<높이>m")를 만들고 "terrain" 그룹이 그것들을 담는다.
  *
- * @param progress 이 레이어 안의 진행률(0 ~ 1). 앞 절반은 띠 변환, 뒤 절반은 면 쓰기
+ * @param progress 이 레이어 안의 진행률(0 ~ 1). 앞 절반은 판 변환, 뒤 절반은 면 쓰기
  * @returns 건너뛴(면 생성이 실패한) 면 수
  */
 const addTerrainSlabs = (builder: Builder, mesh: TinMesh, step: number, progress: (ratio: number) => void) => {
     const started = performance.now()
-    const result = buildTerrainBands(mesh, step, (done, all) => progress(0.5 * (done / all)))
+    const result = buildTerrainSlabs(mesh, step, (done, all) => progress(0.5 * (done / all)))
     const converted = performance.now()
-    const { bands } = result
+    // 다각형이 없는 판은 정의를 만들 수 없다(openskp 가 빈 정의를 거부한다). 정상이면 없지만 보호한다
+    const bands = result.slabs.filter((s) => s.polygons.length > 0)
     const pt = (p: P2, z: number): Point3 => [p[0] * INCH_PER_METER, p[1] * INCH_PER_METER, z * INCH_PER_METER]
     const ringPts = (ring: P2[], z: number, reverse: boolean) => (reverse ? [...ring].reverse() : ring).map((p) => pt(p, z))
 
@@ -131,8 +133,8 @@ const addTerrainSlabs = (builder: Builder, mesh: TinMesh, step: number, progress
     const polygons = bands.reduce((s, b) => s + b.polygons.length, 0)
     const holes = bands.reduce((s, b) => s + b.polygons.reduce((t, p) => t + p.holes.length, 0), 0)
     console.log(
-        `SKP 계단형(${step}m): 띠 ${bands.length}개, 다각형 ${polygons}개(구멍 ${holes}개), 면 ${faces}개, ` +
-            `띠 변환 ${Math.round(converted - started)}ms + 면 쓰기 ${Math.round(performance.now() - converted)}ms`,
+        `SKP 계단형(${step}m): 판 ${bands.length}개, 다각형 ${polygons}개(구멍 ${holes}개), 면 ${faces}개, ` +
+            `판 변환 ${Math.round(converted - started)}ms + 면 쓰기 ${Math.round(performance.now() - converted)}ms`,
     )
     if (result.openChains || result.emptyRings || result.orphanHoles) {
         console.warn(
@@ -238,7 +240,7 @@ const addBuildingGroups = (builder: Builder, mesh: TinMesh, parts: BuildingParts
  * openskp(SDK 없이 .skp 를 쓰는 라이브러리)로 레이어들을 SketchUp 2017 포맷 파일 하나로 만든다. 메인 스레드 밖에서 돈다.
  *
  * LAYER_DEFS 순서로 레이어마다 그룹(레이어 id 이름)을 하나씩 둔다. 지형 tin 은 삼각형 면을 soft·smooth 로 두어 SketchUp 이
- * 선을 숨기고 음영을 매끄럽게 하고, 지형 stepped 는 띠마다 판 그룹(addTerrainSlabs), 건물은 parts 가 있으면 건물마다 면 그룹
+ * 선을 숨기고 음영을 매끄럽게 하고, 지형 stepped 는 레벨마다 쌓는 판 그룹(addTerrainSlabs), 건물은 parts 가 있으면 건물마다 면 그룹
  * (addBuildingGroups), 그 밖의 레이어(또는 parts 없는 건물)는 삼각형 면을 soft 만 두어 선은 숨기되 평면 음영은 유지한다.
  * 진행률은 레이어의 원본 삼각형 수로 가중해 0 ~ 1 로 낸다. 취소는 메인에서 terminate 로 한다(요청마다 Worker 를 새로 만든다).
  * 오류는 메인의 worker.onerror 로 전달된다.
