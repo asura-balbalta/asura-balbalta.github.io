@@ -1,8 +1,9 @@
+import type { BuildingParts } from "../buildingsMesh"
 import { LAYER_DEFS } from "../layers"
 import type { TinMesh } from "../terrainData"
-import { buildSteppedMeshChunks } from "../terrainSteps"
 import type { TerrainMode } from "../webgpu/terrainRenderer"
-import type { LayerMeshes } from "./stlClient"
+import type { ExportMesh, LayerMeshes } from "./stlClient"
+import { buildTerrainSlabs, P2 } from "./terrainSlabs"
 
 /**
  * 메인 → Worker: 3DM 생성 요청. 레이어마다 넣을지 말지를 메인이 정해 메쉬를 주거나(null 이면 뺌) 만다.
@@ -10,7 +11,7 @@ import type { LayerMeshes } from "./stlClient"
  */
 export type Rhino3dmExportRequest = {
     layers: LayerMeshes
-    /** 지형(terrain)을 "tin" 이면 삼각형 그대로, "stepped" 면 화면과 같은 계단형으로 변환해 넣는다. 다른 레이어는 그대로 */
+    /** 지형(terrain)을 "tin" 이면 삼각형 메쉬 그대로, "stepped" 면 레벨마다 두께 step 의 판(Extrusion)을 쌓아 넣는다. 다른 레이어는 그대로 */
     mode: TerrainMode
     /** stepped 일 때 층 간격(m) */
     step: number
@@ -29,9 +30,9 @@ const RHINO_SCRIPT = "rhino3dm.min.js"
 declare const rhino3dm: typeof import("rhino3dm").default
 declare function importScripts(...urls: string[]): void
 type RhinoModule = Awaited<ReturnType<typeof rhino3dm>>
+type Doc = InstanceType<RhinoModule["File3dm"]>
+type Attributes = InstanceType<RhinoModule["ObjectAttributes"]>
 
-/** 계단형 변환 조각의 정점·인덱스 버퍼 최대 바이트. GPU 와 무관하므로 Worker 메모리만 고려 */
-const STEPPED_CHUNK_BYTES = 64 * 1048576
 /** 삼각형 메쉬는 이 면 수마다 진행률을 보낸다 */
 const PROGRESS_EVERY_FACES = 50_000
 
@@ -70,10 +71,67 @@ const toRhinoMesh = (
 }
 
 /**
+ * 평면 다각형(외곽 + 구멍)을 zBottom 에서 zTop 까지 돌출한 닫힌 Extrusion 을 문서에 넣는다. SketchUp 의 push/pull 결과와
+ * 같은 솔리드다.
+ *
+ * rhino3dm 의 Extrusion 은 프로파일을 2D 좌표로 받는데, Extrusion.create(곡선, 높이) 로 만들면 그 2D 원점이 외곽 곡선의
+ * 첫 점이 되어 구멍 좌표를 옮겨야 한다(node 에서 확인). 대신 경로를 (0, 0, zBottom) → (0, 0, zTop), up 을 +y 로 직접 두면
+ * 프로파일 2D 축이 세계 x·y 와 같아져 외곽·구멍을 세계 xy 그대로(z = 0) 넣을 수 있다. 외곽은 반시계, 구멍은 시계여야
+ * 받아들인다(반대면 addInnerProfile 이 false).
+ *
+ * @returns 성공 여부. 곡선이 유효하지 않으면(점이 겹치거나 자기 교차) false
+ */
+const addExtrusion = (
+    rhino: RhinoModule,
+    doc: Doc,
+    outer: P2[],
+    holes: P2[][],
+    zBottom: number,
+    zTop: number,
+    attributes: Attributes,
+) => {
+    const closed = (ring: P2[]) => {
+        const pts = ring.map(([x, y]) => [x, y, 0])
+        pts.push(pts[0])
+        return new rhino.PolylineCurve(pts)
+    }
+    const extrusion = new rhino.Extrusion()
+    if (!extrusion.setPathAndUp([0, 0, zBottom], [0, 0, zTop], [0, 1, 0])) return false
+    if (!extrusion.setOuterProfile(closed(outer), true)) return false
+    for (const hole of holes) extrusion.addInnerProfile(closed(hole))
+    doc.objects().addExtrusion(extrusion, attributes)
+    return true
+}
+
+/** 이름이 name 인 Rhino 그룹을 만들고 그 인덱스를 돌려준다 */
+const addGroup = (rhino: RhinoModule, doc: Doc, name: string) => {
+    const group = new rhino.Group()
+    group.name = name
+    doc.groups().add(group)
+    return doc.groups().count - 1
+}
+
+/** 고리(정점 인덱스 목록)의 부호 있는 넓이 ×2. 양수 = 반시계 */
+const indexRingArea2 = (positions: Float32Array, ring: number[]) => {
+    let s = 0
+    for (let i = 0; i < ring.length; i++) {
+        const a = ring[i] * 3, b = ring[(i + 1) % ring.length] * 3
+        s += positions[a] * positions[b + 1] - positions[b] * positions[a + 1]
+    }
+    return s
+}
+
+/**
  * rhino3dm 으로 레이어들을 Rhino .3dm 파일 하나로 만든다. 메인 스레드 밖에서 돈다.
  *
- * LAYER_DEFS 순서로 레이어마다 Rhino 레이어(레이어 id 이름)를 만들고 그 위에 메쉬 객체를 둔다. 지형 stepped 는 변환 조각마다
- * 메쉬 객체 하나씩이다. 문서 단위는 미터라 TinMesh 좌표를 환산 없이 쓴다.
+ * LAYER_DEFS 순서로 레이어마다 Rhino 레이어(레이어 id 이름)를 만들고 그 위에 객체를 둔다. 문서 단위는 미터라 TinMesh 좌표를
+ * 환산 없이 쓴다.
+ * - 지형 tin: 정점 공유 메쉬 하나.
+ * - 지형 stepped: 레벨마다 "k·step 이상 영역" 을 두께 step 으로 돌출한 Extrusion(판). 건축 모형처럼 맨 아래 판(영역 전체)
+ *   위에 다음 레벨 판이 쌓인다(SKP 내보내기와 같은 구조, terrainSlabs). 판은 "terrain-<높이>m" 이름의 객체이고 모두
+ *   Rhino 그룹 "terrain" 에 넣어 한 번에 잡히게 한다(판 하나가 객체 하나라 판별 그룹은 두지 않는다).
+ * - 건물: parts 가 있으면 건물마다 footprint 를 높이만큼 돌출한 Extrusion(이름은 전국 고유 번호, 그룹 "buildings"),
+ *   없으면 삼각형 메쉬 하나.
  * 진행률은 레이어의 원본 삼각형 수로 가중해 0 ~ 1 로 낸다. 취소는 메인에서 terminate 로 한다(요청마다 Worker 를 새로 만든다).
  * 오류는 메인의 worker.onerror 로 전달된다(비동기 핸들러 안의 오류는 unhandledrejection 이 아니라 throw 로 올린다).
  */
@@ -91,8 +149,9 @@ self.onmessage = async (e: MessageEvent<Rhino3dmExportRequest>) => {
     const doc = new rhino.File3dm()
     doc.settings().modelUnitSystem = rhino.UnitSystem.Meters
     let skipped = 0
+    let failedSolids = 0
     for (const { id } of LAYER_DEFS) {
-        const mesh = layers[id]
+        const mesh: ExportMesh | null = layers[id]
         if (!mesh) continue
         const layerIndex = doc.layers().addLayer(id, LAYER_COLORS[id] ?? { r: 160, g: 160, b: 160, a: 255 })
         const attributes = new rhino.ObjectAttributes()
@@ -105,14 +164,59 @@ self.onmessage = async (e: MessageEvent<Rhino3dmExportRequest>) => {
             doc.objects().addMesh(r.mesh, attributes)
         }
         if (id === "terrain" && mode === "stepped") {
-            const chunks = buildSteppedMeshChunks(mesh, step, STEPPED_CHUNK_BYTES, (done, all) => progress(done / all, w))
-            for (const chunk of chunks) addMesh(chunk.positions, chunk.indices)
+            const started = performance.now()
+            const result = buildTerrainSlabs(mesh, step, (done, all) => progress(0.5 * (done / all), w))
+            attributes.addToGroup(addGroup(rhino, doc, "terrain"))
+            let solids = 0
+            result.slabs.forEach((slab, i) => {
+                attributes.name = `terrain-${slab.zTop}m`
+                for (const { outer, holes } of slab.polygons) {
+                    if (addExtrusion(rhino, doc, outer, holes, slab.zBottom, slab.zTop, attributes)) solids++
+                    else failedSolids++
+                }
+                progress(0.5 + 0.5 * ((i + 1) / result.slabs.length), w)
+            })
+            console.log(`3DM 계단형(${step}m): 판 ${result.slabs.length}개, 솔리드 ${solids}개, ${Math.round(performance.now() - started)}ms`)
+            if (result.openChains || result.orphanHoles) {
+                console.warn(`3DM 계단형: 안 닫힌 사슬 ${result.openChains}개, 외곽 없는 구멍 ${result.orphanHoles}개 버림`)
+            }
+        } else if (id === "buildings" && mesh.parts) {
+            const started = performance.now()
+            const parts: BuildingParts = mesh.parts
+            const { positions } = mesh
+            attributes.addToGroup(addGroup(rhino, doc, "buildings"))
+            const count = parts.heads.length / 3
+            let holeAt = 0
+            let solids = 0
+            for (let k = 0; k < count; k++) {
+                const base = parts.heads[3 * k], n = parts.heads[3 * k + 1], nHoles = parts.heads[3 * k + 2]
+                const starts = [0]
+                for (let h = 0; h < nHoles; h++) starts.push(parts.holeStarts[holeAt++])
+                starts.push(n)
+                const rings: P2[][] = []
+                for (let r = 0; r + 1 < starts.length; r++) {
+                    const ring: number[] = []
+                    for (let i = starts[r]; i < starts[r + 1]; i++) ring.push(base + i)
+                    if (ring.length < 3) continue
+                    const a = indexRingArea2(positions, ring)
+                    if ((r === 0 && a < 0) || (r > 0 && a > 0)) ring.reverse()
+                    rings.push(ring.map((i) => [positions[i * 3], positions[i * 3 + 1]] as P2))
+                }
+                if (rings.length === 0) continue
+                attributes.name = String(parts.ids[k])
+                const [outer, ...holes] = rings
+                if (addExtrusion(rhino, doc, outer, holes, positions[base * 3 + 2], positions[(base + n) * 3 + 2], attributes)) solids++
+                else failedSolids++
+                if (k % 500 === 499) progress((k + 1) / count, w)
+            }
+            console.log(`3DM 건물: ${solids}동, ${Math.round(performance.now() - started)}ms`)
         } else {
             addMesh(mesh.positions, mesh.indices, (done, all) => progress(done / all, w))
         }
         doneBefore += w
     }
     if (skipped > 0) console.warn(`3DM: 넓이 0 등으로 건너뛴 삼각형 ${skipped}개`)
+    if (failedSolids > 0) console.warn(`3DM: 곡선이 유효하지 않아 건너뛴 솔리드 ${failedSolids}개`)
     // wasm 객체는 해제하지 않는다. 요청마다 Worker 를 새로 만들고 끝나면 terminate 하므로 메모리는 그때 돌아간다
     const bytes = doc.toByteArray()
     // wasm 힙을 가리키는 뷰일 수 있으므로 정확한 길이만 복사해 넘긴다
