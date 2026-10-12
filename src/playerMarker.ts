@@ -4,7 +4,6 @@ import Point from "ol/geom/Point"
 import Polygon from "ol/geom/Polygon"
 import VectorLayer from "ol/layer/Vector"
 import VectorSource from "ol/source/Vector"
-import { containsCoordinate } from "ol/extent"
 
 import { getMapOverlay, playerMarkerStyle } from "./mapOverlay"
 
@@ -36,7 +35,8 @@ const getState = (map: Map): MarkerState => {
 }
 
 /**
- * 걸어 보기 플레이어의 위치(점)와 바라보는 방향(부채꼴)을 미니맵에 그린다. 점이 보이는 범위 밖으로 나가면 지도 중심을 옮긴다.
+ * 걸어 보기 플레이어의 위치(점)와 바라보는 방향(부채꼴)을 미니맵에 그린다. 지도 중심을 플레이어에 맞춰 점은 늘 가운데에 있고
+ * 지도가 움직인다(게임 미니맵 관례, 2026-10-13 요청 by @nanangqq. 처음엔 범위 밖으로 나갈 때만 따라갔다).
  *
  * @param map 지도
  * @param coord 플레이어 위치(EPSG:3857)
@@ -55,8 +55,7 @@ export const showPlayerMarker = (map: Map, coord: [number, number], yaw: number)
     s.cone.setGeometry(new Polygon([ring]))
     s.dot.setGeometry(new Point(coord))
     if (s.source.getFeatures().length === 0) s.source.addFeatures([s.cone, s.dot])
-    const size = map.getSize()
-    if (size && !containsCoordinate(view.calculateExtent(size), coord)) view.setCenter(coord)
+    view.setCenter(coord)
 }
 
 /** 플레이어 표시를 지운다 */

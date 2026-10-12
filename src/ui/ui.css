@@ -531,18 +531,27 @@ button.ui-status-pill:focus-visible,
     transform: translate(-50%, -50%);
     z-index: 20;
     height: 44px;
-    padding: 0 18px 0 14px;
+    padding: 5px;
     border: 0;
     border-radius: 999px;
     display: flex;
     align-items: center;
-    gap: 8px;
     font: 600 13px / 20px inherit;
     font-family: inherit;
     white-space: nowrap;
-    cursor: pointer;
+    /* 가장자리 5px 띠는 "옮길 수 있다" 는 뜻의 이동 커서, 안쪽(아이콘·글자)은 클릭 커서 */
+    cursor: move;
     touch-action: none;
     user-select: none;
+}
+.ui-walk-pill-inner {
+    height: 34px;
+    padding: 0 13px 0 9px;
+    border-radius: 999px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
 }
 /* 아이콘은 24px 에 선도 두껍게(독 아이콘과 같은 방식) */
 .ui-walk-pill svg path {
@@ -577,12 +586,13 @@ button.ui-status-pill:focus-visible,
     letter-spacing: 0.04em;
     color: var(--ui-text-secondary);
 }
+/* "기본값" 은 테두리 있는 작은 버튼(처음엔 글자만 있어 버튼인지 몰랐다, 2026-10-13) */
 .ui-walk-controls-reset {
-    height: 22px;
-    padding: 0 8px;
-    border: 0;
+    height: 24px;
+    padding: 0 10px;
+    border: 1px solid var(--ui-border);
     border-radius: 4px;
-    background: transparent;
+    background: var(--ui-panel);
     color: var(--ui-text);
     font: 400 12px inherit;
     font-family: inherit;
@@ -590,6 +600,9 @@ button.ui-status-pill:focus-visible,
 }
 .ui-walk-controls-reset:hover {
     background: var(--ui-hover);
+}
+.ui-walk-controls-reset:active {
+    background: var(--ui-selected);
 }
 .ui-walk-control {
     display: grid;
@@ -647,13 +660,13 @@ button.ui-status-pill:focus-visible,
     height: 14px;
     background: var(--ui-divider);
 }
-/* 키 안내 끝의 "나가기" 버튼(궤도 보기로). 포커스가 풀려 커서가 보일 때 누른다 */
+/* 키 안내 끝의 "나가기" 버튼(궤도 보기로). 포커스가 풀려 커서가 보일 때 누른다. 유리 위에서도 보이도록 단색 바탕 + 테두리 */
 .ui-walk-exit {
     height: 24px;
     padding: 0 10px;
-    border: 0;
+    border: 1px solid var(--ui-border);
     border-radius: 8px;
-    background: var(--ui-accent-tint);
+    background: var(--ui-panel);
     color: var(--ui-text);
     font: 600 12px inherit;
     font-family: inherit;
@@ -661,6 +674,9 @@ button.ui-status-pill:focus-visible,
 }
 .ui-walk-exit:hover {
     background: var(--ui-hover);
+}
+.ui-walk-exit:active {
+    background: var(--ui-selected);
 }
 
 /* 조준점: 흰(다크는 배경색) 테 위에 글자색 십자 */

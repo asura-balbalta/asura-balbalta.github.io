@@ -11,8 +11,9 @@ export type PillPosition = { x: number; y: number }
 
 /**
  * 3D 화면 가운데의 "걸어 보기" 진입 알약(화면 시안 "데스크톱 · 3D · 걸어 보기 진입"). 44px 유리 알약, 게임패드 아이콘 + 글자.
- * 데스크톱에서만 보인다(포인터 잠금·키보드가 필요하다). 끌어서 옮길 수 있다(가운데가 걸리적거리는 사람용. 위치는 부모가 저장).
- * 4px 미만 움직임은 클릭으로 본다. 모양은 ui.css(.ui-walk-pill)
+ * 데스크톱에서만 보인다(포인터 잠금·키보드가 필요하다). 끌어서 옮길 수 있다(가운데가 걸리적거리는 사람용. 위치는 부모가 들고
+ * 새 지형을 만들면 가운데로 돌아간다). 4px 미만 움직임은 클릭으로 본다. 가장자리 5px 띠는 이동 커서, 안쪽은 클릭 커서.
+ * 모양은 ui.css(.ui-walk-pill, .ui-walk-pill-inner)
  *
  * @param props.position 알약 중심 위치. null 이면 화면 가운데
  * @param props.onMove 끌어서 옮겼을 때(놓을 때까지 계속)
@@ -86,8 +87,10 @@ export const WalkPill = ({
                 }
             }}
         >
-            <GamesRegular fontSize={24} />
-            걸어 보기
+            <span className="ui-walk-pill-inner">
+                <GamesRegular fontSize={24} />
+                걸어 보기
+            </span>
         </button>
     )
 }

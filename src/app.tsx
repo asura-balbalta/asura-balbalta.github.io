@@ -270,12 +270,10 @@ function App({
         setWalkPhysics(merged)
         writeStored("walkPhysics", merged)
     }
-    /** 진입 알약의 위치(끌어서 옮긴 것). null 이면 가운데 */
-    const [walkPillPos, setWalkPillPos] = useState<PillPosition | null>(() => readStored<PillPosition | null>("walkPillPos", null))
-    const moveWalkPill = (next: PillPosition) => {
-        setWalkPillPos(next)
-        writeStored("walkPillPos", next)
-    }
+    /** 진입 알약의 위치(끌어서 옮긴 것). null 이면 가운데. 새 지형을 만들면 가운데로 돌아간다(저장하지 않는다, 2026-10-13) */
+    const [walkPillPos, setWalkPillPos] = useState<PillPosition | null>(null)
+    useEffect(() => setWalkPillPos(null), [mesh])
+    const moveWalkPill = (next: PillPosition) => setWalkPillPos(next)
     const stopWalking = () => {
         if (document.pointerLockElement) document.exitPointerLock()
         setWalking(false)
