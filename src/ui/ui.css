@@ -647,6 +647,21 @@ button.ui-status-pill:focus-visible,
     height: 14px;
     background: var(--ui-divider);
 }
+/* 키 안내 끝의 "나가기" 버튼(궤도 보기로). 포커스가 풀려 커서가 보일 때 누른다 */
+.ui-walk-exit {
+    height: 24px;
+    padding: 0 10px;
+    border: 0;
+    border-radius: 8px;
+    background: var(--ui-accent-tint);
+    color: var(--ui-text);
+    font: 600 12px inherit;
+    font-family: inherit;
+    cursor: pointer;
+}
+.ui-walk-exit:hover {
+    background: var(--ui-hover);
+}
 
 /* 조준점: 흰(다크는 배경색) 테 위에 글자색 십자 */
 .ui-crosshair {

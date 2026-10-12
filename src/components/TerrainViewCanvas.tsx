@@ -1,7 +1,7 @@
 import React, { useEffect, useId, useRef, useState } from "react"
 
 import { INITIAL_LAYER_STATES, LAYER_DEFS, LayerStates } from "../layers"
-import { createPlayer, Player, PlayerMove, USE_POINTER_LOCK, WalkPhysics } from "../player"
+import { createPlayer, Player, PlayerMove, WalkPhysics } from "../player"
 import { TinMesh } from "../terrainData"
 import { createHeightSampler, HeightSampler } from "../terrainHeight"
 import { TERRAIN_THEMES, Theme } from "../terrainTheme"
@@ -80,10 +80,11 @@ const initialCamera = ({ min, max }: MeshBounds): OrbitCamera => ({
  * @param props.onProgress stepped 모드의 변환 진행률(처리한 원본 삼각형 비율 0 ~ 1). 약 100ms 간격으로 불리고 끝에 1 이 온다
  * @param props.onFirstChunk stepped 모드에서 첫 조각이 화면에 올라갔을 때. 부모가 지도를 미니맵으로 옮기는 데 쓴다
  * @param props.hidden true 면 캔버스를 보이지 않게 한다(지도 화면으로 돌아갔을 때). 렌더러·메쉬는 그대로라 다시 보이면 즉시 그려진다
- * @param props.walking 걸어 보기(1인칭, player.ts). 켜지면 렌더 루프가 프레임마다 플레이어를 진행해
- *   1인칭 카메라를 쓴다(포인터 잠금은 ?lock=1 일 때만). 끌어서 회전·휠 확대는 그동안 막는다. 꺼지면 직전 궤도 카메라로 돌아간다
+ * @param props.walking 걸어 보기(1인칭, player.ts). 켜지면 포인터 잠금을 요청하고 렌더 루프가 프레임마다 플레이어를 진행해
+ *   1인칭 카메라를 쓴다. 끌어서 회전·휠 확대는 그동안 막고, 캔버스 클릭은 다시 포커스(잠금)가 된다. 꺼지면 직전 궤도 카메라로 돌아간다
+ * @param props.walkFocused 포커스(포인터 잠금) 중인지. 커서를 숨긴다
  * @param props.onWalkMove 플레이어 위치가 바뀔 때(약 10 Hz, 미니맵·상태 표시줄용)
- * @param props.onWalkExit 포인터 잠금이 풀렸을 때(Esc 등). 부모가 walking 을 끈다
+ * @param props.onWalkFocusChange 포커스가 잡히거나 풀렸을 때(Esc 등). 부모가 안내 문구를 바꾼다
  * @param props.walkPhysics 걸어 보기 물리 값(중력·속도·점프·대시). 바뀌면 바로 플레이어에 반영
  */
 export const TerrainViewCanvas = ({
@@ -98,8 +99,9 @@ export const TerrainViewCanvas = ({
     onFirstChunk,
     hidden = false,
     walking = false,
+    walkFocused = false,
     onWalkMove,
-    onWalkExit,
+    onWalkFocusChange,
     walkPhysics,
 }: {
     mesh: TinMesh
@@ -113,8 +115,9 @@ export const TerrainViewCanvas = ({
     onFirstChunk?: () => void
     hidden?: boolean
     walking?: boolean
+    walkFocused?: boolean
     onWalkMove?: (move: PlayerMove) => void
-    onWalkExit?: () => void
+    onWalkFocusChange?: (focused: boolean) => void
     walkPhysics?: Partial<WalkPhysics>
 }) => {
     // 콜백이 렌더마다 새로 만들어져도 메쉬 effect 를 다시 돌리지 않도록 ref 로 받는다
@@ -126,8 +129,8 @@ export const TerrainViewCanvas = ({
     onFirstChunkRef.current = onFirstChunk
     const onWalkMoveRef = useRef(onWalkMove)
     onWalkMoveRef.current = onWalkMove
-    const onWalkExitRef = useRef(onWalkExit)
-    onWalkExitRef.current = onWalkExit
+    const onWalkFocusChangeRef = useRef(onWalkFocusChange)
+    onWalkFocusChangeRef.current = onWalkFocusChange
     /** 걸어 보기 중인 플레이어. 렌더 루프가 프레임마다 step 해 카메라를 쓴다 */
     const walkRef = useRef<Player | null>(null)
     /** mesh 별 지형 높이 조회기(걸어 보기에 들어갈 때 만들고 같은 mesh 면 다시 쓴다) */
@@ -318,7 +321,7 @@ export const TerrainViewCanvas = ({
         const player = createPlayer({
             sampler,
             spawn: [(sampler.min[0] + sampler.max[0]) / 2, (sampler.min[1] + sampler.max[1]) / 2],
-            onExit: () => onWalkExitRef.current?.(),
+            onFocusChange: (focused) => onWalkFocusChangeRef.current?.(focused),
             onMove: (move) => onWalkMoveRef.current?.(move),
             physics: walkPhysicsRef.current,
             groundStep: groundStepRef.current,
@@ -388,14 +391,18 @@ export const TerrainViewCanvas = ({
                 width: size.width,
                 height: size.height,
                 visibility: hidden ? "hidden" : "visible",
-                // 걸어 보기 중 커서는 포인터 잠금일 때만 숨긴다. 잠금이 없으면 가장자리에 닿아 회전이 멈추는 것을 볼 수 있어야 한다
-                cursor: walking ? (USE_POINTER_LOCK ? "none" : "default") : "grab",
+                // 걸어 보기 중 커서는 포커스(포인터 잠금) 중일 때만 숨긴다
+                cursor: walking ? (walkFocused ? "none" : "default") : "grab",
                 // 터치를 브라우저의 스크롤·핀치 제스처로 넘기지 않는다. 없으면 세로 끌기에 주소 표시줄이 반응하며
                 // pointercancel 로 입력이 끊기고, 두 손가락 벌리기는 페이지 확대가 된다
                 touchAction: "none",
             }}
             onPointerDown={(e) => {
-                if (walkRef.current) return
+                if (walkRef.current) {
+                    // 걸어 보기 중 클릭: 포커스가 풀려 있으면 다시 잠금
+                    walkRef.current.focus()
+                    return
+                }
                 pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY })
                 // 캔버스 밖으로 나가도 move/up 을 계속 받기 위해. 포인터가 이미 끝났으면(합성 이벤트, 즉시 취소) 예외가 나므로 무시
                 try {

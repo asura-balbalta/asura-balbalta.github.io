@@ -231,7 +231,23 @@ function App({
         setOpenPanel(null)
         walkPrevModeRef.current = mode
         if (mode !== "stepped") changeMode("stepped")
+        setWalkFocused(false)
+        setEscHint(false)
+        escHintShownRef.current = false
         setWalking(true)
+    }
+    /** 포커스(포인터 잠금) 중인지. Esc 로 풀리면 커서가 보이고 "클릭하면 다시 조작" 안내 */
+    const [walkFocused, setWalkFocused] = useState(false)
+    /** 포커스가 처음 잡힌 직후 몇 초 보이는 "Esc 를 누르면 마우스 포인터가 나타납니다" 안내 */
+    const [escHint, setEscHint] = useState(false)
+    const escHintShownRef = useRef(false)
+    const onWalkFocusChange = (focused: boolean) => {
+        setWalkFocused(focused)
+        if (focused && !escHintShownRef.current) {
+            escHintShownRef.current = true
+            setEscHint(true)
+            window.setTimeout(() => setEscHint(false), 4000)
+        }
     }
     useEffect(() => {
         if (walking) return
@@ -609,8 +625,9 @@ function App({
                     }
                     onFirstChunk={showTerrain}
                     walking={walking}
+                    walkFocused={walkFocused}
                     onWalkMove={onWalkMove}
-                    onWalkExit={() => setWalking(false)}
+                    onWalkFocusChange={onWalkFocusChange}
                     walkPhysics={walkPhysics}
                 />
             )}
@@ -661,7 +678,7 @@ function App({
             {!isMobile && view === "3d" && terrainReady && !busy && !walking && (
                 <WalkPill position={walkPillPos} onMove={moveWalkPill} onClick={startWalking} />
             )}
-            {walking && <WalkHud />}
+            {walking && <WalkHud focused={walkFocused} showEscHint={escHint} onExit={stopWalking} />}
             {walking && (
                 <WalkControls
                     physics={walkPhysics}
@@ -737,7 +754,7 @@ function App({
                 <StatusBar progress={progress} status={walking ? "걸어 보기 중" : undefined} stats={stats} menus={menus}>
                     {walking && (
                         <Button appearance="subtle" size="small" className="ui-statusbar-action" onClick={stopWalking}>
-                            나가기 (Esc)
+                            나가기
                         </Button>
                     )}
                     {view === "map" && terrainReady && !busy && (

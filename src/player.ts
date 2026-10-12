@@ -11,9 +11,11 @@ import { FpsCamera } from "./webgpu/camera"
  *
  * 좌표는 메쉬 로컬(z-up, m). yaw 0 = 동쪽, 반시계. pitch 는 수평선 위로(라디안)
  *
- * 포인터 잠금은 기본으로 쓰지 않는다(잠금 없는 쪽을 골랐다 by @nanangqq, 2026-10-12): 커서가 보인 채 마우스가 어디서 움직이든 시점이
- * 돌고, Esc 키로 나간다. 마우스가 화면 가장자리에 닿으면 그 방향으로는 더 못 돈다. URL ?lock=1 이면 포인터 잠금을 쓴다
- * (커서 숨김, 무한 회전, Esc 로 잠금이 풀리면 나감). 앱 내장 브라우저는 잠금을 지원하지 않는다
+ * 포커스(Unreal 식, 2026-10-12 결정 by @nanangqq): 들어가면 포인터 잠금(커서 숨김, 무한 회전)으로 "포커스" 상태. Esc 는 잠금만 풀어
+ * 커서가 보이고 입력이 멈추지만 걸어 보기는 유지된다. 화면을 클릭하면 다시 잠금. 궤도 보기로 나가는 것은 "나가기" 버튼.
+ * 처음엔 잠금 없는 방식을 골랐으나 화면을 많이 돌릴 때 가장자리에서 멈춰 불편해 바꿨다.
+ * URL ?lock=0 은 잠금 API 없이 같은 흐름을 흉내 내는 테스트용(앱 내장 브라우저는 잠금을 지원하지 않는다): Esc 키가 포커스를
+ * 끄고, 마우스는 어디서 움직이든 시점이 돈다
  */
 export type PlayerMove = {
     /** 발 위치(메쉬 로컬, m) */
@@ -36,6 +38,8 @@ export type Player = {
     setPhysics: (next: Partial<WalkPhysics>) => void
     /** 계단형 모드의 층 간격(m). 주면 발 높이를 층 바닥(floor(z / step) · step)으로 맞춰 계단 위를 걷는다. null 이면 매끈한 면 */
     setGroundStep: (step: number | null) => void
+    /** 다시 포커스(포인터 잠금 요청). Esc 로 풀린 뒤 화면을 클릭했을 때 */
+    focus: () => void
 }
 
 /** 조절할 수 있는 물리 값 */
@@ -65,8 +69,8 @@ const EDGE_MARGIN = 0.5
 /** onMove 알림 간격(초) */
 const MOVE_NOTIFY_INTERVAL = 0.1
 const MAX_DT = 0.05
-/** 포인터 잠금을 쓸지. 기본은 안 씀, ?lock=1 이면 씀 */
-export const USE_POINTER_LOCK = new URLSearchParams(window.location.search).get("lock") === "1"
+/** 포인터 잠금 API 를 쓸지. ?lock=0 이면 안 쓰고 흉내 낸다(테스트용) */
+export const USE_POINTER_LOCK = new URLSearchParams(window.location.search).get("lock") !== "0"
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v))
 
@@ -74,7 +78,7 @@ const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v
  * @param options.sampler 지형 높이 조회기(범위 포함)
  * @param options.spawn 시작 xy(메쉬 로컬). 발은 그 자리 지표 위에 둔다
  * @param options.yaw 시작 방향(기본 북쪽)
- * @param options.onExit 포인터 잠금이 풀렸을 때(Esc, 창 전환, 요청 실패). 부모가 걸어 보기를 끝낸다
+ * @param options.onFocusChange 포커스(포인터 잠금)가 잡히거나 풀렸을 때(Esc, 창 전환, 요청 실패). 부모가 커서·안내를 바꾼다
  * @param options.onMove 위치가 바뀔 때 약 10 Hz 로(미니맵·상태 표시줄용)
  * @param options.physics 처음 물리 값(없는 항목은 기본값)
  * @param options.groundStep 계단형 층 간격(m). setGroundStep 참고
@@ -83,7 +87,7 @@ export const createPlayer = ({
     sampler,
     spawn,
     yaw: initialYaw = Math.PI / 2,
-    onExit,
+    onFocusChange,
     onMove,
     physics: initialPhysics,
     groundStep: initialGroundStep = null,
@@ -91,7 +95,7 @@ export const createPlayer = ({
     sampler: HeightSampler
     spawn: [number, number]
     yaw?: number
-    onExit: () => void
+    onFocusChange?: (focused: boolean) => void
     onMove?: (move: PlayerMove) => void
     physics?: Partial<WalkPhysics>
     groundStep?: number | null
@@ -129,9 +133,11 @@ export const createPlayer = ({
         if (isTyping(e)) return
         const code = e.code
         if (code === "Escape" && !USE_POINTER_LOCK) {
-            onExit()
+            // 잠금 흉내: Esc 로 포커스를 끈다(실제 잠금에서는 브라우저가 풀고 pointerlockchange 로 안다)
+            setLocked(false)
             return
         }
+        if (!locked) return
         if (code === "Space" || code.startsWith("Arrow")) e.preventDefault()
         if (e.repeat) {
             keys.add(code)
@@ -163,14 +169,34 @@ export const createPlayer = ({
         yaw -= e.movementX * LOOK_RATE
         pitch = clamp(pitch - e.movementY * LOOK_RATE, -PITCH_LIMIT, PITCH_LIMIT)
     }
+    /** 포커스 상태를 바꾸고 알린다. 풀리면 눌린 키를 모두 뗀다 */
+    const setLocked = (next: boolean) => {
+        if (next === locked) return
+        locked = next
+        if (!next) keys.clear()
+        onFocusChange?.(next)
+    }
     const onLockChange = () => {
         if (!USE_POINTER_LOCK) return
-        const now = document.pointerLockElement === canvas
-        if (locked && !now) onExit()
-        locked = now
+        setLocked(document.pointerLockElement === canvas)
     }
-    const onLockError = () => onExit()
+    const onLockError = () => setLocked(false)
     const onBlur = () => keys.clear()
+    /** 포인터 잠금을 요청한다(흉내 모드면 바로 포커스). 결과는 pointerlockchange/error 로 온다 */
+    const requestLock = () => {
+        if (!canvas) return
+        if (!USE_POINTER_LOCK) {
+            setLocked(true)
+            return
+        }
+        // 최신 Chrome 은 Promise 를 돌려준다(거부되면 pointerlockerror 도 함께 난다)
+        try {
+            const r = canvas.requestPointerLock() as unknown
+            if (r instanceof Promise) r.catch(() => onLockError())
+        } catch {
+            onLockError()
+        }
+    }
 
     const camera = (): FpsCamera => ({ eye: [x, y, z + EYE_HEIGHT], yaw, pitch, fovY: FOV_Y })
 
@@ -185,17 +211,7 @@ export const createPlayer = ({
             document.addEventListener("pointerlockchange", onLockChange)
             document.addEventListener("pointerlockerror", onLockError)
             window.addEventListener("blur", onBlur)
-            if (USE_POINTER_LOCK) {
-                // 최신 Chrome 은 Promise 를 돌려준다(거부되면 pointerlockerror 도 함께 난다)
-                try {
-                    const r = el.requestPointerLock() as unknown
-                    if (r instanceof Promise) r.catch(() => onExit())
-                } catch {
-                    onExit()
-                }
-            } else {
-                locked = true
-            }
+            requestLock()
             notify()
         },
         detach: () => {
@@ -220,7 +236,7 @@ export const createPlayer = ({
             if (keys.has("KeyS") || keys.has("ArrowDown")) f -= 1
             if (keys.has("KeyD") || keys.has("ArrowRight")) s += 1
             if (keys.has("KeyA") || keys.has("ArrowLeft")) s -= 1
-            if (f !== 0 || s !== 0) {
+            if (locked && (f !== 0 || s !== 0)) {
                 const len = Math.hypot(f, s)
                 const speed = physics.walkSpeed * (clock < dashUntil ? physics.dashFactor : 1)
                 const dx = ((f * Math.cos(yaw) + s * Math.sin(yaw)) / len) * speed * dt
@@ -260,5 +276,6 @@ export const createPlayer = ({
             const g = groundAt(x, y)
             if (g !== null) ground = g
         },
+        focus: requestLock,
     }
 }
