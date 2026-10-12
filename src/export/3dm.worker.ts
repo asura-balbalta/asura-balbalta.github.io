@@ -1,5 +1,5 @@
 import { WALL_SINK_M } from "../buildingsMesh"
-import { buildingAttributes, buildingRings, NOT_BUILT } from "../buildingTable"
+import { buildingAttributes, buildingLabel, buildingRings, NOT_BUILT } from "../buildingTable"
 import { LAYER_DEFS } from "../layers"
 import type { TinMesh } from "../terrainData"
 import type { TerrainMode } from "../webgpu/terrainRenderer"
@@ -180,7 +180,7 @@ self.onmessage = async (e: MessageEvent<Rhino3dmExportRequest>) => {
                 if (table.vertexBase[k] === NOT_BUILT) continue
                 const rings = buildingRings(table, k)
                 if (rings.length === 0) continue
-                attributes.name = String(table.ids[k])
+                attributes.name = buildingLabel(table, k)
                 // 같은 키를 건물마다 덮어쓴다. 문서에 넣을 때 속성이 복사되므로 뒤 건물이 앞 건물에 영향을 주지 않는다
                 for (const [key, value] of Object.entries(buildingAttributes(table, k))) attributes.setUserString(key, String(value))
                 const [outer, ...holes] = rings

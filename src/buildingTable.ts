@@ -150,6 +150,17 @@ export const buildingRings = (t: BuildingTable, k: number): [number, number][][]
     return rings
 }
 
+/**
+ * 내보내기 파일에서 건물 k 를 가리키는 이름: "번호 (층수F, 높이m)". 층수가 없으면 높이만, 서버 높이가 없으면 세운 높이를
+ * 적는다. SketchUp 웹처럼 속성 사전을 못 보는 뷰어에서도 Entity Info·Outliner 로 층수·높이가 보이게 하기 위한 것
+ */
+export const buildingLabel = (t: BuildingTable, k: number) => {
+    const floors = t.floors[k]
+    const height = t.heights[k] > 0 ? t.heights[k] : t.builtHeight[k]
+    const parts = [floors > 0 ? `${floors}F` : "", Number.isFinite(height) ? `${height.toFixed(1)}m` : ""].filter(Boolean)
+    return parts.length ? `${t.ids[k]} (${parts.join(", ")})` : String(t.ids[k])
+}
+
 /** 내보내기 파일에 적을 건물 k 의 속성(키는 파일 안 이름). 모두 숫자 */
 export const buildingAttributes = (t: BuildingTable, k: number): Record<string, number> => ({
     id: t.ids[k],

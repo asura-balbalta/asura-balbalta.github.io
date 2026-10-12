@@ -1,7 +1,7 @@
 import { create, type Point3 } from "openskp"
 
 import { WALL_SINK_M } from "../buildingsMesh"
-import { buildingAttributes, buildingRings, BuildingTable, NOT_BUILT } from "../buildingTable"
+import { buildingAttributes, buildingLabel, buildingRings, BuildingTable, NOT_BUILT } from "../buildingTable"
 import { LAYER_DEFS } from "../layers"
 import type { TinMesh } from "../terrainData"
 import type { TerrainMode } from "../webgpu/terrainRenderer"
@@ -152,7 +152,7 @@ const addTerrainSlabs = (builder: Builder, mesh: TinMesh, step: number, progress
  * 건물 k 의 고리는 건물 표에서 꺼낸다(buildingRings: mm 원본 좌표, 외곽 반시계·구멍 시계로 맞춤). 바닥 z 는 표의 바닥 높이에서
  * WALL_SINK_M 만큼 묻힌 높이(메쉬의 아래 고리와 같다), 지붕 z 는 바닥 높이 + 세운 높이다. 지붕은 그대로, 바닥은 뒤집어 넣고,
  * 벽은 영역을 왼쪽에 두고 걷는 변 p→q 에 [p아래, q아래, q위, p위] 로 넣어 바깥을 향하게 한다(addTerrainSlabs 와 같은 규칙).
- * 정의 이름은 "building-<전국 고유 번호>", 그룹 인스턴스 이름은 번호이고, 정의의 attribute dictionary "asrbbt" 에 건물 속성
+ * 정의 이름은 "building-<전국 고유 번호>", 그룹 인스턴스 이름은 "번호 (층수F, 높이m)"(buildingLabel)이고, 정의의 attribute dictionary "asrbbt" 에 건물 속성
  * (buildingAttributes)을 적는다. 지형 밖이라 못 세운 건물은 넣지 않는다. 면 생성이 실패한(점이 겹치거나 일직선인) 면은 건너뛴다.
  *
  * @param progress 이 레이어 안의 진행률(0 ~ 1)
@@ -172,7 +172,8 @@ const addBuildingGroups = (builder: Builder, table: BuildingTable, progress: (ra
         const zBottom = table.baseZ[k] - WALL_SINK_M
         const zTop = table.baseZ[k] + table.builtHeight[k]
         const name = String(table.ids[k])
-        names.push(name)
+        const groupName = buildingLabel(table, k)
+        names.push(groupName)
         defs.push(
             builder.addComponentDefinition(
                 `building-${name}`,

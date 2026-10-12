@@ -1,4 +1,4 @@
-import { buildingAttributes, NOT_BUILT } from "../buildingTable"
+import { buildingAttributes, buildingLabel, NOT_BUILT } from "../buildingTable"
 import { LAYER_DEFS } from "../layers"
 import type { TinMesh } from "../terrainData"
 import { buildSteppedMeshChunks } from "../terrainSteps"
@@ -84,7 +84,7 @@ self.onmessage = (e: MessageEvent<GlbExportRequest>) => {
                 const to = i + 1 < built.length ? table.faceBase[built[i + 1]] : totalFaces
                 if (to <= from) return
                 node.children!.push({
-                    name: String(table.ids[k]),
+                    name: buildingLabel(table, k),
                     primitives: [toFlatPrimitive(mesh.positions, mesh.indices.subarray(from * 3, to * 3), material)],
                     extras: buildingAttributes(table, k),
                 })
