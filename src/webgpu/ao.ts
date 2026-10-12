@@ -6,8 +6,11 @@ import { Mat4, Vec3 } from "./camera"
  * 흐름(렌더러의 render 가 호출): 장면을 오프스크린 색 텍스처 + 깊이에 그린 뒤
  * 1. aoPass: 깊이만 읽어 픽셀의 월드 위치(invViewProj)와 법선(이웃 깊이의 위치 차, 작은 쪽 선택)을 복원하고, 법선 반구 안의
  *    표본 12개를 viewProj 로 화면에 투영해 그 자리의 깊이가 더 가까우면 "가려짐" 으로 센다(거리 차가 반지름보다 크면 무시).
- *    표본 방향은 픽셀마다 해시로 돌려 띠를 노이즈로 바꾼다. 결과는 r8unorm(1 = 밝음), 화면의 AO_SCALE 배 해상도
- * 2. blurPass: 4×4 상자 흐림으로 노이즈를 지운다
+ *    표본 방향은 4×4 타일 안에서 16개 각도가 한 번씩 나오는 고정 패턴으로 돌린다(어느 4×4 창이든 모든 각도를 포함하므로
+ *    2 의 흐림이 정확히 평균한다. 무작위 해시였을 때는 흐림 뒤에도 점이 남았다, 2026-10-13).
+ *    평평한 면에서의 거짓 가림을 막으려고 깊이 비교 여유는 거리에 비례해 키우고 표본 시작점은 법선 쪽으로 띄운다
+ *    (비스듬히 본 바닥은 한 픽셀이 수십 cm 라 고정 여유 5 cm 로는 복원 오차가 넘쳤다). 결과는 r8unorm(1 = 밝음), 화면의 AO_SCALE 배 해상도
+ * 2. blurPass: 4×4 상자 흐림으로 회전 패턴을 평균한다
  * 3. compositePass: 장면 색 × AO 를 캔버스에 쓴다
  * 멀리(maxDist)에서는 효과를 뺀다(안개 구간을 더 어둡게 하지 않으려고). 비용은 삼각형 수와 무관하게 픽셀 수에 비례한다
  */
@@ -17,15 +20,19 @@ export const AO_SCALE = 0.5
 export const AO_PARAMS = {
     /** 표본 반구 반지름(m). 단 높이(1 m)보다 조금 크게 */
     radius: 1.2,
-    /** 깊이 비교 여유(m) */
-    bias: 0.05,
+    /** 깊이 비교 여유(m). 여기에 거리 × biasPerMeter 를 더한다 */
+    bias: 0.03,
+    /** 거리 1 m 당 더하는 여유(m). 비스듬한 바닥의 복원 오차 때문 */
+    biasPerMeter: 0.004,
+    /** 표본 시작점을 법선 쪽으로 띄우는 비율(거리 × 이 값, m) */
+    normalOffsetPerMeter: 0.002,
     /** 어둡게 하는 세기(0 ~ 1) */
     strength: 1.0,
     /** 이 거리(m)부터 효과가 사라진다(60% 지점부터 서서히) */
     maxDist: 400,
 }
-/** AO uniform: viewProj(0) + invViewProj(64) + eye(128) + radius(140) + params(144: bias, strength, maxDist, 0) + size(160) + depthSize(168) */
-const AO_UNIFORM_SIZE = 176
+/** AO uniform: viewProj(0) + invViewProj(64) + eye(128) + radius(140) + params(144: bias, strength, maxDist, biasPerMeter) + size(160) + depthSize(168) + offset(176: normalOffsetPerMeter) */
+const AO_UNIFORM_SIZE = 192
 
 const fullscreenVertex = /* wgsl */ `
     // 정점 3개로 화면을 덮는 삼각형
@@ -45,14 +52,17 @@ const aoShader = (): GPUShaderModuleDescriptor => ({
         invViewProj: mat4x4f,
         eye: vec3f,
         radius: f32,
-        params: vec4f, // bias, strength, maxDist, 0
+        params: vec4f, // bias, strength, maxDist, biasPerMeter
         size: vec2f, // AO 텍스처 크기(px)
         depthSize: vec2f, // 깊이 텍스처 크기(px)
+        offset: vec4f, // x normalOffsetPerMeter
     };
     @group(0) @binding(0) var<uniform> a: AoUniforms;
     @group(0) @binding(1) var depthTex: texture_depth_2d;
 
     const SAMPLE_COUNT = 12u;
+    // 4×4 타일의 회전 순서(0 ~ 15 를 섞은 것). 이웃끼리 각도가 멀어 흐림 전에도 띠가 덜 보인다
+    const ROTATION = array<u32, 16>(0u, 8u, 2u, 10u, 12u, 4u, 14u, 6u, 3u, 11u, 1u, 9u, 15u, 7u, 13u, 5u);
     // 법선 반구(z > 0) 안의 표본. 길이를 달리해 가까운 곳을 더 촘촘히 본다
     const KERNEL = array<vec3f, 12>(
         vec3f(0.19, 0.07, 0.14), vec3f(-0.16, 0.20, 0.10), vec3f(0.05, -0.27, 0.18), vec3f(-0.30, -0.12, 0.22),
@@ -70,9 +80,6 @@ const aoShader = (): GPUShaderModuleDescriptor => ({
         let ndc = vec4f(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, d, 1.0);
         let p = a.invViewProj * ndc;
         return p.xyz / p.w;
-    }
-    fn hash(p: vec2f) -> f32 {
-        return fract(sin(dot(p, vec2f(12.9898, 78.233))) * 43758.5453);
     }
 
     @fragment
@@ -96,17 +103,19 @@ const aoShader = (): GPUShaderModuleDescriptor => ({
         var n = normalize(cross(dx, dy));
         if (dot(n, a.eye - P) < 0.0) { n = -n; }
 
-        // 픽셀마다 다른 방향으로 돌린 접선 틀
-        let ang = hash(fragPos.xy) * 6.2831853;
+        // 4×4 타일 안의 자리로 정해지는 회전(16개 각도가 한 번씩)으로 돌린 접선 틀
+        let cell = vec2u(fragPos.xy) % 4u;
+        let ang = f32(ROTATION[cell.x + cell.y * 4u]) * (6.2831853 / 16.0);
         let rnd = vec3f(cos(ang), sin(ang), 0.37);
         let t = normalize(rnd - n * dot(rnd, n));
         let b = cross(n, t);
 
-        let bias = a.params.x;
+        let bias = a.params.x + dist * a.params.w;
+        let P0 = P + n * (dist * a.offset.x);
         var occlusion = 0.0;
         for (var i = 0u; i < SAMPLE_COUNT; i = i + 1u) {
             let k = KERNEL[i];
-            let s = P + (t * k.x + b * k.y + n * k.z) * a.radius;
+            let s = P0 + (t * k.x + b * k.y + n * k.z) * a.radius;
             let clip = a.viewProj * vec4f(s, 1.0);
             if (clip.w <= 0.0) { continue; }
             let suv = vec2f(clip.x / clip.w * 0.5 + 0.5, 0.5 - clip.y / clip.w * 0.5);
@@ -183,8 +192,9 @@ export const createAoPasses = (device: GPUDevice, format: GPUTextureFormat) => {
     device.queue.writeBuffer(
         uniformBuffer,
         140,
-        new Float32Array([AO_PARAMS.radius, AO_PARAMS.bias, AO_PARAMS.strength, AO_PARAMS.maxDist, 0]),
+        new Float32Array([AO_PARAMS.radius, AO_PARAMS.bias, AO_PARAMS.strength, AO_PARAMS.maxDist, AO_PARAMS.biasPerMeter]),
     )
+    device.queue.writeBuffer(uniformBuffer, 176, new Float32Array([AO_PARAMS.normalOffsetPerMeter, 0, 0, 0]))
     const linearSampler = device.createSampler({ magFilter: "linear", minFilter: "linear" })
 
     const createPipeline = (name: string, shader: GPUShaderModuleDescriptor, target: GPUTextureFormat) => {
