@@ -1,5 +1,5 @@
 import type Map from "ol/Map"
-import type { FlatStyle } from "ol/style/flat"
+import type { FlatStyle, Rule } from "ol/style/flat"
 
 import { MapOverlayColors } from "./terrainTheme"
 
@@ -32,6 +32,23 @@ export const pinStyle = (c: MapOverlayColors): FlatStyle => ({
     "circle-stroke-color": "#ffffff",
     "circle-stroke-width": 2,
 })
+
+/**
+ * 걸어 보기 플레이어 표시(playerMarker): kind "dot" 은 검색 핀보다 작은 강조색 원(r 5), "cone" 은 바라보는 방향 부채꼴.
+ * 시안은 부채꼴 accent 25% 인데 선택 박스 채움(12%)을 같이 쓴다(색 토큰을 늘리지 않으려고)
+ */
+export const playerMarkerStyle = (c: MapOverlayColors): Rule[] => [
+    { filter: ["==", ["get", "kind"], "cone"], style: { "fill-color": c.selectionFill } },
+    {
+        filter: ["==", ["get", "kind"], "dot"],
+        style: {
+            "circle-radius": 5,
+            "circle-fill-color": c.selectionStroke,
+            "circle-stroke-color": "#ffffff",
+            "circle-stroke-width": 2,
+        },
+    },
+]
 
 /** 1K 도엽 외곽선 + 이름 스타일 */
 export const tileOutlineStyle = (c: MapOverlayColors): FlatStyle => ({

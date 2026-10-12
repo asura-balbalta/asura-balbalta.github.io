@@ -14,6 +14,7 @@ export type StatusMenu = {
  * 진행 중인 작업이 없으면 왼쪽은 수치만 보인다. 모양은 ui.css(.ui-statusbar).
  *
  * @param props.progress 진행 중인 작업. ratio 가 없으면 진행 막대가 불확정으로 움직인다
+ * @param props.status 진행 막대 없이 점만 붙는 상태 문구("걸어 보기 중"). progress 가 있으면 그쪽이 우선
  * @param props.stats 수치 항목("범위 2.4 × 2.4 km" 같은 완성된 문구)
  * @param props.menus 오른쪽 드롭다운들
  * @param props.attribution 바탕 지도 저작권 문구(태그 없는 글자)
@@ -21,12 +22,14 @@ export type StatusMenu = {
  */
 export const StatusBar = ({
     progress,
+    status,
     stats,
     menus,
     attribution,
     children,
 }: {
     progress?: { label: string; ratio?: number } | null
+    status?: string
     stats: string[]
     menus: StatusMenu[]
     attribution?: string
@@ -46,6 +49,15 @@ export const StatusBar = ({
                     thickness="medium"
                     aria-label={progress.label}
                 />
+                <span className="ui-statusbar-sep" />
+            </>
+        )}
+        {!progress && status && (
+            <>
+                <span className="ui-statusbar-item" role="status">
+                    <span className="ui-statusbar-dot" />
+                    {status}
+                </span>
                 <span className="ui-statusbar-sep" />
             </>
         )}

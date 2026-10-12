@@ -1,7 +1,9 @@
 import React, { useEffect, useId, useRef, useState } from "react"
 
 import { INITIAL_LAYER_STATES, LAYER_DEFS, LayerStates } from "../layers"
+import { createPlayer, Player, PlayerMove } from "../player"
 import { TinMesh } from "../terrainData"
+import { createHeightSampler, HeightSampler } from "../terrainHeight"
 import { TERRAIN_THEMES, Theme } from "../terrainTheme"
 import type { SteppedMeshRequest, SteppedMeshResponse } from "../terrainSteps.worker"
 import { OrbitCamera } from "../webgpu/camera"
@@ -76,6 +78,10 @@ const initialCamera = ({ min, max }: MeshBounds): OrbitCamera => ({
  * @param props.onProgress stepped 모드의 변환 진행률(처리한 원본 삼각형 비율 0 ~ 1). 약 100ms 간격으로 불리고 끝에 1 이 온다
  * @param props.onFirstChunk stepped 모드에서 첫 조각이 화면에 올라갔을 때. 부모가 지도를 미니맵으로 옮기는 데 쓴다
  * @param props.hidden true 면 캔버스를 보이지 않게 한다(지도 화면으로 돌아갔을 때). 렌더러·메쉬는 그대로라 다시 보이면 즉시 그려진다
+ * @param props.walking 걸어 보기(1인칭, player.ts). 켜지면 포인터 잠금을 요청하고 렌더 루프가 프레임마다 플레이어를 진행해
+ *   1인칭 카메라를 쓴다. 끌어서 회전·휠 확대는 그동안 막는다. 꺼지면 직전 궤도 카메라로 돌아간다
+ * @param props.onWalkMove 플레이어 위치가 바뀔 때(약 10 Hz, 미니맵·상태 표시줄용)
+ * @param props.onWalkExit 포인터 잠금이 풀렸을 때(Esc 등). 부모가 walking 을 끈다
  */
 export const TerrainViewCanvas = ({
     mesh,
@@ -88,6 +94,9 @@ export const TerrainViewCanvas = ({
     onProgress,
     onFirstChunk,
     hidden = false,
+    walking = false,
+    onWalkMove,
+    onWalkExit,
 }: {
     mesh: TinMesh
     buildings?: TinMesh | null
@@ -99,6 +108,9 @@ export const TerrainViewCanvas = ({
     onProgress?: (ratio: number) => void
     onFirstChunk?: () => void
     hidden?: boolean
+    walking?: boolean
+    onWalkMove?: (move: PlayerMove) => void
+    onWalkExit?: () => void
 }) => {
     // 콜백이 렌더마다 새로 만들어져도 메쉬 effect 를 다시 돌리지 않도록 ref 로 받는다
     const onDoneRef = useRef(onDone)
@@ -107,6 +119,14 @@ export const TerrainViewCanvas = ({
     onProgressRef.current = onProgress
     const onFirstChunkRef = useRef(onFirstChunk)
     onFirstChunkRef.current = onFirstChunk
+    const onWalkMoveRef = useRef(onWalkMove)
+    onWalkMoveRef.current = onWalkMove
+    const onWalkExitRef = useRef(onWalkExit)
+    onWalkExitRef.current = onWalkExit
+    /** 걸어 보기 중인 플레이어. 렌더 루프가 프레임마다 step 해 카메라를 쓴다 */
+    const walkRef = useRef<Player | null>(null)
+    /** mesh 별 지형 높이 조회기(걸어 보기에 들어갈 때 만들고 같은 mesh 면 다시 쓴다) */
+    const samplerRef = useRef<{ mesh: TinMesh; sampler: HeightSampler } | null>(null)
     const canvasId = `terrain-canvas-${useId()}`
     const canvasRef = useRef<HTMLCanvasElement | null>(null)
     // canvas 속성은 실제 픽셀 수(× devicePixelRatio), style 은 화면에 보이는 크기. 창 크기가 바뀌면 다시 잰다
@@ -135,7 +155,11 @@ export const TerrainViewCanvas = ({
             .then((r) => {
                 if (cancelled) return r.destroy()
                 created = r
-                const renderLoop = () => {
+                let last = performance.now()
+                const renderLoop = (now: number) => {
+                    const player = walkRef.current
+                    if (player) r.updaters.cameraUpdater(player.step((now - last) / 1000))
+                    last = now
                     r.render()
                     animationFrameId = window.requestAnimationFrame(renderLoop)
                 }
@@ -279,14 +303,36 @@ export const TerrainViewCanvas = ({
         return () => stop()
     }, [renderer, mesh, mode, stepInterval])
 
+    // 걸어 보기: 켜지면 지형 중앙에 플레이어를 세우고 포인터 잠금을 요청한다. 꺼지면(또는 mesh 가 바뀌면) 떼고 궤도 카메라로 복귀
+    useEffect(() => {
+        const canvas = canvasRef.current
+        if (!walking || !renderer || !canvas) return
+        if (samplerRef.current?.mesh !== mesh) samplerRef.current = { mesh, sampler: createHeightSampler(mesh) }
+        const { sampler } = samplerRef.current
+        const player = createPlayer({
+            sampler,
+            spawn: [(sampler.min[0] + sampler.max[0]) / 2, (sampler.min[1] + sampler.max[1]) / 2],
+            onExit: () => onWalkExitRef.current?.(),
+            onMove: (move) => onWalkMoveRef.current?.(move),
+        })
+        walkRef.current = player
+        pointersRef.current.clear()
+        player.attach(canvas)
+        return () => {
+            walkRef.current = null
+            player.detach()
+            if (cameraRef.current) renderer.updaters.cameraUpdater(cameraRef.current)
+        }
+    }, [walking, renderer, mesh])
+
     /**
      * 현재 카메라에 변경을 적용하고 GPU uniform 에 반영한다.
-     * 렌더러나 카메라가 아직 준비되지 않았으면 무시한다.
+     * 렌더러나 카메라가 아직 준비되지 않았으면 무시한다. 걸어 보기 중에는 무시한다(1인칭 카메라가 쓰고 있다)
      *
      * @param change 현재 카메라를 받아 새 카메라를 돌려주는 함수
      */
     const updateCamera = (change: (cam: OrbitCamera) => OrbitCamera) => {
-        if (!renderer || !cameraRef.current) return
+        if (!renderer || !cameraRef.current || walkRef.current) return
         cameraRef.current = change(cameraRef.current)
         renderer.updaters.cameraUpdater(cameraRef.current)
     }
@@ -320,12 +366,13 @@ export const TerrainViewCanvas = ({
                 width: size.width,
                 height: size.height,
                 visibility: hidden ? "hidden" : "visible",
-                cursor: "grab",
+                cursor: walking ? "none" : "grab",
                 // 터치를 브라우저의 스크롤·핀치 제스처로 넘기지 않는다. 없으면 세로 끌기에 주소 표시줄이 반응하며
                 // pointercancel 로 입력이 끊기고, 두 손가락 벌리기는 페이지 확대가 된다
                 touchAction: "none",
             }}
             onPointerDown={(e) => {
+                if (walkRef.current) return
                 pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY })
                 // 캔버스 밖으로 나가도 move/up 을 계속 받기 위해. 포인터가 이미 끝났으면(합성 이벤트, 즉시 취소) 예외가 나므로 무시
                 try {

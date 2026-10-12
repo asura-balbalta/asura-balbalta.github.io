@@ -42,6 +42,9 @@ export const uiCssVars = (theme: Theme): CSSProperties => {
     vars["--ui-glass-blur"] = `${GLASS_BLUR_PX}px`
     // WebGL 유리(Chromium)는 채도를 올리지 않으므로 CSS 유리도 거의 올리지 않는다
     vars["--ui-glass-saturate"] = dark ? "1.1" : "1.2"
+    // 걸어 보기 키 안내의 kbd 바탕과 조준점의 바깥 테(화면 시안 "걸어 보기 중")
+    vars["--ui-kbd"] = dark ? "rgba(255, 255, 255, 0.18)" : "rgba(255, 255, 255, 0.7)"
+    vars["--ui-crosshair-halo"] = dark ? "#0b0c0e" : "#ffffff"
     return vars as CSSProperties
 }
 

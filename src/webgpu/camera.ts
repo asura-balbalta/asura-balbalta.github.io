@@ -3,7 +3,7 @@
  * uniform 버퍼에 그대로 writeBuffer 할 수 있다.
  */
 export type Mat4 = Float32Array
-type Vec3 = [number, number, number]
+export type Vec3 = [number, number, number]
 
 /** 벡터 뺄셈 a - b */
 const sub = (a: Vec3, b: Vec3): Vec3 => [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
@@ -140,3 +140,35 @@ export const orbitViewProj = (cam: OrbitCamera, aspect: number): Mat4 => {
     const proj = perspective(cam.fovY, aspect, distance * 0.01, distance * 10)
     return multiply(proj, lookAt(orbitEye(cam), cam.target, [0, 0, 1]))
 }
+
+/**
+ * 1인칭 카메라(걸어 보기). eye 에서 yaw(수평, 0 = 동쪽, 반시계)·pitch(수평선 위로, 라디안) 방향을 본다.
+ * near·far 는 거리에 비례하는 궤도 카메라와 달리 고정이다: 발 앞 0.3 m 부터 20 km 까지
+ */
+export type FpsCamera = {
+    eye: Vec3
+    yaw: number
+    pitch: number
+    fovY: number
+}
+export const FPS_NEAR = 0.3
+export const FPS_FAR = 20000
+
+/** 1인칭 카메라가 보는 방향(단위 벡터) */
+export const fpsForward = ({ yaw, pitch }: FpsCamera): Vec3 => {
+    const cp = Math.cos(pitch)
+    return [cp * Math.cos(yaw), cp * Math.sin(yaw), Math.sin(pitch)]
+}
+
+export const fpsViewProj = (cam: FpsCamera, aspect: number): Mat4 => {
+    const f = fpsForward(cam)
+    const target: Vec3 = [cam.eye[0] + f[0], cam.eye[1] + f[1], cam.eye[2] + f[2]]
+    return multiply(perspective(cam.fovY, aspect, FPS_NEAR, FPS_FAR), lookAt(cam.eye, target, [0, 0, 1]))
+}
+
+/** 렌더러가 받는 카메라: 궤도 또는 1인칭 */
+export type Camera = OrbitCamera | FpsCamera
+export const isFpsCamera = (cam: Camera): cam is FpsCamera => "eye" in cam
+export const cameraEye = (cam: Camera): Vec3 => (isFpsCamera(cam) ? cam.eye : orbitEye(cam))
+export const cameraViewProj = (cam: Camera, aspect: number): Mat4 =>
+    isFpsCamera(cam) ? fpsViewProj(cam, aspect) : orbitViewProj(cam, aspect)

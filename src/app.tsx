@@ -35,6 +35,11 @@ import { StatusPill } from "./ui/StatusPill"
 import { TabBar } from "./ui/TabBar"
 import { MOBILE_QUERY, useMediaQuery } from "./ui/useMediaQuery"
 import { LIQUID_GLASS_ENABLED, useLiquidGlass } from "./ui/liquidGlass"
+import { WalkHud } from "./ui/WalkHud"
+import { WalkPill } from "./ui/WalkPill"
+import type { PlayerMove } from "./player"
+import { clearPlayerMarker, showPlayerMarker } from "./playerMarker"
+import { transform } from "ol/proj"
 import { SearchBox, SearchStatus } from "./ui/SearchBox"
 import { VWORLD_KEY } from "./config"
 import { clearSearchPin, showSearchPin } from "./searchPin"
@@ -185,6 +190,38 @@ function App({
     }, [view])
     // 리퀴드 글래스(?glass=0 으로 끔): 3D 화면에서만
     useLiquidGlass(LIQUID_GLASS_ENABLED && view === "3d" && !!mesh, rootRef)
+
+    // ---- 걸어 보기(게임 모드, 계획 문서 6절) ----
+    /** 1인칭으로 지형 위를 걷는 중. 3D 화면·데스크톱에서만. 지도로 돌아가거나 지형이 바뀌면 끝난다 */
+    const [walking, setWalking] = useState(false)
+    /** 플레이어 발 아래 지표 높이(상태 표시줄 "표고") */
+    const [walkGround, setWalkGround] = useState<number | null>(null)
+    useEffect(() => {
+        if (view !== "3d" || !mesh || isMobile) setWalking(false)
+    }, [view, mesh, isMobile])
+    useEffect(() => {
+        const map = mapRef.current
+        if (walking || !map) return
+        // 끝나면 플레이어 표시를 지우고 미니맵을 범위에 다시 맞춘다(따라가느라 옮겨졌을 수 있다)
+        clearPlayerMarker(map)
+        if (view === "3d" && selection) map.getView().fit(selection, { padding: [20, 20, 20, 20] })
+    }, [walking])
+    const startWalking = () => {
+        setOpenPanel(null)
+        setWalking(true)
+    }
+    const stopWalking = () => {
+        if (document.pointerLockElement) document.exitPointerLock()
+        setWalking(false)
+    }
+    const onWalkMove = (move: PlayerMove) => {
+        const map = mapRef.current
+        if (!map || !mesh) return
+        // 메쉬 좌표는 EPSG:5179(origin 을 뺀 m), 지도는 EPSG:3857. 5179 는 tileOverlay 가 OpenLayers 에 등록해 두었다
+        const coord = transform([move.x + mesh.origin[0], move.y + mesh.origin[1]], "EPSG:5179", "EPSG:3857") as [number, number]
+        showPlayerMarker(map, coord, move.yaw)
+        setWalkGround(move.ground)
+    }
 
     // ---- 주소 검색 ----
     /** 검색 알약의 글자 */
@@ -482,6 +519,7 @@ function App({
     const stats: string[] = []
     if (selection) stats.push(extentKmText(selection))
     if (sheetCount !== null) stats.push(`도엽 ${sheetCount}`)
+    if (walking && walkGround !== null) stats.push(`표고 ${walkGround.toFixed(1)} m`)
     if (stats.length === 0 && !selecting) stats.push("범위 없음")
     if (selecting) stats.unshift("범위 그리는 중")
 
@@ -528,17 +566,22 @@ function App({
                         setTerrainProgress({ label: `3D 지형 만드는 중 ${Math.floor(ratio * 100)}%`, ratio })
                     }
                     onFirstChunk={showTerrain}
+                    walking={walking}
+                    onWalkMove={onWalkMove}
+                    onWalkExit={() => setWalking(false)}
                 />
             )}
-            {/* 독(탭 막대)이 지도 틀보다 앞에 와야 Tab 키가 도구부터 닿는다. 겹침은 z-index 가 정한다 */}
-            <Toolbar
-                drawing={selecting}
-                onToggleDraw={() => squareToolRef.current?.setActive(!selecting)}
-                drawDisabled={busy}
-                openPanel={openPanel}
-                onOpenPanel={setOpenPanel}
-                panelDisabled={{ layers: !terrainReady, export: !terrainReady }}
-            />
+            {/* 독(탭 막대)이 지도 틀보다 앞에 와야 Tab 키가 도구부터 닿는다. 겹침은 z-index 가 정한다. 걸어 보기 중에는 숨긴다 */}
+            {!walking && (
+                <Toolbar
+                    drawing={selecting}
+                    onToggleDraw={() => squareToolRef.current?.setActive(!selecting)}
+                    drawDisabled={busy}
+                    openPanel={openPanel}
+                    onOpenPanel={setOpenPanel}
+                    panelDisabled={{ layers: !terrainReady, export: !terrainReady }}
+                />
+            )}
             <MapFrame
                 mode={view === "3d" ? "mini" : "full"}
                 onExpand={() => setView("map")}
@@ -570,6 +613,10 @@ function App({
                     </MenuPopover>
                 </Menu>
             )}
+
+            {/* 걸어 보기: 데스크톱 3D 화면 가운데 진입 알약, 들어가면 키 안내와 조준점(화면 시안 "걸어 보기") */}
+            {!isMobile && view === "3d" && terrainReady && !busy && !walking && <WalkPill onClick={startWalking} />}
+            {walking && <WalkHud />}
 
             {openPanel === "layers" && (
                 <Panel title="레이어" onClose={() => setOpenPanel(null)} above={panelAbove}>
@@ -632,7 +679,12 @@ function App({
                 // 시트가 열려 있으면 알약은 시트 위에 얹혀 있다(above)
                 openPanel ? null : mobilePill
             ) : (
-                <StatusBar progress={progress} stats={stats} menus={menus}>
+                <StatusBar progress={progress} status={walking ? "걸어 보기 중" : undefined} stats={stats} menus={menus}>
+                    {walking && (
+                        <Button appearance="subtle" size="small" className="ui-statusbar-action" onClick={stopWalking}>
+                            나가기 (Esc)
+                        </Button>
+                    )}
                     {view === "map" && terrainReady && !busy && (
                         <Button appearance="subtle" size="small" className="ui-statusbar-action" onClick={() => setView("3d")}>
                             3D로 돌아가기

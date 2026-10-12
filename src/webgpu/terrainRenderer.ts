@@ -1,7 +1,7 @@
 import { LayerId } from "../layers"
 import { MeshChunk, TinMesh } from "../terrainData"
 import { hexToRgb, STOP_COUNT, stopsToUniform, TerrainTheme } from "../terrainTheme"
-import { OrbitCamera, orbitEye, orbitViewProj } from "./camera"
+import { Camera, cameraEye, cameraViewProj } from "./camera"
 import { initWebGPU } from "./device"
 import { createBuildingShader, createSmoothTerrainShader, createSteppedTerrainShader } from "./shaders"
 
@@ -264,7 +264,7 @@ const createTerrainDrawingPassAndUpdaters = (
 ) => {
     let aspect = initialAspect
     /** 마지막으로 올린 카메라. 비율이 바뀌면 같은 카메라로 viewProj 를 다시 쓴다 */
-    let lastCamera: OrbitCamera | null = null
+    let lastCamera: Camera | null = null
     const uniformBuffer = device.createBuffer({
         label: "terrain uniforms",
         size: UNIFORM_SIZE,
@@ -486,12 +486,12 @@ const createTerrainDrawingPassAndUpdaters = (
     /**
      * 카메라 상태로 viewProj 행렬(uniform offset 0)과 카메라 위치(offset 80, 정반사 계산용)를 쓴다.
      *
-     * @param camera 궤도 카메라 상태
+     * @param camera 궤도 카메라 또는 1인칭 카메라(걸어 보기)
      */
-    const cameraUpdater = (camera: OrbitCamera) => {
+    const cameraUpdater = (camera: Camera) => {
         lastCamera = camera
-        device.queue.writeBuffer(uniformBuffer, 0, orbitViewProj(camera, aspect))
-        device.queue.writeBuffer(uniformBuffer, 80, new Float32Array(orbitEye(camera)))
+        device.queue.writeBuffer(uniformBuffer, 0, cameraViewProj(camera, aspect))
+        device.queue.writeBuffer(uniformBuffer, 80, new Float32Array(cameraEye(camera)))
     }
 
     /**

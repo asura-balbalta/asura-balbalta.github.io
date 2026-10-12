@@ -6,7 +6,8 @@ import VectorLayer from "ol/layer/Vector"
 import { Extent } from "ol/extent"
 
 import { BasemapProvider, createBasemapSource, nextBasemapProvider, watchTileErrors } from "./basemap"
-import { pinStyle, selectionStyle, setMapOverlay, tileOutlineStyle } from "./mapOverlay"
+import { pinStyle, playerMarkerStyle, selectionStyle, setMapOverlay, tileOutlineStyle } from "./mapOverlay"
+import { PLAYER_MARKER_LAYER_NAME } from "./playerMarker"
 import { SEARCH_PIN_LAYER_NAME } from "./searchPin"
 import { installSquareTool, SQUARE_RANGE_LAYER_NAME, SquarePhase, SquareTool } from "./squareTool"
 import { getTtpSheetsInBbox } from "./terrainIndex"
@@ -44,6 +45,7 @@ export const applyMapTheme = (
         if (name === SQUARE_RANGE_LAYER_NAME) layer.setStyle(selectionStyle(theme.mapOverlay))
         else if (name === TILE_LAYER_NAME) layer.setStyle(tileOutlineStyle(theme.mapOverlay))
         else if (name === SEARCH_PIN_LAYER_NAME) layer.setStyle(pinStyle(theme.mapOverlay))
+        else if (name === PLAYER_MARKER_LAYER_NAME) layer.setStyle(playerMarkerStyle(theme.mapOverlay))
     }
 }
 

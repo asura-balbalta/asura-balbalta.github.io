@@ -57,6 +57,7 @@ button.ui-status-pill:focus-visible,
 .ui-tabbar .ui-tab-button:focus-visible,
 .ui-minimap-icon:focus-visible,
 .ui-quick-menu:focus-visible,
+.ui-walk-pill:focus-visible,
 .ui-minimap-collapsed:focus-visible {
     outline: 2px solid var(--ui-focus);
     outline-offset: 1px;
@@ -518,6 +519,79 @@ button.ui-status-pill:focus-visible,
 .ui-pill-hint {
     margin-left: 6px;
     color: var(--ui-text-on-glass-secondary);
+}
+
+/* ---- 걸어 보기(게임 모드, 화면 시안 "걸어 보기 진입" · "걸어 보기 중") ---- */
+
+/* 진입 알약: 3D 화면 정가운데 44px 유리 알약 */
+.ui-walk-pill {
+    position: fixed;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 20;
+    height: 44px;
+    padding: 0 18px 0 14px;
+    border: 0;
+    border-radius: 999px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font: 600 13px / 20px inherit;
+    font-family: inherit;
+    white-space: nowrap;
+    cursor: pointer;
+}
+
+/* 키 안내: 위 가운데 36px 유리 알약 */
+.ui-walk-hud {
+    position: fixed;
+    left: 50%;
+    top: 12px;
+    transform: translateX(-50%);
+    z-index: 20;
+    height: 36px;
+    padding: 0 14px;
+    box-sizing: border-box;
+    border-radius: 999px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    white-space: nowrap;
+    font-size: 12px;
+}
+.ui-walk-key {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.ui-walk-key kbd {
+    font: 600 11px / 16px inherit;
+    font-family: inherit;
+    padding: 0 5px;
+    border-radius: 4px;
+    background: var(--ui-kbd);
+}
+.ui-walk-hud-sep {
+    width: 1px;
+    height: 14px;
+    background: var(--ui-divider);
+}
+
+/* 조준점: 흰(다크는 배경색) 테 위에 글자색 십자 */
+.ui-crosshair {
+    position: fixed;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 20;
+    pointer-events: none;
+}
+.ui-crosshair-halo {
+    stroke: var(--ui-crosshair-halo);
+}
+.ui-crosshair-line {
+    stroke: var(--ui-text);
 }
 
 /* ---- 레이어 패널 ---- */
