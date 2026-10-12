@@ -86,6 +86,7 @@ const initialCamera = ({ min, max }: MeshBounds): OrbitCamera => ({
  * @param props.onWalkMove 플레이어 위치가 바뀔 때(약 10 Hz, 미니맵·상태 표시줄용)
  * @param props.onWalkFocusChange 포커스가 잡히거나 풀렸을 때(Esc 등). 부모가 안내 문구를 바꾼다
  * @param props.walkPhysics 걸어 보기 물리 값(중력·속도·점프·대시). 바뀌면 바로 플레이어에 반영
+ * @param props.onWalkFrameTime 걸어 보기 중 프레임 간격(ms, 최근 평균)을 0.5초마다. rAF 간격이라 GPU 가 병목이면 그만큼 늘어난다
  */
 export const TerrainViewCanvas = ({
     mesh,
@@ -103,6 +104,7 @@ export const TerrainViewCanvas = ({
     onWalkMove,
     onWalkFocusChange,
     walkPhysics,
+    onWalkFrameTime,
 }: {
     mesh: TinMesh
     buildings?: TinMesh | null
@@ -119,6 +121,7 @@ export const TerrainViewCanvas = ({
     onWalkMove?: (move: PlayerMove) => void
     onWalkFocusChange?: (focused: boolean) => void
     walkPhysics?: Partial<WalkPhysics>
+    onWalkFrameTime?: (ms: number) => void
 }) => {
     // 콜백이 렌더마다 새로 만들어져도 메쉬 effect 를 다시 돌리지 않도록 ref 로 받는다
     const onDoneRef = useRef(onDone)
@@ -131,6 +134,8 @@ export const TerrainViewCanvas = ({
     onWalkMoveRef.current = onWalkMove
     const onWalkFocusChangeRef = useRef(onWalkFocusChange)
     onWalkFocusChangeRef.current = onWalkFocusChange
+    const onWalkFrameTimeRef = useRef(onWalkFrameTime)
+    onWalkFrameTimeRef.current = onWalkFrameTime
     /** 걸어 보기 중인 플레이어. 렌더 루프가 프레임마다 step 해 카메라를 쓴다 */
     const walkRef = useRef<Player | null>(null)
     /** mesh 별 지형 높이 조회기(걸어 보기에 들어갈 때 만들고 같은 mesh 면 다시 쓴다) */
@@ -164,9 +169,24 @@ export const TerrainViewCanvas = ({
                 if (cancelled) return r.destroy()
                 created = r
                 let last = performance.now()
+                /** 걸어 보기 중 프레임 시간 측정: 0.5초 동안의 평균 간격을 알린다 */
+                let frameSum = 0
+                let frameCount = 0
+                let frameReportAt = last
                 const renderLoop = (now: number) => {
                     const player = walkRef.current
-                    if (player) r.updaters.cameraUpdater(player.step((now - last) / 1000))
+                    const dt = now - last
+                    if (player) {
+                        r.updaters.cameraUpdater(player.step(dt / 1000))
+                        frameSum += dt
+                        frameCount++
+                        if (now - frameReportAt >= 500) {
+                            onWalkFrameTimeRef.current?.(frameSum / frameCount)
+                            frameSum = 0
+                            frameCount = 0
+                            frameReportAt = now
+                        }
+                    }
                     last = now
                     r.render()
                     animationFrameId = window.requestAnimationFrame(renderLoop)

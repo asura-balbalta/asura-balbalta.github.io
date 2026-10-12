@@ -1,7 +1,8 @@
 import { LayerId } from "../layers"
 import { MeshChunk, TinMesh } from "../terrainData"
 import { hexToRgb, STOP_COUNT, stopsToUniform, TerrainTheme } from "../terrainTheme"
-import { Camera, cameraEye, cameraViewProj, fpsForward, isFpsCamera, lookAt, multiply, ortho, Vec3 } from "./camera"
+import { createAoPasses } from "./ao"
+import { Camera, cameraEye, cameraViewProj, fpsForward, invert, isFpsCamera, lookAt, multiply, ortho, Vec3 } from "./camera"
 import { initWebGPU } from "./device"
 import {
     createBuildingShader,
@@ -21,7 +22,8 @@ const BUILDING_COLOR_OFFSET = STOPS_OFFSET + 16 * STOP_COUNT // 건물색 vec4f
 const LIGHT_VP_OFFSET = BUILDING_COLOR_OFFSET + 16 // 빛 기준 viewProj mat4x4f
 const LIGHTING_OFFSET = LIGHT_VP_OFFSET + 64 // vec4f: 주변광, 난반사, 그림자 켬, 안개 밀도
 const FOG_COLOR_OFFSET = LIGHTING_OFFSET + 16 // vec4f: 안개색
-const UNIFORM_SIZE = FOG_COLOR_OFFSET + 16 // viewProj(0~64) + zRange(64~72) + eye(80~92) + stops + buildingColor + lightViewProj + lighting + fogColor
+const HEMI_OFFSET = FOG_COLOR_OFFSET + 16 // vec4f: 반구 조명 세기
+const UNIFORM_SIZE = HEMI_OFFSET + 16 // viewProj(0~64) + zRange(64~72) + eye(80~92) + stops + buildingColor + lightViewProj + lighting + fogColor + hemi
 const SHADOW_FORMAT: GPUTextureFormat = "depth32float"
 /** 빛 방향(표면에서 빛으로). shaders.ts 의 LIGHT_DIR 과 같아야 한다 */
 const LIGHT_DIR: Vec3 = [0.5, -0.5, 1]
@@ -36,9 +38,29 @@ export type Lighting = {
     shadows: boolean
     shadowRadius: number
     fogDensity: number
+    /** 반구 조명 세기(0 ~ 1). 수직면의 주변광이 이만큼 줄어든다 */
+    hemisphere: number
+    /** 화면 공간 주변광 차폐(ao.ts). 켜면 장면을 오프스크린에 그리고 AO 를 곱해 합성한다 */
+    ao: boolean
 }
-export const DEFAULT_LIGHTING: Lighting = { ambient: 0.6, diffuse: 0.4, shadows: false, shadowRadius: 250, fogDensity: 0 }
-export const WALK_LIGHTING: Lighting = { ambient: 0.45, diffuse: 0.55, shadows: true, shadowRadius: 250, fogDensity: 1 / 1200 }
+export const DEFAULT_LIGHTING: Lighting = {
+    ambient: 0.6,
+    diffuse: 0.4,
+    shadows: false,
+    shadowRadius: 250,
+    fogDensity: 0,
+    hemisphere: 0,
+    ao: false,
+}
+export const WALK_LIGHTING: Lighting = {
+    ambient: 0.5,
+    diffuse: 0.5,
+    shadows: true,
+    shadowRadius: 250,
+    fogDensity: 1 / 1200,
+    hemisphere: 0.35,
+    ao: true,
+}
 
 /** 지형 표현 방식. tin: 정점 법선으로 부드럽게, stepped: 계단형(면 법선, 법선 버퍼 없음) */
 export type TerrainMode = "tin" | "stepped"
@@ -57,15 +79,15 @@ export type MeshBounds = {
  *
  * @param bg 배경색 홀더(0 ~ 1). color 를 바꾸면 다음 프레임부터 반영된다(backgroundUpdater)
  * @param depth 깊이 텍스처 홀더. 뒤이은 pass 들이 같은 view 를 load 해서 쓴다. 캔버스 크기가 바뀌면 resizeUpdater 가 바꿔 끼운다
- * @returns `(encoder, context) => void` pass 함수
+ * @returns `(encoder, target) => void` pass 함수. target 은 캔버스 또는 오프스크린 장면 텍스처의 view
  */
 const renderBackgroundPassFactory =
     (bg: { color: { r: number; g: number; b: number } }, depth: DepthHolder) =>
-    (encoder: GPUCommandEncoder, context: GPUCanvasContext) => {
+    (encoder: GPUCommandEncoder, target: GPUTextureView) => {
         const backgroundPass = encoder.beginRenderPass({
             colorAttachments: [
                 {
-                    view: context.getCurrentTexture().createView(),
+                    view: target,
                     loadOp: "clear",
                     clearValue: { ...bg.color, a: 1 },
                     storeOp: "store",
@@ -551,9 +573,17 @@ const createTerrainDrawingPassAndUpdaters = (
      */
     const cameraUpdater = (camera: Camera) => {
         lastCamera = camera
-        device.queue.writeBuffer(uniformBuffer, 0, cameraViewProj(camera, aspect))
-        device.queue.writeBuffer(uniformBuffer, 80, new Float32Array(cameraEye(camera)))
+        const viewProj = cameraViewProj(camera, aspect)
+        const eye = cameraEye(camera)
+        device.queue.writeBuffer(uniformBuffer, 0, viewProj)
+        device.queue.writeBuffer(uniformBuffer, 80, new Float32Array(eye))
         if (lighting.shadows) device.queue.writeBuffer(uniformBuffer, LIGHT_VP_OFFSET, lightViewProj(camera))
+        if (lighting.ao) onCamera?.(viewProj, invert(viewProj), eye)
+    }
+    /** 카메라가 바뀔 때 다른 pass(SSAO)에도 알린다 */
+    let onCamera: ((viewProj: Float32Array, invViewProj: Float32Array, eye: Vec3) => void) | null = null
+    const setCameraListener = (fn: typeof onCamera) => {
+        onCamera = fn
     }
 
     let lighting: Lighting = DEFAULT_LIGHTING
@@ -593,8 +623,10 @@ const createTerrainDrawingPassAndUpdaters = (
             LIGHTING_OFFSET,
             new Float32Array([next.ambient, next.diffuse, next.shadows ? 1 : 0, next.fogDensity]),
         )
+        device.queue.writeBuffer(uniformBuffer, HEMI_OFFSET, new Float32Array([next.hemisphere, 0, 0, 0]))
         if (lastCamera) cameraUpdater(lastCamera)
     }
+    const currentLighting = () => lighting
     lightingUpdater(DEFAULT_LIGHTING)
 
     /** 안개색(배경색)을 쓴다. 테마 전환 때 배경색과 함께 */
@@ -656,9 +688,9 @@ const createTerrainDrawingPassAndUpdaters = (
      * 바꿔 가며 drawIndexed 한다(tin 모드에서만 법선 버퍼 바인딩). 그릴 조각이 없으면 아무것도 하지 않는다.
      *
      * @param encoder 이번 프레임의 command encoder
-     * @param context 캔버스 context
+     * @param target 그릴 색 텍스처 view(캔버스 또는 오프스크린 장면 텍스처)
      */
-    const scenePass = (encoder: GPUCommandEncoder, context: GPUCanvasContext) => {
+    const scenePass = (encoder: GPUCommandEncoder, target: GPUTextureView) => {
         const draws: { chunks: GpuChunk[]; set: ReturnType<typeof createPipelineSet> }[] = []
         if (layerVisible.terrain && layerChunks.terrain.length > 0) {
             draws.push({ chunks: layerChunks.terrain, set: pipelines[mode] })
@@ -671,7 +703,7 @@ const createTerrainDrawingPassAndUpdaters = (
         const pass = encoder.beginRenderPass({
             colorAttachments: [
                 {
-                    view: context.getCurrentTexture().createView(),
+                    view: target,
                     loadOp: "load",
                     storeOp: "store",
                 },
@@ -699,6 +731,8 @@ const createTerrainDrawingPassAndUpdaters = (
         scenePass,
         shadowPass,
         lightingUpdater,
+        currentLighting,
+        setCameraListener,
         fogColorUpdater,
         meshUpdater,
         meshStreamStarter,
@@ -741,12 +775,12 @@ export const createTerrainRenderFunctionAndUpdateFunctions = async ({
 }) => {
     const { context, device, format } = await initWebGPU(canvasId)
 
-    /** 캔버스 픽셀 크기의 깊이 텍스처를 만든다 */
+    /** 캔버스 픽셀 크기의 깊이 텍스처를 만든다(SSAO 가 읽으므로 TEXTURE_BINDING 도) */
     const createDepth = (w: number, h: number): DepthHolder => {
         const texture = device.createTexture({
             size: [w, h],
             format: DEPTH_FORMAT,
-            usage: GPUTextureUsage.RENDER_ATTACHMENT,
+            usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
         })
         return { texture, view: texture.createView(), width: w, height: h }
     }
@@ -756,9 +790,13 @@ export const createTerrainRenderFunctionAndUpdateFunctions = async ({
 
     const background = { color: backgroundColor }
     const backgroundPass = renderBackgroundPassFactory(background, depth)
-    const { scenePass, shadowPass, aspectUpdater, fogColorUpdater, ...sceneUpdaters } =
+    const { scenePass, shadowPass, aspectUpdater, fogColorUpdater, currentLighting, setCameraListener, ...sceneUpdaters } =
         createTerrainDrawingPassAndUpdaters(device, format, depth, width / height)
     fogColorUpdater(backgroundColor)
+    // SSAO(걸어 보기): 오프스크린 장면 텍스처 + AO pass. 카메라가 바뀌면 같은 행렬을 받는다
+    const ao = createAoPasses(device, format)
+    ao.resize(width, height, depth.view)
+    setCameraListener(ao.setCamera)
     /** 배경색(= 안개색)을 바꾼다(다음 프레임부터). 테마 전환용 */
     const backgroundUpdater = (color: { r: number; g: number; b: number }) => {
         background.color = color
@@ -778,22 +816,33 @@ export const createTerrainRenderFunctionAndUpdateFunctions = async ({
         const next = createDepth(w, h)
         depth.texture.destroy()
         Object.assign(depth, next)
+        ao.resize(w, h, depth.view)
         aspectUpdater(w / h)
     }
 
-    /** 한 프레임을 그린다: 섀도 pass(그림자가 켜져 있을 때) → 배경 pass → 장면 pass 순으로 기록해 제출한다 */
+    /**
+     * 한 프레임을 그린다: 섀도 pass(그림자가 켜져 있을 때) → 배경 pass → 장면 pass → (AO 가 켜져 있으면) SSAO·흐림·합성.
+     * AO 가 켜져 있으면 배경·장면은 오프스크린 텍스처에 그리고 합성 pass 가 캔버스에 쓴다
+     */
     const render = () => {
         const encoder = device.createCommandEncoder()
+        const canvasView = context.getCurrentTexture().createView()
+        const offscreen = currentLighting().ao ? ao.sceneView() : null
+        const target = offscreen ?? canvasView
         shadowPass(encoder)
-        backgroundPass(encoder, context)
-        scenePass(encoder, context)
+        backgroundPass(encoder, target)
+        scenePass(encoder, target)
+        if (offscreen) ao.run(encoder, canvasView)
         device.queue.submit([encoder.finish()])
     }
 
     const updaters = { ...sceneUpdaters, backgroundUpdater, resizeUpdater }
 
     /** GPU device 와 그에 속한 버퍼·텍스처를 모두 해제한다. 컴포넌트 언마운트 때 호출 */
-    const destroy = () => device.destroy()
+    const destroy = () => {
+        ao.destroy()
+        device.destroy()
+    }
 
     return { render, updaters, destroy }
 }

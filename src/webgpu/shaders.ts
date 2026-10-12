@@ -10,7 +10,9 @@ export const SHADOW_MAP_SIZE = 2048
  *   + 건물색 buildingColor(offset 96 + 16·STOP_COUNT, vec4f)
  *   + 빛 기준 viewProj lightViewProj(그 뒤 64바이트, 섀도 맵을 뜰 때와 비교할 때 같이 쓴다)
  *   + lighting(vec4f: 주변광, 난반사, 그림자 켬(0/1), 안개 밀도 1/m)
- *   + fogColor(vec4f: 안개색 = 배경색). 오프셋은 terrainRenderer.ts 의 상수와 같아야 한다
+ *   + fogColor(vec4f: 안개색 = 배경색)
+ *   + hemi(vec4f: x = 반구 조명 세기. 주변광을 위를 향한 면 100%, 수직면 (1 − x)·100% 로 가른다. 하늘빛이 위에서 온다는 단서)
+ *   오프셋은 terrainRenderer.ts 의 상수와 같아야 한다
  * - binding 1·2: 섀도 맵(depth)과 비교 샘플러. 셰이더가 쓰지 않으면(섀도 pass 의 정점 셰이더) layout "auto" 가 뺀다
  * - terrainColor(): 절대 표고 → 바탕색. 색표는 uniform 이라 테마 전환은 셰이더를 바꾸지 않고 uniform 만 다시 쓴다
  * - shadowFactor(): 빛 기준 좌표로 섀도 맵과 비교(3×3 PCF, 비교 샘플러의 선형 보간까지 합쳐 부드럽게). 상자 밖은 1(밝음).
@@ -31,6 +33,7 @@ const commonWgsl = /* wgsl */ `
         lightViewProj: mat4x4f, // 빛(평행광) 기준 직교 투영. 섀도 맵의 좌표계
         lighting: vec4f, // x 주변광, y 난반사, z 그림자 켬(0/1), w 안개 밀도(1/m, 0 이면 없음)
         fogColor: vec4f, // 안개색(배경색)
+        hemi: vec4f, // x 반구 조명 세기(0 이면 없음)
     };
     @group(0) @binding(0) var<uniform> u: Uniforms;
     @group(0) @binding(1) var shadowMap: texture_depth_2d;
@@ -74,7 +77,9 @@ const commonWgsl = /* wgsl */ `
     fn shade(base: vec3f, n: vec3f, world: vec3f) -> vec3f {
         let l = normalize(LIGHT_DIR);
         let diffuse = max(dot(n, l), 0.0) * shadowFactor(world, n, l);
-        let lit = base * (u.lighting.x + u.lighting.y * diffuse);
+        // 반구 조명: 위를 향할수록 하늘빛(주변광)을 다 받고, 수직면은 (1 − hemi) 만큼만
+        let sky = 1.0 - u.hemi.x * (1.0 - (n.z * 0.5 + 0.5));
+        let lit = base * (u.lighting.x * sky + u.lighting.y * diffuse);
         let d = distance(u.eye, world);
         let fog = clamp(1.0 - exp(-d * u.lighting.w), 0.0, 1.0);
         return mix(lit, u.fogColor.rgb, fog);
