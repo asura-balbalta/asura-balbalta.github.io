@@ -60,8 +60,8 @@ export type WalkPhysics = {
     /** 지상 감쇠(1/s). 클수록 빨리 서고 대시 꼬리가 짧다 */
     damping: number
 }
-/** 기본 물리 값(예전 game 코드와 같은 걷기·대시·감쇠). 조절 패널로 써 보고 정하면 여기를 바꾼다 by @nanangqq */
-export const DEFAULT_WALK_PHYSICS: WalkPhysics = { gravity: 20, walkSpeed: 6, jumpSpeed: 8, dashSpeed: 65, damping: 4 }
+/** 기본 물리 값. 조절 패널로 써 보고 정한 값(2026-10-13) by @nanangqq: 중력 2 · 걷기 20 · 점프 17 · 대시 65 · 감속 4. 가볍게 떠다니는 느낌 */
+export const DEFAULT_WALK_PHYSICS: WalkPhysics = { gravity: 2, walkSpeed: 20, jumpSpeed: 17, dashSpeed: 65, damping: 4 }
 
 const MAX_AIR_JUMPS = 2
 /** 대시 시작 뒤 더 밀어 주는 시간(초)과 그 가속(dashSpeed 의 배수/s), 상한(dashSpeed 의 배수) */
