@@ -1,4 +1,5 @@
-import type { BuildingParts } from "../buildingsMesh"
+import { WALL_SINK_M } from "../buildingsMesh"
+import { buildingAttributes, buildingRings, NOT_BUILT } from "../buildingTable"
 import { LAYER_DEFS } from "../layers"
 import type { TinMesh } from "../terrainData"
 import type { TerrainMode } from "../webgpu/terrainRenderer"
@@ -111,16 +112,6 @@ const addGroup = (rhino: RhinoModule, doc: Doc, name: string) => {
     return doc.groups().count - 1
 }
 
-/** 고리(정점 인덱스 목록)의 부호 있는 넓이 ×2. 양수 = 반시계 */
-const indexRingArea2 = (positions: Float32Array, ring: number[]) => {
-    let s = 0
-    for (let i = 0; i < ring.length; i++) {
-        const a = ring[i] * 3, b = ring[(i + 1) % ring.length] * 3
-        s += positions[a] * positions[b + 1] - positions[b] * positions[a + 1]
-    }
-    return s
-}
-
 /**
  * rhino3dm 으로 레이어들을 Rhino .3dm 파일 하나로 만든다. 메인 스레드 밖에서 돈다.
  *
@@ -130,8 +121,8 @@ const indexRingArea2 = (positions: Float32Array, ring: number[]) => {
  * - 지형 stepped: 레벨마다 "k·step 이상 영역" 을 두께 step 으로 돌출한 Extrusion(판). 건축 모형처럼 맨 아래 판(영역 전체)
  *   위에 다음 레벨 판이 쌓인다(SKP 내보내기와 같은 구조, terrainSlabs). 판은 "terrain-<높이>m" 이름의 객체이고 모두
  *   Rhino 그룹 "terrain" 에 넣어 한 번에 잡히게 한다(판 하나가 객체 하나라 판별 그룹은 두지 않는다).
- * - 건물: parts 가 있으면 건물마다 footprint 를 높이만큼 돌출한 Extrusion(이름은 전국 고유 번호, 그룹 "buildings"),
- *   없으면 삼각형 메쉬 하나.
+ * - 건물: 표(table)가 있으면 건물마다 footprint 를 높이만큼 돌출한 Extrusion(이름은 전국 고유 번호, 그룹 "buildings",
+ *   건물 속성은 user text), 없으면 삼각형 메쉬 하나. 지형 밖이라 못 세운 건물은 넣지 않는다.
  * 진행률은 레이어의 원본 삼각형 수로 가중해 0 ~ 1 로 낸다. 취소는 메인에서 terminate 로 한다(요청마다 Worker 를 새로 만든다).
  * 오류는 메인의 worker.onerror 로 전달된다(비동기 핸들러 안의 오류는 unhandledrejection 이 아니라 throw 로 올린다).
  */
@@ -180,34 +171,24 @@ self.onmessage = async (e: MessageEvent<Rhino3dmExportRequest>) => {
             if (result.openChains || result.orphanHoles) {
                 console.warn(`3DM 계단형: 안 닫힌 사슬 ${result.openChains}개, 외곽 없는 구멍 ${result.orphanHoles}개 버림`)
             }
-        } else if (id === "buildings" && mesh.parts) {
+        } else if (id === "buildings" && mesh.table) {
             const started = performance.now()
-            const parts: BuildingParts = mesh.parts
-            const { positions } = mesh
+            const table = mesh.table
             attributes.addToGroup(addGroup(rhino, doc, "buildings"))
-            const count = parts.heads.length / 3
-            let holeAt = 0
             let solids = 0
-            for (let k = 0; k < count; k++) {
-                const base = parts.heads[3 * k], n = parts.heads[3 * k + 1], nHoles = parts.heads[3 * k + 2]
-                const starts = [0]
-                for (let h = 0; h < nHoles; h++) starts.push(parts.holeStarts[holeAt++])
-                starts.push(n)
-                const rings: P2[][] = []
-                for (let r = 0; r + 1 < starts.length; r++) {
-                    const ring: number[] = []
-                    for (let i = starts[r]; i < starts[r + 1]; i++) ring.push(base + i)
-                    if (ring.length < 3) continue
-                    const a = indexRingArea2(positions, ring)
-                    if ((r === 0 && a < 0) || (r > 0 && a > 0)) ring.reverse()
-                    rings.push(ring.map((i) => [positions[i * 3], positions[i * 3 + 1]] as P2))
-                }
+            for (let k = 0; k < table.count; k++) {
+                if (table.vertexBase[k] === NOT_BUILT) continue
+                const rings = buildingRings(table, k)
                 if (rings.length === 0) continue
-                attributes.name = String(parts.ids[k])
+                attributes.name = String(table.ids[k])
+                // 같은 키를 건물마다 덮어쓴다. 문서에 넣을 때 속성이 복사되므로 뒤 건물이 앞 건물에 영향을 주지 않는다
+                for (const [key, value] of Object.entries(buildingAttributes(table, k))) attributes.setUserString(key, String(value))
                 const [outer, ...holes] = rings
-                if (addExtrusion(rhino, doc, outer, holes, positions[base * 3 + 2], positions[(base + n) * 3 + 2], attributes)) solids++
+                const zBottom = table.baseZ[k] - WALL_SINK_M
+                const zTop = table.baseZ[k] + table.builtHeight[k]
+                if (addExtrusion(rhino, doc, outer, holes, zBottom, zTop, attributes)) solids++
                 else failedSolids++
-                if (k % 500 === 499) progress((k + 1) / count, w)
+                if (k % 500 === 499) progress((k + 1) / table.count, w)
             }
             console.log(`3DM 건물: ${solids}동, ${Math.round(performance.now() - started)}ms`)
         } else {

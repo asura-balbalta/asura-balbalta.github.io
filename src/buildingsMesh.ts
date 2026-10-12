@@ -1,6 +1,7 @@
 import earcut from "earcut"
 
 import { Building, BUILDING_FLAG, DEFAULT_STOREY_HEIGHT_M } from "./buildingsData"
+import { BuildingTable, createBuildingTable } from "./buildingTable"
 import { TinMesh } from "./terrainData"
 
 /** 높이·층수가 모두 없는 건물을 세우는 높이(m): 1층 × 기본 층고 */
@@ -70,20 +71,6 @@ export const createTerrainSampler = (positions: Float32Array, indices: Uint32Arr
     }
 }
 
-/**
- * 합쳐진 건물 메쉬에서 건물 하나씩을 다시 꺼내기 위한 표(내보내기용). 건물 k 의 정점은 heads 의 시작 인덱스부터
- * n 개가 아래 고리, 이어 n 개가 위 고리이고, 점 순서는 Building.xy 와 같다(외곽 → 구멍들). 아래·위 고리의 z 가 곧
- * 바닥·지붕 높이다. SKP 내보내기가 이 표로 건물마다 지붕·바닥·벽 면 그룹을 만든다
- */
-export type BuildingParts = {
-    /** 건물마다 [정점 시작 인덱스, 점 수 n, 구멍 수]. 3개씩 */
-    heads: Uint32Array
-    /** 구멍마다 고리 안에서의 시작 점 번호. heads 순서대로 이어 붙인다 */
-    holeStarts: Uint32Array
-    /** 건물마다 전국 고유 번호(그룹 이름용). 2^32 를 넘을 수 있어 float64 */
-    ids: Float64Array
-}
-
 /** 고리의 부호 있는 넓이 ×2 (양수 = 반시계) */
 const ringArea2 = (xy: Float64Array, start: number, end: number) => {
     let s = 0
@@ -101,19 +88,38 @@ const ringArea2 = (xy: Float64Array, start: number, end: number) => {
  * height → floors × 층고(storeyByUse) → 기본값 순으로 정한다. 지붕은 earcut 로 삼각분할(항상 반시계 = 위를 향함),
  * 벽은 고리의 변마다 사각형(삼각형 둘)을 바깥을 향하게 세운다. 바닥면은 없다. 꼭짓점 하나라도 지형 밖이면 건너뛴다.
  *
+ * 건물은 5K 파일 단위로 받아 지형 범위 밖이 대부분이므로(실측 61~93%), footprint 의 bbox 가 지형 bbox 와 겹치지 않는
+ * 건물은 표에도 넣지 않는다. 걸치기만 하면 남기므로 일부가 밖인 건물은 "못 세움" 으로 표에 남는다.
+ *
  * @param buildings 공통 원점 mm 좌표의 건물들
  * @param terrain 같은 원점의 지형 메쉬(바닥 높이 조회용)
  * @param storeyByUse 용도 u8 인덱스 → 층고(m)
  * @param onProgress 세운 건물 수 알림(약 2,000개마다와 끝에)
- * @returns 지형과 같은 원점의 메쉬(positions·indices), 건물별 표(parts), 세운 수, 건너뛴 수
+ * @returns 지형과 같은 원점의 메쉬(positions·indices), 건물 표(범위에 걸치는 건물의 모든 필드 + 세운 위치), 세운 수,
+ *   표에 있지만 못 세운 수(skipped), 범위 밖이라 표에서 뺀 수(outside)
  */
 export const buildBuildingsMesh = (
-    buildings: Building[],
+    all: Building[],
     terrain: TinMesh,
     storeyByUse: Float32Array,
     onProgress?: (done: number, total: number) => void,
-): { mesh: TinMesh; parts: BuildingParts; built: number; skipped: number } => {
+): { mesh: TinMesh; table: BuildingTable; built: number; skipped: number; outside: number } => {
     const sample = createTerrainSampler(terrain.positions, terrain.indices)
+    // 지형 bbox(mm)에 footprint bbox 가 걸치는 건물만
+    let tx0 = Infinity, ty0 = Infinity, tx1 = -Infinity, ty1 = -Infinity
+    for (let i = 0; i < terrain.positions.length; i += 3) {
+        tx0 = Math.min(tx0, terrain.positions[i]); tx1 = Math.max(tx1, terrain.positions[i])
+        ty0 = Math.min(ty0, terrain.positions[i + 1]); ty1 = Math.max(ty1, terrain.positions[i + 1])
+    }
+    tx0 *= 1000; ty0 *= 1000; tx1 *= 1000; ty1 *= 1000
+    const buildings = all.filter((b) => {
+        let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity
+        for (let i = 0; i < b.xy.length; i += 2) {
+            x0 = Math.min(x0, b.xy[i]); x1 = Math.max(x1, b.xy[i])
+            y0 = Math.min(y0, b.xy[i + 1]); y1 = Math.max(y1, b.xy[i + 1])
+        }
+        return x1 >= tx0 && x0 <= tx1 && y1 >= ty0 && y0 <= ty1
+    })
     // 상한: 정점 2n, 삼각형 ≤ 벽 2n + 지붕 (n + 2·구멍 수)
     let vCap = 0, iCap = 0
     for (const b of buildings) {
@@ -124,11 +130,7 @@ export const buildBuildingsMesh = (
     const positions = new Float32Array(3 * vCap)
     const indices = new Uint32Array(iCap)
     let v = 0, idx = 0, built = 0, skipped = 0
-    // 건물별 표. 상한은 건물 수와 구멍 수 합
-    const heads = new Uint32Array(3 * buildings.length)
-    const holeStarts = new Uint32Array(buildings.reduce((s, b) => s + b.holes.length, 0))
-    const ids = new Float64Array(buildings.length)
-    let holeCount = 0
+    const table = createBuildingTable(buildings)
 
     for (const [k, b] of buildings.entries()) {
         const n = b.xy.length / 2
@@ -173,6 +175,10 @@ export const buildBuildingsMesh = (
 
         // 정점: 아래 고리 v..v+n-1, 위 고리 v+n..v+2n-1
         const base = v / 3
+        table.vertexBase[k] = base
+        table.faceBase[k] = idx / 3
+        table.baseZ[k] = z0
+        table.builtHeight[k] = height
         for (let i = 0; i < n; i++) {
             positions[v++] = xy[2 * i]
             positions[v++] = xy[2 * i + 1]
@@ -214,20 +220,15 @@ export const buildBuildingsMesh = (
                 }
             }
         }
-        heads[3 * built] = base
-        heads[3 * built + 1] = n
-        heads[3 * built + 2] = b.holes.length
-        // ringStarts 는 구멍이 없어도 [0, n] 두 항목이므로, 구멍 수만큼만 두 번째 항목부터 옮긴다
-        for (let h = 0; h < b.holes.length; h++) holeStarts[holeCount++] = ringStarts[h + 1]
-        ids[built] = b.id
         built++
         if (k % 2000 === 1999) onProgress?.(k + 1, buildings.length)
     }
     onProgress?.(buildings.length, buildings.length)
     return {
         mesh: { origin: terrain.origin, positions: positions.subarray(0, v), indices: indices.subarray(0, idx) },
-        parts: { heads: heads.slice(0, 3 * built), holeStarts: holeStarts.slice(0, holeCount), ids: ids.slice(0, built) },
+        table,
         built,
         skipped,
+        outside: all.length - buildings.length,
     }
 }

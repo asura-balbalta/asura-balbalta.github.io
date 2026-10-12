@@ -1,10 +1,10 @@
 import type { BuildingsProgress } from "./buildingsData"
-import type { BuildingParts } from "./buildingsMesh"
+import type { BuildingTable } from "./buildingTable"
 import type { BuildingsRequest, BuildingsResponse } from "./buildings.worker"
 import type { TinMesh } from "./terrainData"
 
-/** 건물 레이어 메쉬. 렌더러는 TinMesh 로 쓰고, SKP 내보내기는 parts 로 건물마다 면 그룹을 만든다 */
-export type BuildingsMesh = TinMesh & { parts: BuildingParts }
+/** 건물 레이어 메쉬 + 건물 표. 렌더러는 TinMesh 로 쓰고, 내보내기·편집은 table 로 건물 하나씩을 다룬다 */
+export type BuildingsMesh = TinMesh & { table: BuildingTable }
 
 /** esbuild 가 src/buildings.worker.ts 를 별도 entry 로 묶어 내는 파일. index.html 의 index.js 와 같은 폴더(dist)에 있다 */
 const BUILDINGS_WORKER_URL = "buildings.worker.js"
@@ -17,7 +17,7 @@ const BUILDINGS_WORKER_URL = "buildings.worker.js"
  * @param bbox 지도에서 고른 범위 (EPSG:3857)
  * @param terrain 바닥 높이를 찾을 지형 메쉬(원점 기준 좌표)
  * @param options.onProgress 단계별 진행률
- * @returns promise(지형과 같은 원점의 건물 메쉬(건물별 표 포함)와 집계), cancel(Worker 종료. 이후 promise 는 끝나지 않는다)
+ * @returns promise(지형과 같은 원점의 건물 메쉬(건물 표 포함)와 집계), cancel(Worker 종료. 이후 promise 는 끝나지 않는다)
  */
 export const loadBuildingsInWorker = (
     bbox: number[],
@@ -37,7 +37,7 @@ export const loadBuildingsInWorker = (
                 options.onProgress?.(msg.phase, msg.done, msg.total)
             } else if (msg.type === "done") {
                 stop()
-                resolve({ mesh: { ...msg.mesh, parts: msg.parts }, built: msg.built, skipped: msg.skipped, files: msg.files })
+                resolve({ mesh: { ...msg.mesh, table: msg.table }, built: msg.built, skipped: msg.skipped, files: msg.files })
             } else {
                 stop()
                 reject(new Error(msg.message))
