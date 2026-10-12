@@ -1,6 +1,6 @@
 import earcut from "earcut"
 
-import { Building, BUILDING_FLAG, DEFAULT_STOREY_HEIGHT_M } from "./buildingsData"
+import { Building, BUILDING_FLAG, BuildingCodeTable, DEFAULT_STOREY_HEIGHT_M } from "./buildingsData"
 import { BuildingTable, createBuildingTable } from "./buildingTable"
 import { TinMesh } from "./terrainData"
 
@@ -93,7 +93,7 @@ const ringArea2 = (xy: Float64Array, start: number, end: number) => {
  *
  * @param buildings 공통 원점 mm 좌표의 건물들
  * @param terrain 같은 원점의 지형 메쉬(바닥 높이 조회용)
- * @param storeyByUse 용도 u8 인덱스 → 층고(m)
+ * @param codes codes.json 표: 층고(storeyByUse, 용도 u8 인덱스 → m)와 용도·구조 이름(표에 실어 내보내기에 쓴다)
  * @param onProgress 세운 건물 수 알림(약 2,000개마다와 끝에)
  * @returns 지형과 같은 원점의 메쉬(positions·indices), 건물 표(범위에 걸치는 건물의 모든 필드 + 세운 위치), 세운 수,
  *   표에 있지만 못 세운 수(skipped), 범위 밖이라 표에서 뺀 수(outside)
@@ -101,9 +101,10 @@ const ringArea2 = (xy: Float64Array, start: number, end: number) => {
 export const buildBuildingsMesh = (
     all: Building[],
     terrain: TinMesh,
-    storeyByUse: Float32Array,
+    codes: BuildingCodeTable,
     onProgress?: (done: number, total: number) => void,
 ): { mesh: TinMesh; table: BuildingTable; built: number; skipped: number; outside: number } => {
+    const storeyByUse = codes.storeyByUse
     const sample = createTerrainSampler(terrain.positions, terrain.indices)
     // 지형 bbox(mm)에 footprint bbox 가 걸치는 건물만
     let tx0 = Infinity, ty0 = Infinity, tx1 = -Infinity, ty1 = -Infinity
@@ -130,7 +131,7 @@ export const buildBuildingsMesh = (
     const positions = new Float32Array(3 * vCap)
     const indices = new Uint32Array(iCap)
     let v = 0, idx = 0, built = 0, skipped = 0
-    const table = createBuildingTable(buildings)
+    const table = createBuildingTable(buildings, codes)
 
     for (const [k, b] of buildings.entries()) {
         const n = b.xy.length / 2

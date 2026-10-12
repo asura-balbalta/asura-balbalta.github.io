@@ -1,4 +1,4 @@
-import { BuildingsLoadPhase, loadBuildings, loadStoreyHeights } from "./buildingsData"
+import { BuildingsLoadPhase, loadBuildingCodes, loadBuildings } from "./buildingsData"
 import { buildBuildingsMesh } from "./buildingsMesh"
 import { BuildingTable, buildingTableBuffers } from "./buildingTable"
 import type { TinMesh } from "./terrainData"
@@ -29,13 +29,13 @@ self.onmessage = async (e: MessageEvent<BuildingsRequest>) => {
         const t0 = performance.now()
         const onProgress = (phase: BuildingsLoadPhase, done: number, total: number) =>
             post({ type: "progress", phase, done, total })
-        const [storeyByUse, { buildings, files }] = await Promise.all([
-            loadStoreyHeights(),
+        const [codes, { buildings, files }] = await Promise.all([
+            loadBuildingCodes(),
             loadBuildings(bbox, terrain.origin, onProgress),
         ])
         const t1 = performance.now()
         onProgress("build", 0, buildings.length)
-        const { mesh, table, built, skipped, outside } = buildBuildingsMesh(buildings, terrain, storeyByUse, (done, total) =>
+        const { mesh, table, built, skipped, outside } = buildBuildingsMesh(buildings, terrain, codes, (done, total) =>
             onProgress("build", done, total),
         )
         console.log(

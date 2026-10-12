@@ -37,6 +37,22 @@ export type Building = {
     holes: number[]
     /** (x, y) 연속, mm 정수. 외곽 CCW, 구멍 CW, 닫는 점 없음 */
     xy: Int32Array
+    /** 건물명(names/v1). "" = 없음 */
+    name: string
+    /** 동명(names/v1, "101동"·"가동" 꼴로 정규화). "" = 없음 */
+    dong: string
+    /** 이름 출처 비트: 1 = 건물명이 건축물대장 표제부에서 보충, 2 = 동명이 표제부에서 보충, 0 = 둘 다 AL_D010 */
+    nameSrc: number
+}
+
+/** `{base}/names/v1/{50K}/{5K}.json.gz`: 건물명·동명(id 오름차순 평행 배열). 건물명·동명이 둘 다 빈 건물은 없다 */
+type BuildingNamesFile = {
+    id5k: string
+    n: number
+    id: number[]
+    name: string[]
+    dong: string[]
+    src: number[]
 }
 
 /** BFP1 파일 하나. buildings[].xy 는 파일 원점 기준 mm(파일 버퍼의 view) */
@@ -84,6 +100,9 @@ export const parseBfp = (buf: ArrayBuffer): BfpFile => {
             flags: hdrU8[20 * k + 17],
             holes: Array.from(holeLen.subarray(h0, h0 + nHoles)),
             xy: xy.subarray(2 * v0, 2 * (v0 + nPts)),
+            name: "",
+            dong: "",
+            nameSrc: 0,
         })
         v0 += nPts
         h0 += nHoles
@@ -98,6 +117,22 @@ type BuildingCodes = {
     struct: Record<string, number>
     /** 용도 코드(앞 5자리) → 층고(m). "default" 포함 */
     storey_height_suggested_m: Record<string, number>
+    /** 용도 코드 → 한글 이름(AL_D010 공식 코드표). 뜻을 알 수 없는 코드는 "". 2026-10-12 추가 */
+    use_name?: Record<string, string>
+    struct_name?: Record<string, string>
+    /** 용도 코드 → 대분류(앞 2자리 + 000) 이름. 없으면 "" */
+    use_group_name?: Record<string, string>
+}
+
+/**
+ * codes.json 에서 만든 표. storeyByUse 는 높이 없는 건물의 층수 × 층고 추정용, 이름 표 셋은 파일의 u8 인덱스 → 한글 이름
+ * (길이 256, 없으면 ""). 건물 표(BuildingTable)에 함께 실려 내보내기 이름·속성에 쓴다
+ */
+export type BuildingCodeTable = {
+    storeyByUse: Float32Array
+    useNames: string[]
+    structNames: string[]
+    useGroupNames: string[]
 }
 
 /** `{base}/index/v1/{50K}.json` */
@@ -123,20 +158,44 @@ const fetchJsonCached = <T>(url: string): Promise<T> => {
 }
 
 /**
- * codes.json 을 받아 "용도 u8 인덱스 → 층고(m)" 표로 만든다. 높이가 없는 건물의 층수 × 층고 추정에 쓴다.
- * 표에 없는 용도(인덱스 0 포함)는 default.
- *
- * @returns 길이 256 의 층고 표
+ * codes.json 을 받아 "용도 u8 인덱스 → 층고(m)" 표와 "u8 인덱스 → 이름" 표 셋을 만든다.
+ * 층고 표에 없는 용도(인덱스 0 포함)는 default. 이름 표가 codes.json 에 없으면(옛 파일) 모두 "".
  */
-export const loadStoreyHeights = async (): Promise<Float32Array> => {
+export const loadBuildingCodes = async (): Promise<BuildingCodeTable> => {
     const codes = await fetchJsonCached<BuildingCodes>(`${BUILDINGS_BASE}/index/v1/codes.json`)
     const fallback = codes.storey_height_suggested_m.default ?? DEFAULT_STOREY_HEIGHT_M
-    const table = new Float32Array(256).fill(fallback)
+    const storeyByUse = new Float32Array(256).fill(fallback)
+    const useNames = new Array<string>(256).fill("")
+    const useGroupNames = new Array<string>(256).fill("")
     for (const [code, idx] of Object.entries(codes.use)) {
+        if (idx >= 256) continue
         const h = codes.storey_height_suggested_m[code.slice(0, 5)]
-        if (h !== undefined && idx < 256) table[idx] = h
+        if (h !== undefined) storeyByUse[idx] = h
+        useNames[idx] = codes.use_name?.[code] ?? ""
+        useGroupNames[idx] = codes.use_group_name?.[code] ?? ""
     }
-    return table
+    const structNames = new Array<string>(256).fill("")
+    for (const [code, idx] of Object.entries(codes.struct)) if (idx < 256) structNames[idx] = codes.struct_name?.[code] ?? ""
+    return { storeyByUse, useNames, structNames, useGroupNames }
+}
+
+/** 층고 표만 필요할 때(loadBuildingCodes 의 storeyByUse) */
+export const loadStoreyHeights = async (): Promise<Float32Array> => (await loadBuildingCodes()).storeyByUse
+
+/**
+ * 5K 번호들의 건물명 파일(names/v1)을 받아 id → 이름으로 합친다. 5K 경계에 걸친 건물은 양쪽 파일에 같은 값이 있어
+ * 먼저 본 것을 쓴다. 이름 없는 5K 는 n: 0 인 빈 파일이라 존재 여부를 따로 확인하지 않는다
+ */
+const loadBuildingNames = async (ids5k: string[]) => {
+    const files = await Promise.all(
+        ids5k.map(async (id5k) => {
+            const bytes = await fetchGunzip(`${BUILDINGS_BASE}/names/v1/${id5k.slice(0, 5)}/${id5k}.json.gz`)
+            return JSON.parse(new TextDecoder().decode(bytes)) as BuildingNamesFile
+        }),
+    )
+    const byId = new Map<number, { name: string; dong: string; src: number }>()
+    for (const f of files) for (let i = 0; i < f.n; i++) if (!byId.has(f.id[i])) byId.set(f.id[i], { name: f.name[i], dong: f.dong[i], src: f.src[i] })
+    return byId
 }
 
 export type BuildingsLoadPhase = "index" | "download" | "build"
@@ -148,6 +207,7 @@ export type BuildingsProgress = (phase: BuildingsLoadPhase, done: number, total:
  * 1. ttp 인덱스로 범위에 걸린 5K 번호를 고른다(지형과 같은 번호)
  * 2. 건물 50K 인덱스에서 그 5K 의 path 를 보고 n_buildings > 0 인 것만 받는다
  * 3. 좌표를 공통 원점 mm 로 옮기고, flags 의 duplicated 비트가 있는 건물은 id 로 중복 제거
+ * 4. 같은 5K 의 건물명 파일(names/v1)을 받아 id 로 건물명·동명을 붙인다
  * 범위 안팎 선별은 하지 않는다(지형 위에 세울 때 지형 밖 건물이 걸러진다).
  *
  * @param bbox3857 지도에서 고른 범위 (EPSG:3857)
@@ -173,13 +233,16 @@ export const loadBuildings = async (
 
     let downloaded = 0
     onProgress?.("download", 0, targets.length)
-    const files = await Promise.all(
-        targets.map(async (t) => {
-            const file = parseBfp(await fetchGunzip(`${BUILDINGS_BASE}/${t.path}`))
-            onProgress?.("download", ++downloaded, targets.length)
-            return file
-        }),
-    )
+    const [files, names] = await Promise.all([
+        Promise.all(
+            targets.map(async (t) => {
+                const file = parseBfp(await fetchGunzip(`${BUILDINGS_BASE}/${t.path}`))
+                onProgress?.("download", ++downloaded, targets.length)
+                return file
+            }),
+        ),
+        loadBuildingNames(targets.map((t) => t.id5k)),
+    ])
 
     const seen = new Set<number>()
     const buildings: Building[] = []
@@ -196,7 +259,8 @@ export const loadBuildings = async (
                 xy[i] = b.xy[i] + dx
                 xy[i + 1] = b.xy[i + 1] + dy
             }
-            buildings.push({ ...b, xy })
+            const nm = names.get(b.id)
+            buildings.push(nm ? { ...b, xy, name: nm.name, dong: nm.dong, nameSrc: nm.src } : { ...b, xy })
         }
     }
     return { buildings, files: files.length }
