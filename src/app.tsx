@@ -258,7 +258,11 @@ function App({
         if (prev && prev !== mode) changeMode(prev)
     }, [walking])
     /** 테스트용 물리 값. 브라우저에 저장해 새로고침해도 유지한다 */
-    const [walkPhysics, setWalkPhysics] = useState<WalkPhysics>(() => readStored("walkPhysics", DEFAULT_WALK_PHYSICS))
+    // 저장된 값에 없는 항목(나중에 추가된 대시 속도·감속 등)은 기본값으로 채운다
+    const [walkPhysics, setWalkPhysics] = useState<WalkPhysics>(() => ({
+        ...DEFAULT_WALK_PHYSICS,
+        ...readStored<Partial<WalkPhysics>>("walkPhysics", {}),
+    }))
     const changeWalkPhysics = (next: Partial<WalkPhysics>) => {
         const merged = { ...walkPhysics, ...next }
         setWalkPhysics(merged)

@@ -9,6 +9,11 @@ import { FpsCamera } from "./webgpu/camera"
  * Space 점프(공중 점프 2번까지), W 두 번(0.32초 안) 대시. 충돌은 지형 높이(HeightSampler)만: 발이 지표 아래로 못 가고
  * 메쉬 범위 밖으로 못 나간다. 건물은 통과한다(최소 버전).
  *
+ * 움직임은 예전 코드와 같은 관성 모델(2026-10-13, 처음의 "누른 키 × 속도" 는 대시가 뚝 끊겨서 바꿈): 수평 속도를 상태로 두고
+ * 키는 가속도(최고 속도 × 감쇠)로 더하며 매 프레임 e^(−k·dt) 로 감쇠한다(지상 k = damping, 공중은 0.15배라 거의 미끄러짐,
+ * 공중 조작 가속은 0.36배). 걷기 최고 속도 = 가속 ÷ 감쇠 = walkSpeed. 대시는 앞 방향 속도를 dashSpeed 로 즉시 올리고 0.05초 더
+ * 민 뒤 감쇠로 줄어든다(지상 65 m/s 는 약 0.6초, 16 m 뒤 걷기 속도로)
+ *
  * 좌표는 메쉬 로컬(z-up, m). yaw 0 = 동쪽, 반시계. pitch 는 수평선 위로(라디안)
  *
  * 포커스(Unreal 식, 2026-10-12 결정 by @nanangqq): 들어가면 포인터 잠금(커서 숨김, 무한 회전)으로 "포커스" 상태. Esc 는 잠금만 풀어
@@ -46,18 +51,26 @@ export type Player = {
 export type WalkPhysics = {
     /** 중력 가속도(m/s²) */
     gravity: number
-    /** 걷기 속도(m/s) */
+    /** 걷기 최고 속도(m/s). 가속도는 이 값 × damping */
     walkSpeed: number
     /** 점프 초속(m/s) */
     jumpSpeed: number
-    /** 대시 중 속도 배수 */
-    dashFactor: number
+    /** 대시 시작 속도(m/s) */
+    dashSpeed: number
+    /** 지상 감쇠(1/s). 클수록 빨리 서고 대시 꼬리가 짧다 */
+    damping: number
 }
-/** 기본 물리 값. 조절 패널로 써 보고 정하면 여기를 바꾼다 by @nanangqq */
-export const DEFAULT_WALK_PHYSICS: WalkPhysics = { gravity: 20, walkSpeed: 6, jumpSpeed: 8, dashFactor: 3 }
+/** 기본 물리 값(예전 game 코드와 같은 걷기·대시·감쇠). 조절 패널로 써 보고 정하면 여기를 바꾼다 by @nanangqq */
+export const DEFAULT_WALK_PHYSICS: WalkPhysics = { gravity: 20, walkSpeed: 6, jumpSpeed: 8, dashSpeed: 65, damping: 4 }
 
 const MAX_AIR_JUMPS = 2
-const DASH_DURATION = 0.25
+/** 대시 시작 뒤 더 밀어 주는 시간(초)과 그 가속(dashSpeed 의 배수/s), 상한(dashSpeed 의 배수) */
+const DASH_PUSH_DURATION = 0.05
+const DASH_PUSH_ACCEL = 11.5
+const DASH_SPEED_CAP = 2
+/** 공중의 감쇠·조작 가속 비율(예전 코드: 감쇠 0.15배, 가속 9/25) */
+const AIR_DAMPING_RATIO = 0.15
+const AIR_CONTROL_RATIO = 0.36
 const DASH_TAP_WINDOW = 0.32
 const EYE_HEIGHT = 1.7
 const LOOK_RATE = 0.002
@@ -112,6 +125,8 @@ export const createPlayer = ({
     let y = clamp(spawn[1], sampler.min[1] + EDGE_MARGIN, sampler.max[1] - EDGE_MARGIN)
     let ground = groundAt(x, y) ?? sampler.min[2]
     let z = ground
+    let vx = 0
+    let vy = 0
     let vz = 0
     let yaw = initialYaw
     let pitch = 0
@@ -155,7 +170,10 @@ export const createPlayer = ({
         }
         if (code === "KeyW" || code === "ArrowUp") {
             if (clock - lastForwardTap < DASH_TAP_WINDOW) {
-                dashUntil = clock + DASH_DURATION
+                // 대시: 앞 방향 수평 속도를 즉시 올리고 잠깐 더 민다. 그 뒤는 감쇠가 줄인다
+                vx = Math.cos(yaw) * physics.dashSpeed
+                vy = Math.sin(yaw) * physics.dashSpeed
+                dashUntil = clock + DASH_PUSH_DURATION
                 lastForwardTap = -Infinity
             } else {
                 lastForwardTap = clock
@@ -236,19 +254,40 @@ export const createPlayer = ({
             if (keys.has("KeyS") || keys.has("ArrowDown")) f -= 1
             if (keys.has("KeyD") || keys.has("ArrowRight")) s += 1
             if (keys.has("KeyA") || keys.has("ArrowLeft")) s -= 1
+            // 키 → 가속. 지상 가속 = 최고 속도 × 감쇠(그래야 최고 속도에서 가속과 감쇠가 비긴다), 공중은 그 0.36배
             if (locked && (f !== 0 || s !== 0)) {
                 const len = Math.hypot(f, s)
-                const speed = physics.walkSpeed * (clock < dashUntil ? physics.dashFactor : 1)
-                const dx = ((f * Math.cos(yaw) + s * Math.sin(yaw)) / len) * speed * dt
-                const dy = ((f * Math.sin(yaw) - s * Math.cos(yaw)) / len) * speed * dt
-                const nx = clamp(x + dx, sampler.min[0] + EDGE_MARGIN, sampler.max[0] - EDGE_MARGIN)
-                const ny = clamp(y + dy, sampler.min[1] + EDGE_MARGIN, sampler.max[1] - EDGE_MARGIN)
+                const accel = physics.walkSpeed * physics.damping * (grounded ? 1 : AIR_CONTROL_RATIO) * dt
+                vx += ((f * Math.cos(yaw) + s * Math.sin(yaw)) / len) * accel
+                vy += ((f * Math.sin(yaw) - s * Math.cos(yaw)) / len) * accel
+            }
+            // 대시 직후 잠깐 더 밀기(상한 있음)
+            if (clock < dashUntil) {
+                vx += Math.cos(yaw) * physics.dashSpeed * DASH_PUSH_ACCEL * dt
+                vy += Math.sin(yaw) * physics.dashSpeed * DASH_PUSH_ACCEL * dt
+                const h = Math.hypot(vx, vy)
+                const cap = physics.dashSpeed * DASH_SPEED_CAP
+                if (h > cap) {
+                    vx *= cap / h
+                    vy *= cap / h
+                }
+            }
+            // 감쇠: 지상은 damping, 공중은 그 0.15배(거의 미끄러진다)
+            const decay = Math.exp(-physics.damping * (grounded ? 1 : AIR_DAMPING_RATIO) * dt)
+            vx *= decay
+            vy *= decay
+            if (Math.abs(vx) + Math.abs(vy) > 1e-4) {
+                const nx = clamp(x + vx * dt, sampler.min[0] + EDGE_MARGIN, sampler.max[0] - EDGE_MARGIN)
+                const ny = clamp(y + vy * dt, sampler.min[1] + EDGE_MARGIN, sampler.max[1] - EDGE_MARGIN)
                 const g = groundAt(nx, ny)
-                // 메쉬 밖(가장자리의 빈 삼각형)으로는 나가지 않는다
+                // 메쉬 밖(가장자리의 빈 삼각형)이나 범위 끝에서는 멈춘다
                 if (g !== null) {
                     x = nx
                     y = ny
                     ground = g
+                } else {
+                    vx = 0
+                    vy = 0
                 }
             }
             vz -= physics.gravity * dt

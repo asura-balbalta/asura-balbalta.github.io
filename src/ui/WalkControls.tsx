@@ -8,7 +8,8 @@ const CONTROLS: { key: keyof WalkPhysics; label: string; min: number; max: numbe
     { key: "gravity", label: "중력", min: 2, max: 40, step: 1, unit: "m/s²" },
     { key: "walkSpeed", label: "이동 속도", min: 2, max: 40, step: 1, unit: "m/s" },
     { key: "jumpSpeed", label: "점프", min: 2, max: 30, step: 1, unit: "m/s" },
-    { key: "dashFactor", label: "대시 배속", min: 1, max: 10, step: 0.5, unit: "배" },
+    { key: "dashSpeed", label: "대시 속도", min: 10, max: 150, step: 5, unit: "m/s" },
+    { key: "damping", label: "감속", min: 1, max: 10, step: 0.5, unit: "/s" },
 ]
 
 /**
@@ -53,7 +54,7 @@ export const WalkControls = ({
         ))}
         <div className="ui-walk-controls-note">
             기본값 중력 {DEFAULT_WALK_PHYSICS.gravity} · 이동 {DEFAULT_WALK_PHYSICS.walkSpeed} · 점프 {DEFAULT_WALK_PHYSICS.jumpSpeed} ·
-            대시 {DEFAULT_WALK_PHYSICS.dashFactor}배
+            대시 {DEFAULT_WALK_PHYSICS.dashSpeed} · 감속 {DEFAULT_WALK_PHYSICS.damping}
         </div>
     </div>
 )
