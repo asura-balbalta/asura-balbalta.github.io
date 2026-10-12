@@ -1,7 +1,7 @@
 import React, { useEffect, useId, useRef, useState } from "react"
 
 import { INITIAL_LAYER_STATES, LAYER_DEFS, LayerStates } from "../layers"
-import { createPlayer, Player, PlayerMove, USE_POINTER_LOCK } from "../player"
+import { createPlayer, Player, PlayerMove, USE_POINTER_LOCK, WalkPhysics } from "../player"
 import { TinMesh } from "../terrainData"
 import { createHeightSampler, HeightSampler } from "../terrainHeight"
 import { TERRAIN_THEMES, Theme } from "../terrainTheme"
@@ -9,9 +9,11 @@ import type { SteppedMeshRequest, SteppedMeshResponse } from "../terrainSteps.wo
 import { OrbitCamera } from "../webgpu/camera"
 import {
     createTerrainRenderFunctionAndUpdateFunctions,
+    DEFAULT_LIGHTING,
     MeshBounds,
     meshBounds,
     TerrainMode,
+    WALK_LIGHTING,
 } from "../webgpu/terrainRenderer"
 
 /** esbuild 가 src/terrainSteps.worker.ts 를 별도 entry 로 묶어 내는 파일. index.html 의 index.js 와 같은 폴더(dist)에 있다 */
@@ -82,6 +84,7 @@ const initialCamera = ({ min, max }: MeshBounds): OrbitCamera => ({
  *   1인칭 카메라를 쓴다(포인터 잠금은 ?lock=1 일 때만). 끌어서 회전·휠 확대는 그동안 막는다. 꺼지면 직전 궤도 카메라로 돌아간다
  * @param props.onWalkMove 플레이어 위치가 바뀔 때(약 10 Hz, 미니맵·상태 표시줄용)
  * @param props.onWalkExit 포인터 잠금이 풀렸을 때(Esc 등). 부모가 walking 을 끈다
+ * @param props.walkPhysics 걸어 보기 물리 값(중력·속도·점프·대시). 바뀌면 바로 플레이어에 반영
  */
 export const TerrainViewCanvas = ({
     mesh,
@@ -97,6 +100,7 @@ export const TerrainViewCanvas = ({
     walking = false,
     onWalkMove,
     onWalkExit,
+    walkPhysics,
 }: {
     mesh: TinMesh
     buildings?: TinMesh | null
@@ -111,6 +115,7 @@ export const TerrainViewCanvas = ({
     walking?: boolean
     onWalkMove?: (move: PlayerMove) => void
     onWalkExit?: () => void
+    walkPhysics?: Partial<WalkPhysics>
 }) => {
     // 콜백이 렌더마다 새로 만들어져도 메쉬 effect 를 다시 돌리지 않도록 ref 로 받는다
     const onDoneRef = useRef(onDone)
@@ -303,7 +308,8 @@ export const TerrainViewCanvas = ({
         return () => stop()
     }, [renderer, mesh, mode, stepInterval])
 
-    // 걸어 보기: 켜지면 지형 중앙에 플레이어를 세우고 포인터 잠금을 요청한다. 꺼지면(또는 mesh 가 바뀌면) 떼고 궤도 카메라로 복귀
+    // 걸어 보기: 켜지면 지형 중앙에 플레이어를 세우고 그림자·안개 조명으로 바꾼다. 꺼지면(또는 mesh 가 바뀌면) 떼고
+    // 궤도 카메라·기본 조명으로 복귀. 물리 값·층 간격은 아래 effect 가 따라 바꾼다
     useEffect(() => {
         const canvas = canvasRef.current
         if (!walking || !renderer || !canvas) return
@@ -314,16 +320,32 @@ export const TerrainViewCanvas = ({
             spawn: [(sampler.min[0] + sampler.max[0]) / 2, (sampler.min[1] + sampler.max[1]) / 2],
             onExit: () => onWalkExitRef.current?.(),
             onMove: (move) => onWalkMoveRef.current?.(move),
+            physics: walkPhysicsRef.current,
+            groundStep: groundStepRef.current,
         })
         walkRef.current = player
         pointersRef.current.clear()
+        renderer.updaters.lightingUpdater(WALK_LIGHTING)
         player.attach(canvas)
         return () => {
             walkRef.current = null
             player.detach()
+            renderer.updaters.lightingUpdater(DEFAULT_LIGHTING)
             if (cameraRef.current) renderer.updaters.cameraUpdater(cameraRef.current)
         }
     }, [walking, renderer, mesh])
+    const walkPhysicsRef = useRef(walkPhysics)
+    walkPhysicsRef.current = walkPhysics
+    useEffect(() => {
+        if (walkPhysics) walkRef.current?.setPhysics(walkPhysics)
+    }, [walkPhysics])
+    /** 계단형이면 층 간격, 아니면 null. 플레이어 발 높이를 계단 바닥에 맞추는 데 쓴다 */
+    const groundStep = mode === "stepped" ? stepInterval : null
+    const groundStepRef = useRef(groundStep)
+    groundStepRef.current = groundStep
+    useEffect(() => {
+        walkRef.current?.setGroundStep(groundStep)
+    }, [groundStep])
 
     /**
      * 현재 카메라에 변경을 적용하고 GPU uniform 에 반영한다.

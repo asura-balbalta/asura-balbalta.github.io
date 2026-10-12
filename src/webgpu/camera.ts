@@ -52,6 +52,19 @@ export const perspective = (
 }
 
 /**
+ * 직교 투영 행렬(섀도 맵의 빛 기준 투영). 카메라 좌표 상자 [l, r] × [b, t] × [-far, -near] 를 clip 공간(깊이 0 ~ 1)으로 옮긴다.
+ *
+ * @returns 투영 행렬
+ */
+export const ortho = (l: number, r: number, b: number, t: number, near: number, far: number): Mat4 =>
+    new Float32Array([
+        2 / (r - l), 0, 0, 0,
+        0, 2 / (t - b), 0, 0,
+        0, 0, -1 / (far - near), 0,
+        -(r + l) / (r - l), -(t + b) / (t - b), -near / (far - near), 1,
+    ])
+
+/**
  * 뷰 행렬을 만든다. 월드 좌표를 "eye 에서 target 을 바라보는 카메라" 기준 좌표로 옮긴다.
  *
  * 카메라 축: x = 화면 오른쪽, y = 화면 위, z = 카메라 뒤쪽(카메라는 자기 -z 방향을 본다).

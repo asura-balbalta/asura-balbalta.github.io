@@ -1,9 +1,15 @@
 import { LayerId } from "../layers"
 import { MeshChunk, TinMesh } from "../terrainData"
 import { hexToRgb, STOP_COUNT, stopsToUniform, TerrainTheme } from "../terrainTheme"
-import { Camera, cameraEye, cameraViewProj } from "./camera"
+import { Camera, cameraEye, cameraViewProj, fpsForward, isFpsCamera, lookAt, multiply, ortho, Vec3 } from "./camera"
 import { initWebGPU } from "./device"
-import { createBuildingShader, createSmoothTerrainShader, createSteppedTerrainShader } from "./shaders"
+import {
+    createBuildingShader,
+    createShadowShader,
+    createSmoothTerrainShader,
+    createSteppedTerrainShader,
+    SHADOW_MAP_SIZE,
+} from "./shaders"
 
 const DEPTH_FORMAT: GPUTextureFormat = "depth24plus"
 
@@ -12,7 +18,27 @@ type DepthHolder = { texture: GPUTexture; view: GPUTextureView; width: number; h
 const NORMAL_SMOOTH_ITERATIONS = 2
 const STOPS_OFFSET = 96 // 표고 색표 array<vec4f, STOP_COUNT> 의 시작 (shaders.ts 의 Uniforms 와 같아야 한다)
 const BUILDING_COLOR_OFFSET = STOPS_OFFSET + 16 * STOP_COUNT // 건물색 vec4f
-const UNIFORM_SIZE = BUILDING_COLOR_OFFSET + 16 // viewProj mat4x4f(0~64) + zRange vec2f(64~72) + eye vec3f(80~92) + stops + buildingColor
+const LIGHT_VP_OFFSET = BUILDING_COLOR_OFFSET + 16 // 빛 기준 viewProj mat4x4f
+const LIGHTING_OFFSET = LIGHT_VP_OFFSET + 64 // vec4f: 주변광, 난반사, 그림자 켬, 안개 밀도
+const FOG_COLOR_OFFSET = LIGHTING_OFFSET + 16 // vec4f: 안개색
+const UNIFORM_SIZE = FOG_COLOR_OFFSET + 16 // viewProj(0~64) + zRange(64~72) + eye(80~92) + stops + buildingColor + lightViewProj + lighting + fogColor
+const SHADOW_FORMAT: GPUTextureFormat = "depth32float"
+/** 빛 방향(표면에서 빛으로). shaders.ts 의 LIGHT_DIR 과 같아야 한다 */
+const LIGHT_DIR: Vec3 = [0.5, -0.5, 1]
+
+/**
+ * 조명 설정. 걸어 보기는 그림자·안개를 켜고 대비를 올려 입체감을 내고, 궤도 보기는 지도 톤(주변광 60%)을 유지한다.
+ * 그림자는 카메라 주변 shadowRadius(m) 상자만 섀도 맵(SHADOW_MAP_SIZE²)에 뜬다. 안개는 1 − e^(−거리·fogDensity)
+ */
+export type Lighting = {
+    ambient: number
+    diffuse: number
+    shadows: boolean
+    shadowRadius: number
+    fogDensity: number
+}
+export const DEFAULT_LIGHTING: Lighting = { ambient: 0.6, diffuse: 0.4, shadows: false, shadowRadius: 250, fogDensity: 0 }
+export const WALK_LIGHTING: Lighting = { ambient: 0.45, diffuse: 0.55, shadows: true, shadowRadius: 250, fogDensity: 1 / 1200 }
 
 /** 지형 표현 방식. tin: 정점 법선으로 부드럽게, stepped: 계단형(면 법선, 법선 버퍼 없음) */
 export type TerrainMode = "tin" | "stepped"
@@ -271,7 +297,17 @@ const createTerrainDrawingPassAndUpdaters = (
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     })
 
-    /** 파이프라인과 그 바인드그룹을 만든다 */
+    // 섀도 맵(빛 기준 깊이)과 비교 샘플러. 선형 필터를 주면 비교 결과가 보간돼(하드웨어 PCF) 가장자리가 부드럽다
+    const shadowTexture = device.createTexture({
+        label: "shadow map",
+        size: [SHADOW_MAP_SIZE, SHADOW_MAP_SIZE],
+        format: SHADOW_FORMAT,
+        usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+    })
+    const shadowView = shadowTexture.createView()
+    const shadowSampler = device.createSampler({ compare: "less", magFilter: "linear", minFilter: "linear" })
+
+    /** 파이프라인과 그 바인드그룹을 만든다(uniform + 섀도 맵 + 비교 샘플러) */
     const createPipelineSet = (
         name: string,
         shader: GPUShaderModuleDescriptor,
@@ -297,10 +333,35 @@ const createTerrainDrawingPassAndUpdaters = (
         const bindGroup = device.createBindGroup({
             label: `bind group (${name})`,
             layout: pipeline.getBindGroupLayout(0),
-            entries: [{ binding: 0, resource: { buffer: uniformBuffer } }],
+            entries: [
+                { binding: 0, resource: { buffer: uniformBuffer } },
+                { binding: 1, resource: shadowView },
+                { binding: 2, resource: shadowSampler },
+            ],
         })
         return { pipeline, bindGroup }
     }
+
+    // 섀도 pass 파이프라인: 정점 위치만 받아 빛 기준 깊이를 기록한다. 색 출력 없음. 깊이 바이어스로 자기 그림자를 줄인다
+    const shadowModule = device.createShaderModule(createShadowShader())
+    const shadowPipeline = device.createRenderPipeline({
+        label: "pipeline (shadow)",
+        layout: "auto",
+        vertex: { module: shadowModule, entryPoint: "vertexMain", buffers: [float32x3Layout(0)] },
+        primitive: { topology: "triangle-list", cullMode: "none" },
+        depthStencil: {
+            format: SHADOW_FORMAT,
+            depthWriteEnabled: true,
+            depthCompare: "less",
+            depthBias: 2,
+            depthBiasSlopeScale: 2,
+        },
+    })
+    const shadowBindGroup = device.createBindGroup({
+        label: "bind group (shadow)",
+        layout: shadowPipeline.getBindGroupLayout(0),
+        entries: [{ binding: 0, resource: { buffer: uniformBuffer } }],
+    })
 
     const pipelines: Record<TerrainMode | OverlayLayerId, ReturnType<typeof createPipelineSet>> = {
         tin: createPipelineSet("terrain tin", createSmoothTerrainShader(), [
@@ -492,6 +553,53 @@ const createTerrainDrawingPassAndUpdaters = (
         lastCamera = camera
         device.queue.writeBuffer(uniformBuffer, 0, cameraViewProj(camera, aspect))
         device.queue.writeBuffer(uniformBuffer, 80, new Float32Array(cameraEye(camera)))
+        if (lighting.shadows) device.queue.writeBuffer(uniformBuffer, LIGHT_VP_OFFSET, lightViewProj(camera))
+    }
+
+    let lighting: Lighting = DEFAULT_LIGHTING
+
+    /**
+     * 빛 기준 viewProj. 카메라 주변 shadowRadius 상자를 빛 방향에서 직교 투영한다. 1인칭이면 보는 방향 앞쪽에 상자를 두어
+     * 섀도 맵을 알차게 쓴다
+     */
+    const lightViewProj = (camera: Camera) => {
+        const r = lighting.shadowRadius
+        const eye = cameraEye(camera)
+        let focus: Vec3 = eye
+        if (isFpsCamera(camera)) {
+            const f = fpsForward(camera)
+            focus = [eye[0] + f[0] * r * 0.6, eye[1] + f[1] * r * 0.6, eye[2]]
+        } else {
+            focus = camera.target
+        }
+        const len = Math.hypot(...LIGHT_DIR)
+        const lightEye: Vec3 = [
+            focus[0] + (LIGHT_DIR[0] / len) * r * 2,
+            focus[1] + (LIGHT_DIR[1] / len) * r * 2,
+            focus[2] + (LIGHT_DIR[2] / len) * r * 2,
+        ]
+        return multiply(ortho(-r, r, -r, r, 0.1, r * 4), lookAt(lightEye, focus, [0, 0, 1]))
+    }
+
+    /**
+     * 조명(주변광·난반사·그림자·안개)을 바꾼다. 카메라가 있으면 빛 행렬도 다시 쓴다
+     *
+     * @param next 조명 설정
+     */
+    const lightingUpdater = (next: Lighting) => {
+        lighting = next
+        device.queue.writeBuffer(
+            uniformBuffer,
+            LIGHTING_OFFSET,
+            new Float32Array([next.ambient, next.diffuse, next.shadows ? 1 : 0, next.fogDensity]),
+        )
+        if (lastCamera) cameraUpdater(lastCamera)
+    }
+    lightingUpdater(DEFAULT_LIGHTING)
+
+    /** 안개색(배경색)을 쓴다. 테마 전환 때 배경색과 함께 */
+    const fogColorUpdater = ({ r, g, b }: { r: number; g: number; b: number }) => {
+        device.queue.writeBuffer(uniformBuffer, FOG_COLOR_OFFSET, new Float32Array([r, g, b, 1]))
     }
 
     /**
@@ -515,6 +623,31 @@ const createTerrainDrawingPassAndUpdaters = (
         device.queue.writeBuffer(uniformBuffer, STOPS_OFFSET, stopsToUniform(theme.stops))
         const { r, g, b } = hexToRgb(theme.buildingColor)
         device.queue.writeBuffer(uniformBuffer, BUILDING_COLOR_OFFSET, new Float32Array([r, g, b, 1]))
+    }
+
+    /**
+     * 섀도 맵을 뜨는 pass. 그림자가 켜져 있을 때만, 보이는 레이어의 조각을 빛 기준으로 깊이만 그린다(정점 버퍼 0 만 바인딩).
+     * 배경 pass 보다 먼저 실행한다
+     *
+     * @param encoder 이번 프레임의 command encoder
+     */
+    const shadowPass = (encoder: GPUCommandEncoder) => {
+        if (!lighting.shadows) return
+        const pass = encoder.beginRenderPass({
+            colorAttachments: [],
+            depthStencilAttachment: { view: shadowView, depthLoadOp: "clear", depthClearValue: 1, depthStoreOp: "store" },
+        })
+        pass.setPipeline(shadowPipeline)
+        pass.setBindGroup(0, shadowBindGroup)
+        for (const id of ["terrain", "buildings"] as LayerId[]) {
+            if (!layerVisible[id]) continue
+            for (const c of layerChunks[id]) {
+                pass.setVertexBuffer(0, c.vertexBuffer)
+                pass.setIndexBuffer(c.indexBuffer, "uint32")
+                pass.drawIndexed(c.indexCount)
+            }
+        }
+        pass.end()
     }
 
     /**
@@ -564,6 +697,9 @@ const createTerrainDrawingPassAndUpdaters = (
 
     return {
         scenePass,
+        shadowPass,
+        lightingUpdater,
+        fogColorUpdater,
         meshUpdater,
         meshStreamStarter,
         streamedMeshUpdater,
@@ -590,7 +726,7 @@ const createTerrainDrawingPassAndUpdaters = (
  * @param options.height 캔버스 실제 픽셀 높이
  * @param options.backgroundColor 처음 배경색(0 ~ 1). backgroundUpdater 로 바꿀 수 있다
  * @returns render(한 프레임 그리기), updaters(meshUpdater, meshStreamStarter, streamedMeshUpdater, layerMeshUpdater,
- *   layerVisibilityUpdater, cameraUpdater, paletteUpdater, backgroundUpdater, resizeUpdater), destroy(device 해제)
+ *   layerVisibilityUpdater, cameraUpdater, paletteUpdater, lightingUpdater, backgroundUpdater, resizeUpdater), destroy(device 해제)
  */
 export const createTerrainRenderFunctionAndUpdateFunctions = async ({
     canvasId,
@@ -620,15 +756,13 @@ export const createTerrainRenderFunctionAndUpdateFunctions = async ({
 
     const background = { color: backgroundColor }
     const backgroundPass = renderBackgroundPassFactory(background, depth)
-    const { scenePass, aspectUpdater, ...sceneUpdaters } = createTerrainDrawingPassAndUpdaters(
-        device,
-        format,
-        depth,
-        width / height,
-    )
-    /** 배경색을 바꾼다(다음 프레임부터). 테마 전환용 */
+    const { scenePass, shadowPass, aspectUpdater, fogColorUpdater, ...sceneUpdaters } =
+        createTerrainDrawingPassAndUpdaters(device, format, depth, width / height)
+    fogColorUpdater(backgroundColor)
+    /** 배경색(= 안개색)을 바꾼다(다음 프레임부터). 테마 전환용 */
     const backgroundUpdater = (color: { r: number; g: number; b: number }) => {
         background.color = color
+        fogColorUpdater(color)
     }
 
     /**
@@ -647,9 +781,10 @@ export const createTerrainRenderFunctionAndUpdateFunctions = async ({
         aspectUpdater(w / h)
     }
 
-    /** 한 프레임을 그린다: 배경 pass → 장면 pass 순으로 기록해 제출한다 */
+    /** 한 프레임을 그린다: 섀도 pass(그림자가 켜져 있을 때) → 배경 pass → 장면 pass 순으로 기록해 제출한다 */
     const render = () => {
         const encoder = device.createCommandEncoder()
+        shadowPass(encoder)
         backgroundPass(encoder, context)
         scenePass(encoder, context)
         device.queue.submit([encoder.finish()])

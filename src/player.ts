@@ -32,13 +32,27 @@ export type Player = {
     detach: () => void
     /** dt(초)만큼 진행하고 지금 카메라를 돌려준다 */
     step: (dt: number) => FpsCamera
+    /** 물리 값을 바꾼다(테스트용 조절 패널). 바로 반영된다 */
+    setPhysics: (next: Partial<WalkPhysics>) => void
+    /** 계단형 모드의 층 간격(m). 주면 발 높이를 층 바닥(floor(z / step) · step)으로 맞춰 계단 위를 걷는다. null 이면 매끈한 면 */
+    setGroundStep: (step: number | null) => void
 }
 
-const WALK_SPEED = 6
-const GRAVITY = 20
-const JUMP_SPEED = 8
+/** 조절할 수 있는 물리 값 */
+export type WalkPhysics = {
+    /** 중력 가속도(m/s²) */
+    gravity: number
+    /** 걷기 속도(m/s) */
+    walkSpeed: number
+    /** 점프 초속(m/s) */
+    jumpSpeed: number
+    /** 대시 중 속도 배수 */
+    dashFactor: number
+}
+/** 기본 물리 값. 조절 패널로 써 보고 정하면 여기를 바꾼다 by @nanangqq */
+export const DEFAULT_WALK_PHYSICS: WalkPhysics = { gravity: 20, walkSpeed: 6, jumpSpeed: 8, dashFactor: 3 }
+
 const MAX_AIR_JUMPS = 2
-const DASH_FACTOR = 3
 const DASH_DURATION = 0.25
 const DASH_TAP_WINDOW = 0.32
 const EYE_HEIGHT = 1.7
@@ -62,6 +76,8 @@ const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v
  * @param options.yaw 시작 방향(기본 북쪽)
  * @param options.onExit 포인터 잠금이 풀렸을 때(Esc, 창 전환, 요청 실패). 부모가 걸어 보기를 끝낸다
  * @param options.onMove 위치가 바뀔 때 약 10 Hz 로(미니맵·상태 표시줄용)
+ * @param options.physics 처음 물리 값(없는 항목은 기본값)
+ * @param options.groundStep 계단형 층 간격(m). setGroundStep 참고
  */
 export const createPlayer = ({
     sampler,
@@ -69,16 +85,28 @@ export const createPlayer = ({
     yaw: initialYaw = Math.PI / 2,
     onExit,
     onMove,
+    physics: initialPhysics,
+    groundStep: initialGroundStep = null,
 }: {
     sampler: HeightSampler
     spawn: [number, number]
     yaw?: number
     onExit: () => void
     onMove?: (move: PlayerMove) => void
+    physics?: Partial<WalkPhysics>
+    groundStep?: number | null
 }): Player => {
+    let physics: WalkPhysics = { ...DEFAULT_WALK_PHYSICS, ...initialPhysics }
+    let groundStep = initialGroundStep
+    /** 발 아래 지표 높이. 계단형이면 층 바닥으로 내림 */
+    const groundAt = (gx: number, gy: number) => {
+        const h = sampler.heightAt(gx, gy)
+        if (h === null) return null
+        return groundStep ? Math.floor(h / groundStep) * groundStep : h
+    }
     let x = clamp(spawn[0], sampler.min[0] + EDGE_MARGIN, sampler.max[0] - EDGE_MARGIN)
     let y = clamp(spawn[1], sampler.min[1] + EDGE_MARGIN, sampler.max[1] - EDGE_MARGIN)
-    let ground = sampler.heightAt(x, y) ?? sampler.min[2]
+    let ground = groundAt(x, y) ?? sampler.min[2]
     let z = ground
     let vz = 0
     let yaw = initialYaw
@@ -111,11 +139,11 @@ export const createPlayer = ({
         }
         if (code === "Space") {
             if (grounded) {
-                vz = JUMP_SPEED
+                vz = physics.jumpSpeed
                 grounded = false
                 airJumps = 0
             } else if (airJumps < MAX_AIR_JUMPS) {
-                vz = JUMP_SPEED
+                vz = physics.jumpSpeed
                 airJumps++
             }
         }
@@ -194,12 +222,12 @@ export const createPlayer = ({
             if (keys.has("KeyA") || keys.has("ArrowLeft")) s -= 1
             if (f !== 0 || s !== 0) {
                 const len = Math.hypot(f, s)
-                const speed = WALK_SPEED * (clock < dashUntil ? DASH_FACTOR : 1)
+                const speed = physics.walkSpeed * (clock < dashUntil ? physics.dashFactor : 1)
                 const dx = ((f * Math.cos(yaw) + s * Math.sin(yaw)) / len) * speed * dt
                 const dy = ((f * Math.sin(yaw) - s * Math.cos(yaw)) / len) * speed * dt
                 const nx = clamp(x + dx, sampler.min[0] + EDGE_MARGIN, sampler.max[0] - EDGE_MARGIN)
                 const ny = clamp(y + dy, sampler.min[1] + EDGE_MARGIN, sampler.max[1] - EDGE_MARGIN)
-                const g = sampler.heightAt(nx, ny)
+                const g = groundAt(nx, ny)
                 // 메쉬 밖(가장자리의 빈 삼각형)으로는 나가지 않는다
                 if (g !== null) {
                     x = nx
@@ -207,7 +235,7 @@ export const createPlayer = ({
                     ground = g
                 }
             }
-            vz -= GRAVITY * dt
+            vz -= physics.gravity * dt
             z += vz * dt
             if (z <= ground) {
                 z = ground
@@ -223,6 +251,14 @@ export const createPlayer = ({
                 notify()
             }
             return camera()
+        },
+        setPhysics: (next) => {
+            physics = { ...physics, ...next }
+        },
+        setGroundStep: (step) => {
+            groundStep = step
+            const g = groundAt(x, y)
+            if (g !== null) ground = g
         },
     }
 }

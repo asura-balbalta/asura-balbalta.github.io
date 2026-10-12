@@ -35,9 +35,10 @@ import { StatusPill } from "./ui/StatusPill"
 import { TabBar } from "./ui/TabBar"
 import { MOBILE_QUERY, useMediaQuery } from "./ui/useMediaQuery"
 import { LIQUID_GLASS_ENABLED, useLiquidGlass } from "./ui/liquidGlass"
+import { WalkControls } from "./ui/WalkControls"
 import { WalkHud } from "./ui/WalkHud"
-import { WalkPill } from "./ui/WalkPill"
-import type { PlayerMove } from "./player"
+import { PillPosition, WalkPill } from "./ui/WalkPill"
+import { DEFAULT_WALK_PHYSICS, PlayerMove, WalkPhysics } from "./player"
 import { clearPlayerMarker, showPlayerMarker } from "./playerMarker"
 import { transform } from "ol/proj"
 import { SearchBox, SearchStatus } from "./ui/SearchBox"
@@ -46,6 +47,24 @@ import { clearSearchPin, showSearchPin } from "./searchPin"
 import { SearchHandle, searchPlaces, SearchResult, trimDanglingJamo } from "./vworld"
 import { Button, Menu, MenuItem, MenuList, MenuPopover, MenuTrigger } from "@fluentui/react-components"
 import { TerrainMode } from "./webgpu/terrainRenderer"
+
+/** localStorage 의 JSON 값. 없거나 깨졌으면 기본값. 걸어 보기의 테스트용 물리 값·알약 위치 저장에 쓴다 */
+const readStored = <T,>(key: string, fallback: T): T => {
+    try {
+        const raw = localStorage.getItem(key)
+        return raw === null ? fallback : (JSON.parse(raw) as T)
+    } catch {
+        return fallback
+    }
+}
+const writeStored = (key: string, value: unknown) => {
+    try {
+        localStorage.setItem(key, JSON.stringify(value))
+    } catch {
+        /* 사생활 보호 모드 등에서 저장이 막히면 이번 세션에서만 유지된다 */
+    }
+}
+
 
 /** 처음 보여 줄 지형 표현 방식. "tin": 삼각형 메쉬 그대로, "stepped": 등고선 모형처럼 계단형. 설정 패널·상태 표시줄에서 바꾼다 */
 const INITIAL_TERRAIN_MODE: TerrainMode = "tin"
@@ -206,9 +225,32 @@ function App({
         clearPlayerMarker(map)
         if (view === "3d" && selection) map.getView().fit(selection, { padding: [20, 20, 20, 20] })
     }, [walking])
+    /** 걸어 보기에 들어가기 전의 지형 표현 방식. 들어가면 계단형으로 바꾸고 나올 때 되돌린다 */
+    const walkPrevModeRef = useRef<TerrainMode | null>(null)
     const startWalking = () => {
         setOpenPanel(null)
+        walkPrevModeRef.current = mode
+        if (mode !== "stepped") changeMode("stepped")
         setWalking(true)
+    }
+    useEffect(() => {
+        if (walking) return
+        const prev = walkPrevModeRef.current
+        walkPrevModeRef.current = null
+        if (prev && prev !== mode) changeMode(prev)
+    }, [walking])
+    /** 테스트용 물리 값. 브라우저에 저장해 새로고침해도 유지한다 */
+    const [walkPhysics, setWalkPhysics] = useState<WalkPhysics>(() => readStored("walkPhysics", DEFAULT_WALK_PHYSICS))
+    const changeWalkPhysics = (next: Partial<WalkPhysics>) => {
+        const merged = { ...walkPhysics, ...next }
+        setWalkPhysics(merged)
+        writeStored("walkPhysics", merged)
+    }
+    /** 진입 알약의 위치(끌어서 옮긴 것). null 이면 가운데 */
+    const [walkPillPos, setWalkPillPos] = useState<PillPosition | null>(() => readStored<PillPosition | null>("walkPillPos", null))
+    const moveWalkPill = (next: PillPosition) => {
+        setWalkPillPos(next)
+        writeStored("walkPillPos", next)
     }
     const stopWalking = () => {
         if (document.pointerLockElement) document.exitPointerLock()
@@ -569,6 +611,7 @@ function App({
                     walking={walking}
                     onWalkMove={onWalkMove}
                     onWalkExit={() => setWalking(false)}
+                    walkPhysics={walkPhysics}
                 />
             )}
             {/* 독(탭 막대)이 지도 틀보다 앞에 와야 Tab 키가 도구부터 닿는다. 겹침은 z-index 가 정한다. 걸어 보기 중에는 숨긴다 */}
@@ -615,8 +658,20 @@ function App({
             )}
 
             {/* 걸어 보기: 데스크톱 3D 화면 가운데 진입 알약, 들어가면 키 안내와 조준점(화면 시안 "걸어 보기") */}
-            {!isMobile && view === "3d" && terrainReady && !busy && !walking && <WalkPill onClick={startWalking} />}
+            {!isMobile && view === "3d" && terrainReady && !busy && !walking && (
+                <WalkPill position={walkPillPos} onMove={moveWalkPill} onClick={startWalking} />
+            )}
             {walking && <WalkHud />}
+            {walking && (
+                <WalkControls
+                    physics={walkPhysics}
+                    onChange={changeWalkPhysics}
+                    onReset={() => {
+                        setWalkPhysics(DEFAULT_WALK_PHYSICS)
+                        writeStored("walkPhysics", DEFAULT_WALK_PHYSICS)
+                    }}
+                />
+            )}
 
             {openPanel === "layers" && (
                 <Panel title="레이어" onClose={() => setOpenPanel(null)} above={panelAbove}>
