@@ -658,6 +658,63 @@ const createTerrainDrawingPassAndUpdaters = (
     }
 
     /**
+     * 걸어 보기 스트리밍 도엽(walkTiles): 도엽 id → GPU 조각. 지형 조각은 계단형 파이프라인(면 법선, 법선 버퍼 없음)으로,
+     * 건물은 건물 파이프라인으로 그린다. 선택 범위 메쉬(layerChunks)와는 별개로 들고, 나가면 streamClearUpdater 로 모두 비운다
+     */
+    const streamTiles = new Map<string, { terrain: GpuChunk[]; buildings: GpuChunk[] }>()
+    /** 스트리밍 도엽이 선택 범위를 다 덮었으면 선택 메쉬(지형·건물)는 그리지 않는다(겹치면 z-fighting) */
+    let streamCovers = false
+
+    /**
+     * 도엽 하나를 올리거나(이전 것은 교체) 뺀다(null).
+     *
+     * @param id 도엽 id
+     * @param tile 지형 조각(계단형)과 건물 메쉬. null 이면 뺀다
+     */
+    const streamTileUpdater = (id: string, tile: { terrain: MeshChunk[]; buildings: TinMesh | null } | null) => {
+        const prev = streamTiles.get(id)
+        if (prev) {
+            destroyChunks(prev.terrain)
+            destroyChunks(prev.buildings)
+            streamTiles.delete(id)
+        }
+        if (!tile) return
+        const terrain = tile.terrain.map((c) => uploadChunk(`tile ${id}`, c))
+        const buildings: GpuChunk[] = []
+        if (tile.buildings) {
+            const b = tile.buildings
+            for (const c of splitMeshIntoChunks(b.positions, b.indices, undefined, device.limits.maxBufferSize)) {
+                buildings.push(uploadChunk(`tile ${id} buildings`, c))
+            }
+        }
+        streamTiles.set(id, { terrain, buildings })
+    }
+    const streamCoverUpdater = (covers: boolean) => {
+        streamCovers = covers
+    }
+    const streamClearUpdater = () => {
+        for (const t of streamTiles.values()) {
+            destroyChunks(t.terrain)
+            destroyChunks(t.buildings)
+        }
+        streamTiles.clear()
+        streamCovers = false
+    }
+    /** 이번 프레임에 그릴 (조각, 파이프라인) 목록: 선택 메쉬(스트리밍이 덮지 않았을 때) + 스트리밍 도엽 */
+    const collectDraws = () => {
+        const draws: { chunks: GpuChunk[]; set: ReturnType<typeof createPipelineSet> }[] = []
+        if (!streamCovers) {
+            if (layerVisible.terrain && layerChunks.terrain.length > 0) draws.push({ chunks: layerChunks.terrain, set: pipelines[mode] })
+            if (layerVisible.buildings && layerChunks.buildings.length > 0) draws.push({ chunks: layerChunks.buildings, set: pipelines.buildings })
+        }
+        for (const t of streamTiles.values()) {
+            if (layerVisible.terrain && t.terrain.length > 0) draws.push({ chunks: t.terrain, set: pipelines.stepped })
+            if (layerVisible.buildings && t.buildings.length > 0) draws.push({ chunks: t.buildings, set: pipelines.buildings })
+        }
+        return draws
+    }
+
+    /**
      * 섀도 맵을 뜨는 pass. 그림자가 켜져 있을 때만, 보이는 레이어의 조각을 빛 기준으로 깊이만 그린다(정점 버퍼 0 만 바인딩).
      * 배경 pass 보다 먼저 실행한다
      *
@@ -671,9 +728,8 @@ const createTerrainDrawingPassAndUpdaters = (
         })
         pass.setPipeline(shadowPipeline)
         pass.setBindGroup(0, shadowBindGroup)
-        for (const id of ["terrain", "buildings"] as LayerId[]) {
-            if (!layerVisible[id]) continue
-            for (const c of layerChunks[id]) {
+        for (const { chunks } of collectDraws()) {
+            for (const c of chunks) {
                 pass.setVertexBuffer(0, c.vertexBuffer)
                 pass.setIndexBuffer(c.indexBuffer, "uint32")
                 pass.drawIndexed(c.indexCount)
@@ -691,13 +747,7 @@ const createTerrainDrawingPassAndUpdaters = (
      * @param target 그릴 색 텍스처 view(캔버스 또는 오프스크린 장면 텍스처)
      */
     const scenePass = (encoder: GPUCommandEncoder, target: GPUTextureView) => {
-        const draws: { chunks: GpuChunk[]; set: ReturnType<typeof createPipelineSet> }[] = []
-        if (layerVisible.terrain && layerChunks.terrain.length > 0) {
-            draws.push({ chunks: layerChunks.terrain, set: pipelines[mode] })
-        }
-        if (layerVisible.buildings && layerChunks.buildings.length > 0) {
-            draws.push({ chunks: layerChunks.buildings, set: pipelines.buildings })
-        }
+        const draws = collectDraws()
         if (draws.length === 0) return
 
         const pass = encoder.beginRenderPass({
@@ -734,6 +784,9 @@ const createTerrainDrawingPassAndUpdaters = (
         currentLighting,
         setCameraListener,
         fogColorUpdater,
+        streamTileUpdater,
+        streamCoverUpdater,
+        streamClearUpdater,
         meshUpdater,
         meshStreamStarter,
         streamedMeshUpdater,

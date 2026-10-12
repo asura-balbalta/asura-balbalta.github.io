@@ -182,17 +182,37 @@ export const loadBuildingCodes = async (): Promise<BuildingCodeTable> => {
 /** 층고 표만 필요할 때(loadBuildingCodes 의 storeyByUse) */
 export const loadStoreyHeights = async (): Promise<Float32Array> => (await loadBuildingCodes()).storeyByUse
 
+/** 파싱한 5K 건물 파일 캐시(path → 결과). 걸어 보기 도엽 스트리밍이 도엽마다 부를 때 같은 5K 를 다시 받지 않게 */
+const bfpCache = new Map<string, Promise<ReturnType<typeof parseBfp>>>()
+const fetchBfpCached = (path: string) => {
+    let p = bfpCache.get(path)
+    if (!p) {
+        p = fetchGunzip(`${BUILDINGS_BASE}/${path}`).then(parseBfp)
+        bfpCache.set(path, p)
+        p.catch(() => bfpCache.delete(path))
+    }
+    return p
+}
+/** 건물명 파일 캐시(id5k → 파싱 결과) */
+const namesCache = new Map<string, Promise<BuildingNamesFile>>()
+const fetchNamesCached = (id5k: string) => {
+    let p = namesCache.get(id5k)
+    if (!p) {
+        p = fetchGunzip(`${BUILDINGS_BASE}/names/v1/${id5k.slice(0, 5)}/${id5k}.json.gz`).then(
+            (bytes) => JSON.parse(new TextDecoder().decode(bytes)) as BuildingNamesFile,
+        )
+        namesCache.set(id5k, p)
+        p.catch(() => namesCache.delete(id5k))
+    }
+    return p
+}
+
 /**
  * 5K 번호들의 건물명 파일(names/v1)을 받아 id → 이름으로 합친다. 5K 경계에 걸친 건물은 양쪽 파일에 같은 값이 있어
  * 먼저 본 것을 쓴다. 이름 없는 5K 는 n: 0 인 빈 파일이라 존재 여부를 따로 확인하지 않는다
  */
 const loadBuildingNames = async (ids5k: string[]) => {
-    const files = await Promise.all(
-        ids5k.map(async (id5k) => {
-            const bytes = await fetchGunzip(`${BUILDINGS_BASE}/names/v1/${id5k.slice(0, 5)}/${id5k}.json.gz`)
-            return JSON.parse(new TextDecoder().decode(bytes)) as BuildingNamesFile
-        }),
-    )
+    const files = await Promise.all(ids5k.map(fetchNamesCached))
     const byId = new Map<number, { name: string; dong: string; src: number }>()
     for (const f of files) for (let i = 0; i < f.n; i++) if (!byId.has(f.id[i])) byId.set(f.id[i], { name: f.name[i], dong: f.dong[i], src: f.src[i] })
     return byId
@@ -236,7 +256,7 @@ export const loadBuildings = async (
     const [files, names] = await Promise.all([
         Promise.all(
             targets.map(async (t) => {
-                const file = parseBfp(await fetchGunzip(`${BUILDINGS_BASE}/${t.path}`))
+                const file = await fetchBfpCached(t.path)
                 onProgress?.("download", ++downloaded, targets.length)
                 return file
             }),

@@ -4,6 +4,8 @@ import { INITIAL_LAYER_STATES, LAYER_DEFS, LayerStates } from "../layers"
 import { createPlayer, Player, PlayerMove, WalkPhysics } from "../player"
 import { TinMesh } from "../terrainData"
 import { createHeightSampler, HeightSampler } from "../terrainHeight"
+import { startWalkTiles } from "../walkTilesClient"
+import type { Extent } from "ol/extent"
 import { TERRAIN_THEMES, Theme } from "../terrainTheme"
 import type { SteppedMeshRequest, SteppedMeshResponse } from "../terrainSteps.worker"
 import { OrbitCamera } from "../webgpu/camera"
@@ -25,6 +27,10 @@ const STEPS_WORKER_URL = "terrainSteps.worker.js"
  * 비용은 draw call 수와 조각 경계의 중복 정점(1% 미만)뿐이다
  */
 const STEPPED_CHUNK_BYTES = 64 * 1048576
+/** 걸어 보기 도엽 스트리밍: 로드 반경(m), 도엽 상한, 다시 조회하는 이동 거리(m) */
+const WALK_TILE_RADIUS = 1000
+const WALK_TILE_MAX = 60
+const WALK_TILE_UPDATE_M = 100
 
 /** 창 크기와 devicePixelRatio. canvas 속성은 width·height × dpr, style 은 width·height */
 const readViewportSize = () => ({
@@ -87,6 +93,8 @@ const initialCamera = ({ min, max }: MeshBounds): OrbitCamera => ({
  * @param props.onWalkFocusChange 포커스가 잡히거나 풀렸을 때(Esc 등). 부모가 안내 문구를 바꾼다
  * @param props.walkPhysics 걸어 보기 물리 값(중력·속도·점프·대시). 바뀌면 바로 플레이어에 반영
  * @param props.onWalkFrameTime 걸어 보기 중 프레임 간격(ms, 최근 평균)을 0.5초마다. rAF 간격이라 GPU 가 병목이면 그만큼 늘어난다
+ * @param props.walkSelection 선택 범위(3857). 걸어 보기 중 주변 도엽을 스트리밍(walkTiles)하고, 선택 범위를 다 덮으면 선택 메쉬를 숨긴다
+ * @param props.onWalkTileCount 스트리밍으로 들고 있는 도엽 수가 바뀔 때
  */
 export const TerrainViewCanvas = ({
     mesh,
@@ -105,6 +113,8 @@ export const TerrainViewCanvas = ({
     onWalkFocusChange,
     walkPhysics,
     onWalkFrameTime,
+    walkSelection,
+    onWalkTileCount,
 }: {
     mesh: TinMesh
     buildings?: TinMesh | null
@@ -122,6 +132,8 @@ export const TerrainViewCanvas = ({
     onWalkFocusChange?: (focused: boolean) => void
     walkPhysics?: Partial<WalkPhysics>
     onWalkFrameTime?: (ms: number) => void
+    walkSelection?: Extent
+    onWalkTileCount?: (count: number) => void
 }) => {
     // 콜백이 렌더마다 새로 만들어져도 메쉬 effect 를 다시 돌리지 않도록 ref 로 받는다
     const onDoneRef = useRef(onDone)
@@ -136,6 +148,10 @@ export const TerrainViewCanvas = ({
     onWalkFocusChangeRef.current = onWalkFocusChange
     const onWalkFrameTimeRef = useRef(onWalkFrameTime)
     onWalkFrameTimeRef.current = onWalkFrameTime
+    const onWalkTileCountRef = useRef(onWalkTileCount)
+    onWalkTileCountRef.current = onWalkTileCount
+    const walkSelectionRef = useRef(walkSelection)
+    walkSelectionRef.current = walkSelection
     /** 걸어 보기 중인 플레이어. 렌더 루프가 프레임마다 step 해 카메라를 쓴다 */
     const walkRef = useRef<Player | null>(null)
     /** mesh 별 지형 높이 조회기(걸어 보기에 들어갈 때 만들고 같은 mesh 면 다시 쓴다) */
@@ -338,11 +354,74 @@ export const TerrainViewCanvas = ({
         if (!walking || !renderer || !canvas) return
         if (samplerRef.current?.mesh !== mesh) samplerRef.current = { mesh, sampler: createHeightSampler(mesh) }
         const { sampler } = samplerRef.current
+        // 스트리밍 도엽까지 합친 높이 조회기. 선택 범위 메쉬를 먼저 보고, 없으면 도엽들을 본다.
+        // min·max 는 도엽이 오갈 때마다 다시 재며 플레이어가 매 프레임 읽는다(범위 밖 클램프)
+        const tiles = new Map<string, HeightSampler>()
+        const combined: HeightSampler = {
+            heightAt: (x, y) => {
+                const h = sampler.heightAt(x, y)
+                if (h !== null) return h
+                for (const t of tiles.values()) {
+                    if (x < t.min[0] || x > t.max[0] || y < t.min[1] || y > t.max[1]) continue
+                    const th = t.heightAt(x, y)
+                    if (th !== null) return th
+                }
+                return null
+            },
+            min: [...sampler.min],
+            max: [...sampler.max],
+        }
+        const refit = () => {
+            const mn: [number, number, number] = [...sampler.min]
+            const mx: [number, number, number] = [...sampler.max]
+            for (const t of tiles.values()) {
+                for (let k = 0; k < 3; k++) {
+                    mn[k] = Math.min(mn[k], t.min[k])
+                    mx[k] = Math.max(mx[k], t.max[k])
+                }
+            }
+            combined.min = mn
+            combined.max = mx
+            onWalkTileCountRef.current?.(tiles.size)
+        }
+        // 주변 도엽 스트리밍(선택 범위를 알 때만). 100 m 움직일 때마다 새 중심을 알린다
+        const selection = walkSelectionRef.current
+        let lastCenter: [number, number] | null = null
+        const tilesClient = selection
+            ? startWalkTiles({
+                  origin: mesh.origin,
+                  selection,
+                  step: stepInterval,
+                  maxBytes: STEPPED_CHUNK_BYTES,
+                  radius: WALK_TILE_RADIUS,
+                  maxTiles: WALK_TILE_MAX,
+                  onTile: (tile) => {
+                      renderer.updaters.streamTileUpdater(tile.id, { terrain: tile.terrain, buildings: tile.buildings })
+                      tiles.set(tile.id, createHeightSampler(tile.tin))
+                      refit()
+                  },
+                  onRemove: (id) => {
+                      renderer.updaters.streamTileUpdater(id, null)
+                      tiles.delete(id)
+                      refit()
+                  },
+                  onCovers: (covers) => renderer.updaters.streamCoverUpdater(covers),
+                  onError: (message) => console.error("도엽 스트리밍:", message),
+              })
+            : null
         const player = createPlayer({
-            sampler,
+            sampler: combined,
             spawn: [(sampler.min[0] + sampler.max[0]) / 2, (sampler.min[1] + sampler.max[1]) / 2],
             onFocusChange: (focused) => onWalkFocusChangeRef.current?.(focused),
-            onMove: (move) => onWalkMoveRef.current?.(move),
+            onMove: (move) => {
+                onWalkMoveRef.current?.(move)
+                if (!tilesClient) return
+                const center: [number, number] = [move.x + mesh.origin[0], move.y + mesh.origin[1]]
+                if (!lastCenter || Math.hypot(center[0] - lastCenter[0], center[1] - lastCenter[1]) >= WALK_TILE_UPDATE_M) {
+                    lastCenter = center
+                    tilesClient.update(center)
+                }
+            },
             physics: walkPhysicsRef.current,
             groundStep: groundStepRef.current,
         })
@@ -353,6 +432,9 @@ export const TerrainViewCanvas = ({
         return () => {
             walkRef.current = null
             player.detach()
+            tilesClient?.terminate()
+            renderer.updaters.streamClearUpdater()
+            onWalkTileCountRef.current?.(0)
             renderer.updaters.lightingUpdater(DEFAULT_LIGHTING)
             if (cameraRef.current) renderer.updaters.cameraUpdater(cameraRef.current)
         }

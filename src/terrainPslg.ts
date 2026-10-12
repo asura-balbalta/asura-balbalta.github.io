@@ -20,7 +20,7 @@ type TtpPiece = {
 type TtpPoints = { n: number; xy: Int32Array; z: Float32Array }
 
 /** TTP1 파일 안의 1K 도엽 하나. 배열은 파일 버퍼를 가리키는 view 다 */
-type TtpTile = {
+export type TtpTile = {
     mapId: string
     /** 파일 원점(ESRI:102080, 정수 m) */
     origin: [number, number]
@@ -141,7 +141,7 @@ const assertExtentWithinLimit = (tiles: { corners: [number, number][] }[]) => {
  * @param onProgress 단계별 진행률. "merge" 는 도엽 하나를 합칠 때마다(합친 수, 전체), 재삼각분할 직전에 "retriangulate"
  * @returns 삼각분할된 메쉬(원점 기준 m)
  */
-const mergeTtpTiles = (
+export const mergeTtpTiles = (
     tiles: TtpTile[],
     commonOrigin: [number, number],
     onProgress?: LoadProgress,

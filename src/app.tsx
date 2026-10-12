@@ -217,6 +217,8 @@ function App({
     const [walkGround, setWalkGround] = useState<number | null>(null)
     /** 걸어 보기 중 프레임 간격(ms). 렌더링 비용 확인용으로 상태 표시줄에 보인다 */
     const [walkFrameMs, setWalkFrameMs] = useState<number | null>(null)
+    /** 걸어 보기 중 스트리밍으로 들고 있는 주변 도엽 수 */
+    const [walkTileCount, setWalkTileCount] = useState(0)
     useEffect(() => {
         if (view !== "3d" || !mesh || isMobile) setWalking(false)
     }, [view, mesh, isMobile])
@@ -585,6 +587,7 @@ function App({
     if (sheetCount !== null) stats.push(`도엽 ${sheetCount}`)
     if (walking && walkGround !== null) stats.push(`표고 ${walkGround.toFixed(1)} m`)
     if (walking && walkFrameMs !== null) stats.push(`프레임 ${walkFrameMs.toFixed(1)} ms`)
+    if (walking && walkTileCount > 0) stats.push(`주변 도엽 ${walkTileCount}`)
     if (stats.length === 0 && !selecting) stats.push("범위 없음")
     if (selecting) stats.unshift("범위 그리는 중")
 
@@ -637,6 +640,8 @@ function App({
                     onWalkFocusChange={onWalkFocusChange}
                     walkPhysics={walkPhysics}
                     onWalkFrameTime={setWalkFrameMs}
+                    walkSelection={selection ?? undefined}
+                    onWalkTileCount={setWalkTileCount}
                 />
             )}
             {/* 독(탭 막대)이 지도 틀보다 앞에 와야 Tab 키가 도구부터 닿는다. 겹침은 z-index 가 정한다. 걸어 보기 중에는 숨긴다 */}
