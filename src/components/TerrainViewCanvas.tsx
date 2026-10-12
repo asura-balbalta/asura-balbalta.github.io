@@ -1,7 +1,7 @@
 import React, { useEffect, useId, useRef, useState } from "react"
 
 import { INITIAL_LAYER_STATES, LAYER_DEFS, LayerStates } from "../layers"
-import { createPlayer, Player, PlayerMove } from "../player"
+import { createPlayer, Player, PlayerMove, USE_POINTER_LOCK } from "../player"
 import { TinMesh } from "../terrainData"
 import { createHeightSampler, HeightSampler } from "../terrainHeight"
 import { TERRAIN_THEMES, Theme } from "../terrainTheme"
@@ -78,8 +78,8 @@ const initialCamera = ({ min, max }: MeshBounds): OrbitCamera => ({
  * @param props.onProgress stepped 모드의 변환 진행률(처리한 원본 삼각형 비율 0 ~ 1). 약 100ms 간격으로 불리고 끝에 1 이 온다
  * @param props.onFirstChunk stepped 모드에서 첫 조각이 화면에 올라갔을 때. 부모가 지도를 미니맵으로 옮기는 데 쓴다
  * @param props.hidden true 면 캔버스를 보이지 않게 한다(지도 화면으로 돌아갔을 때). 렌더러·메쉬는 그대로라 다시 보이면 즉시 그려진다
- * @param props.walking 걸어 보기(1인칭, player.ts). 켜지면 포인터 잠금을 요청하고 렌더 루프가 프레임마다 플레이어를 진행해
- *   1인칭 카메라를 쓴다. 끌어서 회전·휠 확대는 그동안 막는다. 꺼지면 직전 궤도 카메라로 돌아간다
+ * @param props.walking 걸어 보기(1인칭, player.ts). 켜지면 렌더 루프가 프레임마다 플레이어를 진행해
+ *   1인칭 카메라를 쓴다(포인터 잠금은 ?lock=1 일 때만). 끌어서 회전·휠 확대는 그동안 막는다. 꺼지면 직전 궤도 카메라로 돌아간다
  * @param props.onWalkMove 플레이어 위치가 바뀔 때(약 10 Hz, 미니맵·상태 표시줄용)
  * @param props.onWalkExit 포인터 잠금이 풀렸을 때(Esc 등). 부모가 walking 을 끈다
  */
@@ -366,7 +366,8 @@ export const TerrainViewCanvas = ({
                 width: size.width,
                 height: size.height,
                 visibility: hidden ? "hidden" : "visible",
-                cursor: walking ? "none" : "grab",
+                // 걸어 보기 중 커서는 포인터 잠금일 때만 숨긴다. 잠금이 없으면 가장자리에 닿아 회전이 멈추는 것을 볼 수 있어야 한다
+                cursor: walking ? (USE_POINTER_LOCK ? "none" : "default") : "grab",
                 // 터치를 브라우저의 스크롤·핀치 제스처로 넘기지 않는다. 없으면 세로 끌기에 주소 표시줄이 반응하며
                 // pointercancel 로 입력이 끊기고, 두 손가락 벌리기는 페이지 확대가 된다
                 touchAction: "none",

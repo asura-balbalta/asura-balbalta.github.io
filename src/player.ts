@@ -11,8 +11,9 @@ import { FpsCamera } from "./webgpu/camera"
  *
  * 좌표는 메쉬 로컬(z-up, m). yaw 0 = 동쪽, 반시계. pitch 는 수평선 위로(라디안)
  *
- * URL ?lock=0 이면 포인터 잠금 없이 걷는다(디버그: 앱 내장 브라우저는 포인터 잠금을 지원하지 않는다). 그때는 마우스가 어디서
- * 움직이든 시점이 돌고, Esc 키로 나간다
+ * 포인터 잠금은 기본으로 쓰지 않는다(잠금 없는 쪽을 골랐다 by @nanangqq, 2026-10-12): 커서가 보인 채 마우스가 어디서 움직이든 시점이
+ * 돌고, Esc 키로 나간다. 마우스가 화면 가장자리에 닿으면 그 방향으로는 더 못 돈다. URL ?lock=1 이면 포인터 잠금을 쓴다
+ * (커서 숨김, 무한 회전, Esc 로 잠금이 풀리면 나감). 앱 내장 브라우저는 잠금을 지원하지 않는다
  */
 export type PlayerMove = {
     /** 발 위치(메쉬 로컬, m) */
@@ -50,8 +51,8 @@ const EDGE_MARGIN = 0.5
 /** onMove 알림 간격(초) */
 const MOVE_NOTIFY_INTERVAL = 0.1
 const MAX_DT = 0.05
-/** 포인터 잠금을 쓸지(?lock=0 이면 안 씀) */
-const USE_POINTER_LOCK = new URLSearchParams(window.location.search).get("lock") !== "0"
+/** 포인터 잠금을 쓸지. 기본은 안 씀, ?lock=1 이면 씀 */
+export const USE_POINTER_LOCK = new URLSearchParams(window.location.search).get("lock") === "1"
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v))
 
