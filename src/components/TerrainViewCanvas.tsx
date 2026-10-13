@@ -3,7 +3,7 @@ import React, { useEffect, useId, useRef, useState } from "react"
 import { INITIAL_LAYER_STATES, LAYER_DEFS, LayerStates } from "../layers"
 import { createPlayer, Player, PlayerMove, WalkPhysics } from "../player"
 import { TinMesh } from "../terrainData"
-import { createHeightSampler, HeightSampler } from "../terrainHeight"
+import { createHeightSampler, HeightSampler, nearestTriangleCentroid } from "../terrainHeight"
 import { startWalkTiles } from "../walkTilesClient"
 import type { Extent } from "ol/extent"
 import { TERRAIN_THEMES, Theme } from "../terrainTheme"
@@ -429,9 +429,12 @@ export const TerrainViewCanvas = ({
                   onError: (message) => console.error("도엽 스트리밍:", message),
               })
             : null
+        // 시작점: 선택 범위 가운데. 거기에 메쉬가 없으면(도엽 없는 바다 등) 가장 가까운 삼각형 위로
+        const center: [number, number] = [(sampler.min[0] + sampler.max[0]) / 2, (sampler.min[1] + sampler.max[1]) / 2]
+        const spawn = sampler.heightAt(center[0], center[1]) !== null ? center : (nearestTriangleCentroid(mesh, center[0], center[1]) ?? center)
         const player = createPlayer({
             sampler: combined,
-            spawn: [(sampler.min[0] + sampler.max[0]) / 2, (sampler.min[1] + sampler.max[1]) / 2],
+            spawn,
             onFocusChange: (focused) => onWalkFocusChangeRef.current?.(focused),
             onMove: (move) => {
                 onWalkMoveRef.current?.(move)

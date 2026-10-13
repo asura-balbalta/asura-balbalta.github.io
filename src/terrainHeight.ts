@@ -92,3 +92,27 @@ export const createHeightSampler = (mesh: TinMesh, options: { highest?: boolean 
     }
     return { heightAt, min, max }
 }
+
+/**
+ * 점 (x, y)에서 가장 가까운 삼각형의 무게중심. 선택 범위 가운데가 메쉬 구멍(도엽 없는 바다 등)일 때 걸어 보기 시작점을
+ * 메쉬 위로 옮기는 데 쓴다. 무게중심은 늘 삼각형 안이라 그 자리의 높이 조회가 null 이 아니다. 삼각형 수에 선형.
+ *
+ * @returns 무게중심 xy. 삼각형이 없으면 null
+ */
+export const nearestTriangleCentroid = (mesh: TinMesh, x: number, y: number): [number, number] | null => {
+    const p = mesh.positions
+    const idx = mesh.indices
+    let best: [number, number] | null = null
+    let bestD = Infinity
+    for (let t = 0; t < idx.length; t += 3) {
+        const a = idx[t] * 3, b = idx[t + 1] * 3, c = idx[t + 2] * 3
+        const cx = (p[a] + p[b] + p[c]) / 3
+        const cy = (p[a + 1] + p[b + 1] + p[c + 1]) / 3
+        const d = (cx - x) * (cx - x) + (cy - y) * (cy - y)
+        if (d < bestD) {
+            bestD = d
+            best = [cx, cy]
+        }
+    }
+    return best
+}
