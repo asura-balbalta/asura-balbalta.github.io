@@ -89,7 +89,7 @@ export const WalkPill = ({
         >
             <span className="ui-walk-pill-inner">
                 <GamesRegular fontSize={24} />
-                걸어 보기
+                둘러보기
             </span>
         </button>
     )

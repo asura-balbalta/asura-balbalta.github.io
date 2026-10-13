@@ -762,7 +762,7 @@ function App({
                 // 시트가 열려 있으면 알약은 시트 위에 얹혀 있다(above)
                 openPanel ? null : mobilePill
             ) : (
-                <StatusBar progress={progress} status={walking ? "걸어 보기 중" : undefined} stats={stats} menus={menus}>
+                <StatusBar progress={progress} status={walking ? "둘러보는 중" : undefined} stats={stats} menus={menus}>
                     {walking && (
                         <Button appearance="subtle" size="small" className="ui-statusbar-action" onClick={stopWalking}>
                             나가기
