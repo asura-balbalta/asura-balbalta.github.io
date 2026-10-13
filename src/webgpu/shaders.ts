@@ -1,4 +1,5 @@
 import { STOP_COUNT } from "../terrainTheme"
+import { skyWgsl } from "./sky"
 
 /** 섀도 맵 한 변(텍셀). 걸어 보기의 그림자 상자(반지름 SHADOW_RADIUS m)를 이 해상도로 덮는다 */
 export const SHADOW_MAP_SIZE = 2048
@@ -12,6 +13,7 @@ export const SHADOW_MAP_SIZE = 2048
  *   + lighting(vec4f: 주변광, 난반사, 그림자 켬(0/1), 안개 밀도 1/m)
  *   + fogColor(vec4f: 안개색 = 배경색)
  *   + hemi(vec4f: x = 반구 조명 세기. 주변광을 위를 향한 면 100%, 수직면 (1 − x)·100% 로 가른다. 하늘빛이 위에서 온다는 단서)
+ *   + lightViewProjNear(가까운 캐스케이드) + sky(vec4f: xyz 태양 방향, w 하늘 켬. 켜지면 안개 목표색이 그 방향의 하늘색(sky.ts))
  *   오프셋은 terrainRenderer.ts 의 상수와 같아야 한다
  * - binding 1·2: 섀도 맵(depth)과 비교 샘플러. 셰이더가 쓰지 않으면(섀도 pass 의 정점 셰이더) layout "auto" 가 뺀다
  * - terrainColor(): 절대 표고 → 바탕색. 색표는 uniform 이라 테마 전환은 셰이더를 바꾸지 않고 uniform 만 다시 쓴다
@@ -35,13 +37,16 @@ const commonWgsl = /* wgsl */ `
         fogColor: vec4f, // 안개색(배경색)
         hemi: vec4f, // x 반구 조명 세기(0 이면 없음)
         lightViewProjNear: mat4x4f, // 가까운 캐스케이드(카메라 주변 40 m, 텍셀 4 cm)의 빛 기준 투영
+        sky: vec4f, // xyz 태양 방향(하늘·안개용), w 하늘 켬(0/1)
     };
     @group(0) @binding(0) var<uniform> u: Uniforms;
     @group(0) @binding(1) var shadowMap: texture_depth_2d;
     @group(0) @binding(2) var shadowSampler: sampler_comparison;
     @group(0) @binding(3) var shadowMapNear: texture_depth_2d;
 
-    const LIGHT_DIR = vec3f(0.5, -0.5, 1.0); // 남동쪽 위에서 비추는 빛(고도각 약 55°). 지도 음영 관례는 북서(315°)이나 비교를 위해 바꿔 봄
+    const LIGHT_DIR = vec3f(0.40825, -0.40825, 1.0); // 남동쪽 위에서 비추는 빛(고도각 60°, 하늘의 태양과 같은 방위). 지도 음영 관례는 북서(315°)
+
+    ${skyWgsl}
 
     // 단계 사이는 선형 보간, 양 끝 밖은 끝 색
     fn terrainColor(z: f32) -> vec3f {
@@ -100,7 +105,10 @@ const commonWgsl = /* wgsl */ `
         let lit = base * (u.lighting.x * sky + u.lighting.y * diffuse);
         let d = distance(u.eye, world);
         let fog = clamp(1.0 - exp(-d * u.lighting.w), 0.0, 1.0);
-        return mix(lit, u.fogColor.rgb, fog);
+        // 안개 목표색: 하늘이 켜져 있으면 그 방향의 하늘색(멀어지는 지형이 하늘로 녹아든다), 아니면 배경색
+        var fogColor = u.fogColor.rgb;
+        if (u.sky.w > 0.5) { fogColor = skyColor((world - u.eye) / max(d, 1e-3), u.sky.xyz); }
+        return mix(lit, fogColor, fog);
     }
 `
 

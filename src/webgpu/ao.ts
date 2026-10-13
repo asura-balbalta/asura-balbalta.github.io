@@ -11,7 +11,10 @@ import { Mat4, Vec3 } from "./camera"
  *    평평한 면에서의 거짓 가림을 막으려고 깊이 비교 여유는 거리에 비례해 키우고 표본 시작점은 법선 쪽으로 띄운다
  *    (비스듬히 본 바닥은 한 픽셀이 수십 cm 라 고정 여유 5 cm 로는 복원 오차가 넘쳤다). 결과는 r8unorm(1 = 밝음), 화면의 AO_SCALE 배 해상도
  * 2. blurPass: 4×4 상자 흐림으로 회전 패턴을 평균한다
- * 3. compositePass: 장면 색 × AO 를 캔버스에 쓴다
+ * 3. compositePass: 장면 색 × AO × 외곽선을 캔버스에 쓴다. 외곽선(2026-10-13): 깊이에서 복원한 위치·법선으로 좌우·상하 이웃이
+ *    이 픽셀의 접평면에서 벗어난 정도(꺾임: 계단 턱·건물 모서리)와 2차 차분(끊김: 멀리서 겹쳐 보이는 단·실루엣)을 재어
+ *    1 px 선을 어둡게 섞는다. 더 먼 쪽 이웃이 이 픽셀보다 멀 때만 세어 선이 가까운 쪽 한 픽셀에만 생긴다. 안개와 함께 사라진다.
+ *    SketchUp 의 edge 를 연하게 켠 것과 같은 효과로, 높이가 다른 윗면이 같은 색으로 이어져 보이는 문제를 줄인다
  * 멀리(maxDist)에서는 효과를 뺀다(안개 구간을 더 어둡게 하지 않으려고). 비용은 삼각형 수와 무관하게 픽셀 수에 비례한다
  */
 const AO_FORMAT: GPUTextureFormat = "r8unorm"
@@ -31,8 +34,10 @@ export const AO_PARAMS = {
     /** 이 거리(m)부터 효과가 사라진다(60% 지점부터 서서히) */
     maxDist: 400,
 }
-/** AO uniform: viewProj(0) + invViewProj(64) + eye(128) + radius(140) + params(144: bias, strength, maxDist, biasPerMeter) + size(160) + depthSize(168) + offset(176: normalOffsetPerMeter) */
+/** AO uniform: viewProj(0) + invViewProj(64) + eye(128) + radius(140) + params(144: bias, strength, maxDist, biasPerMeter) + size(160) + depthSize(168) + offset(176: normalOffsetPerMeter, 외곽선 세기, 안개 밀도, AO 켬) */
 const AO_UNIFORM_SIZE = 192
+/** 합성 pass 옵션. ao 가 꺼지면 차폐·흐림 pass 를 건너뛰고 외곽선만 */
+export type CompositeOptions = { ao: boolean; edge: number; fogDensity: number }
 
 const fullscreenVertex = /* wgsl */ `
     // 정점 3개로 화면을 덮는 삼각형
@@ -44,9 +49,8 @@ const fullscreenVertex = /* wgsl */ `
     }
 `
 
-const aoShader = (): GPUShaderModuleDescriptor => ({
-    label: "ssao shader",
-    code: /* wgsl */ `
+/** AO·합성 셰이더 공통부: uniform, 깊이 텍스처, 깊이 → 월드 위치, 이웃 깊이로 법선 복원 */
+const aoCommon = /* wgsl */ `
     struct AoUniforms {
         viewProj: mat4x4f,
         invViewProj: mat4x4f,
@@ -55,10 +59,36 @@ const aoShader = (): GPUShaderModuleDescriptor => ({
         params: vec4f, // bias, strength, maxDist, biasPerMeter
         size: vec2f, // AO 텍스처 크기(px)
         depthSize: vec2f, // 깊이 텍스처 크기(px)
-        offset: vec4f, // x normalOffsetPerMeter
+        offset: vec4f, // x normalOffsetPerMeter, y 외곽선 세기(0 이면 없음), z 안개 밀도(1/m), w AO 켬(0/1)
     };
     @group(0) @binding(0) var<uniform> a: AoUniforms;
     @group(0) @binding(1) var depthTex: texture_depth_2d;
+
+    // uv(픽셀 중심) → 픽셀 번호. uv × 크기를 내린다. (크기 − 1)을 곱하면 오른쪽·아래 절반이 한 픽셀 어긋나
+    // 화면 가운데 열·행에서 이웃 위치가 틀어져 외곽선에 십자선이 생겼다(2026-10-13)
+    fn depthAt(uv: vec2f) -> f32 {
+        let c = vec2i(clamp(floor(uv * a.depthSize), vec2f(0.0), a.depthSize - 1.0));
+        return textureLoad(depthTex, c, 0);
+    }
+    fn worldAt(uv: vec2f, d: f32) -> vec3f {
+        let ndc = vec4f(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, d, 1.0);
+        let p = a.invViewProj * ndc;
+        return p.xyz / p.w;
+    }
+    // 법선: 좌우·상하 이웃 중 깊이 차가 작은 쪽으로 위치 차를 잡아 모서리에서 번지지 않게. 카메라를 향하게 뒤집는다
+    fn normalAt(P: vec3f, Pr: vec3f, Pl: vec3f, Pd: vec3f, Pu: vec3f) -> vec3f {
+        let dx = select(Pr - P, P - Pl, length(Pl - P) < length(Pr - P));
+        let dy = select(Pd - P, P - Pu, length(Pu - P) < length(Pd - P));
+        var n = normalize(cross(dx, dy));
+        if (dot(n, a.eye - P) < 0.0) { n = -n; }
+        return n;
+    }
+`
+
+const aoShader = (): GPUShaderModuleDescriptor => ({
+    label: "ssao shader",
+    code: /* wgsl */ `
+    ${aoCommon}
 
     const SAMPLE_COUNT = 12u;
     // 4×4 타일의 회전 순서(0 ~ 15 를 섞은 것). 이웃끼리 각도가 멀어 흐림 전에도 띠가 덜 보인다
@@ -71,16 +101,6 @@ const aoShader = (): GPUShaderModuleDescriptor => ({
     );
 
     ${fullscreenVertex}
-
-    fn depthAt(uv: vec2f) -> f32 {
-        let c = vec2i(clamp(uv, vec2f(0.0), vec2f(1.0)) * (a.depthSize - 1.0));
-        return textureLoad(depthTex, c, 0);
-    }
-    fn worldAt(uv: vec2f, d: f32) -> vec3f {
-        let ndc = vec4f(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, d, 1.0);
-        let p = a.invViewProj * ndc;
-        return p.xyz / p.w;
-    }
 
     @fragment
     fn fragmentMain(@builtin(position) fragPos: vec4f) -> @location(0) vec4f {
@@ -98,10 +118,7 @@ const aoShader = (): GPUShaderModuleDescriptor => ({
         let Pl = worldAt(uv - vec2f(px.x, 0.0), depthAt(uv - vec2f(px.x, 0.0)));
         let Pd = worldAt(uv + vec2f(0.0, px.y), depthAt(uv + vec2f(0.0, px.y)));
         let Pu = worldAt(uv - vec2f(0.0, px.y), depthAt(uv - vec2f(0.0, px.y)));
-        let dx = select(Pr - P, P - Pl, length(Pl - P) < length(Pr - P));
-        let dy = select(Pd - P, P - Pu, length(Pu - P) < length(Pd - P));
-        var n = normalize(cross(dx, dy));
-        if (dot(n, a.eye - P) < 0.0) { n = -n; }
+        let n = normalAt(P, Pr, Pl, Pd, Pu);
 
         // 4×4 타일 안의 자리로 정해지는 회전(16개 각도가 한 번씩)으로 돌린 접선 틀
         let cell = vec2u(fragPos.xy) % 4u;
@@ -160,18 +177,54 @@ const blurShader = (): GPUShaderModuleDescriptor => ({
 const compositeShader = (): GPUShaderModuleDescriptor => ({
     label: "ao composite shader",
     code: /* wgsl */ `
-    @group(0) @binding(0) var sceneTex: texture_2d<f32>;
-    @group(0) @binding(1) var aoTex: texture_2d<f32>;
-    @group(0) @binding(2) var aoSampler: sampler;
+    ${aoCommon}
+    @group(0) @binding(2) var sceneTex: texture_2d<f32>;
+    @group(0) @binding(3) var aoTex: texture_2d<f32>;
+    @group(0) @binding(4) var aoSampler: sampler;
 
     ${fullscreenVertex}
+
+    // 한 축(좌우 또는 상하)의 외곽선 세기(0 ~ 1)
+    fn edgeAlong(P: vec3f, n: vec3f, Pa: vec3f, Pb: vec3f) -> f32 {
+        let va = Pa - P;
+        let vb = Pb - P;
+        let la = length(va);
+        let lb = length(vb);
+        let m = min(la, lb) + 1e-4;
+        // 꺾임: 이웃이 이 픽셀의 접평면에서 벗어난 거리 / 픽셀 간격(평면 0, 직각 모서리 1).
+        // 이웃이 이 픽셀보다 가까운 쪽은 빼서 선이 모서리의 가까운 쪽 한 픽셀에만 생긴다(거리가 같으면 양쪽. 1/4 픽셀 간격 여유)
+        let d0 = distance(P, a.eye);
+        let ga = step(-0.25 * m, distance(Pa, a.eye) - d0);
+        let gb = step(-0.25 * m, distance(Pb, a.eye) - d0);
+        let crease = max(abs(dot(va, n)) * ga, abs(dot(vb, n)) * gb) / m;
+        // 끊김: 2차 차분 / 픽셀 간격. 평면이면 거의 0. 더 멀리 떨어진 이웃이 이 픽셀보다 멀 때만(실루엣 선이 가까운 쪽 한 픽셀에만)
+        let gate = select(gb, ga, la > lb);
+        let jump = length(va + vb) / m * gate;
+        return max(smoothstep(0.35, 0.8, crease), smoothstep(0.6, 1.5, jump));
+    }
 
     @fragment
     fn fragmentMain(@builtin(position) fragPos: vec4f) -> @location(0) vec4f {
         let c = textureLoad(sceneTex, vec2i(fragPos.xy), 0);
-        let uv = fragPos.xy / vec2f(textureDimensions(sceneTex));
-        let ao = textureSample(aoTex, aoSampler, uv).r;
-        return vec4f(c.rgb * ao, 1.0);
+        let uv = fragPos.xy / a.depthSize;
+        let aoSample = textureSample(aoTex, aoSampler, uv).r;
+        let ao = select(1.0, aoSample, a.offset.w > 0.5);
+        var edge = 0.0;
+        let d = depthAt(uv);
+        if (a.offset.y > 0.0 && d > 0.0) {
+            let P = worldAt(uv, d);
+            let px = 1.0 / a.depthSize;
+            let Pr = worldAt(uv + vec2f(px.x, 0.0), depthAt(uv + vec2f(px.x, 0.0)));
+            let Pl = worldAt(uv - vec2f(px.x, 0.0), depthAt(uv - vec2f(px.x, 0.0)));
+            let Pd = worldAt(uv + vec2f(0.0, px.y), depthAt(uv + vec2f(0.0, px.y)));
+            let Pu = worldAt(uv - vec2f(0.0, px.y), depthAt(uv - vec2f(0.0, px.y)));
+            let n = normalAt(P, Pr, Pl, Pd, Pu);
+            edge = max(edgeAlong(P, n, Pr, Pl), edgeAlong(P, n, Pd, Pu));
+            // 안개와 같은 비율로 사라진다(멀리서 선만 남지 않게)
+            let fog = 1.0 - exp(-distance(P, a.eye) * a.offset.z);
+            edge = edge * (1.0 - fog) * a.offset.y;
+        }
+        return vec4f(c.rgb * ao * (1.0 - edge), 1.0);
     }
     `,
 })
@@ -270,9 +323,11 @@ export const createAoPasses = (device: GPUDevice, format: GPUTextureFormat) => {
             compositeBindGroup: device.createBindGroup({
                 layout: compositePipeline.getBindGroupLayout(0),
                 entries: [
-                    { binding: 0, resource: sceneView },
-                    { binding: 1, resource: blurView },
-                    { binding: 2, resource: linearSampler },
+                    { binding: 0, resource: { buffer: uniformBuffer } },
+                    { binding: 1, resource: depthView },
+                    { binding: 2, resource: sceneView },
+                    { binding: 3, resource: blurView },
+                    { binding: 4, resource: linearSampler },
                 ],
             }),
         }
@@ -315,11 +370,31 @@ export const createAoPasses = (device: GPUDevice, format: GPUTextureFormat) => {
         pass.end()
     }
 
-    /** 차폐 계산 → 흐림 → 캔버스에 합성. 오프스크린 장면이 그려진 뒤 부른다 */
-    const run = (encoder: GPUCommandEncoder, canvasView: GPUTextureView) => {
+    let lastOptions: CompositeOptions | null = null
+    /**
+     * (AO 가 켜져 있으면) 차폐 계산 → 흐림 → 캔버스에 합성(AO × 외곽선). 오프스크린 장면이 그려진 뒤 부른다
+     *
+     * @param options ao 켬, 외곽선 세기(0 ~ 1, 0 이면 없음), 안개 밀도(외곽선이 안개와 같이 사라지도록)
+     */
+    const run = (encoder: GPUCommandEncoder, canvasView: GPUTextureView, options: CompositeOptions) => {
         if (!targets) return
-        fullscreen(encoder, "ssao", targets.aoView, aoPipeline, targets.aoBindGroup)
-        fullscreen(encoder, "ao blur", targets.blurView, blurPipeline, targets.blurBindGroup)
+        if (
+            !lastOptions ||
+            lastOptions.ao !== options.ao ||
+            lastOptions.edge !== options.edge ||
+            lastOptions.fogDensity !== options.fogDensity
+        ) {
+            lastOptions = { ...options }
+            device.queue.writeBuffer(
+                uniformBuffer,
+                176,
+                new Float32Array([AO_PARAMS.normalOffsetPerMeter, options.edge, options.fogDensity, options.ao ? 1 : 0]),
+            )
+        }
+        if (options.ao) {
+            fullscreen(encoder, "ssao", targets.aoView, aoPipeline, targets.aoBindGroup)
+            fullscreen(encoder, "ao blur", targets.blurView, blurPipeline, targets.blurBindGroup)
+        }
         fullscreen(encoder, "ao composite", canvasView, compositePipeline, targets.compositeBindGroup)
     }
 

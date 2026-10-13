@@ -2,6 +2,7 @@ import { LayerId } from "../layers"
 import { MeshChunk, TinMesh } from "../terrainData"
 import { hexToRgb, STOP_COUNT, stopsToUniform, TerrainTheme } from "../terrainTheme"
 import { createAoPasses } from "./ao"
+import { createSkyPass, sunDirection } from "./sky"
 import { Camera, cameraEye, cameraViewProj, fpsForward, invert, isFpsCamera, lookAt, multiply, ortho, Vec3 } from "./camera"
 import { initWebGPU } from "./device"
 import {
@@ -25,10 +26,11 @@ const LIGHTING_OFFSET = LIGHT_VP_OFFSET + 64 // vec4f: 주변광, 난반사, 그
 const FOG_COLOR_OFFSET = LIGHTING_OFFSET + 16 // vec4f: 안개색
 const HEMI_OFFSET = FOG_COLOR_OFFSET + 16 // vec4f: 반구 조명 세기
 const LIGHT_VP_NEAR_OFFSET = HEMI_OFFSET + 16 // 가까운 캐스케이드의 빛 기준 viewProj mat4x4f
-const UNIFORM_SIZE = LIGHT_VP_NEAR_OFFSET + 64 // viewProj(0~64) + zRange(64~72) + eye(80~92) + stops + buildingColor + lightViewProj + lighting + fogColor + hemi + lightViewProjNear
+const SKY_OFFSET = LIGHT_VP_NEAR_OFFSET + 64 // vec4f: 태양 방향 xyz + 하늘 켬
+const UNIFORM_SIZE = SKY_OFFSET + 16 // viewProj(0~64) + zRange(64~72) + eye(80~92) + stops + buildingColor + lightViewProj + lighting + fogColor + hemi + lightViewProjNear + sky
 const SHADOW_FORMAT: GPUTextureFormat = "depth32float"
-/** 빛 방향(표면에서 빛으로). shaders.ts 의 LIGHT_DIR 과 같아야 한다 */
-const LIGHT_DIR: Vec3 = [0.5, -0.5, 1]
+/** 빛 방향(표면에서 빛으로, 남동 위 고도각 60°). shaders.ts 의 LIGHT_DIR 과 같아야 한다. 하늘의 태양은 이 방위각에 테마의 고도를 쓴다 */
+const LIGHT_DIR: Vec3 = [0.40825, -0.40825, 1]
 /** 가까운 섀도 캐스케이드의 반지름(m). 2048 텍셀이면 텍셀 약 4 cm */
 const SHADOW_NEAR_RADIUS = 40
 const normalize3 = (v: Vec3): Vec3 => {
@@ -56,6 +58,10 @@ export type Lighting = {
     hemisphere: number
     /** 화면 공간 주변광 차폐(ao.ts). 켜면 장면을 오프스크린에 그리고 AO 를 곱해 합성한다 */
     ao: boolean
+    /** 절차적 하늘(sky.ts). 켜면 장면이 안 그린 픽셀을 하늘색으로 채우고 안개도 하늘색으로 */
+    sky: boolean
+    /** 외곽선 세기(0 ~ 1, 0 이면 없음. ao.ts 합성 pass). 계단 턱·건물 모서리·겹쳐 보이는 단에 1 px 선 */
+    edge: number
 }
 export const DEFAULT_LIGHTING: Lighting = {
     ambient: 0.6,
@@ -65,9 +71,17 @@ export const DEFAULT_LIGHTING: Lighting = {
     fogDensity: 0,
     hemisphere: 0,
     ao: false,
+    sky: false,
+    edge: 0,
 }
-/** 디버그: URL ?ao=0 이면 SSAO 끔, ?shadow=0 이면 그림자 끔(원인 가르기용) */
+/** 디버그: URL ?ao=0 이면 SSAO 끔, ?shadow=0 이면 그림자 끔, ?sky=0 이면 하늘 끔, ?edge=0.25 외곽선 세기, ?sun=60 태양 고도(°) */
 const debugParams = new URLSearchParams(window.location.search)
+const debugNumber = (key: string) => {
+    const v = Number(debugParams.get(key))
+    return debugParams.has(key) && Number.isFinite(v) ? v : null
+}
+/** 외곽선 기본 세기(0.18 = 18% 어둡게. 0.25 는 진했다, 2026-10-13). Chrome 에서 ?edge= 로 비교해 정하면 바꾼다 by @nanangqq */
+const EDGE_STRENGTH = 0.18
 export const WALK_LIGHTING: Lighting = {
     ambient: 0.5,
     diffuse: 0.5,
@@ -76,7 +90,11 @@ export const WALK_LIGHTING: Lighting = {
     fogDensity: 1 / 1200,
     hemisphere: 0.35,
     ao: debugParams.get("ao") !== "0",
+    sky: debugParams.get("sky") !== "0",
+    edge: debugNumber("edge") ?? EDGE_STRENGTH,
 }
+/** 테마의 태양 고도 대신 쓸 값(?sun=). null 이면 테마 값 */
+const DEBUG_SUN_ALTITUDE = debugNumber("sun")
 
 /** 지형 표현 방식. tin: 정점 법선으로 부드럽게, stepped: 계단형(면 법선, 법선 버퍼 없음) */
 export type TerrainMode = "tin" | "stepped"
@@ -609,9 +627,9 @@ const createTerrainDrawingPassAndUpdaters = (
             device.queue.writeBuffer(uniformBuffer, LIGHT_VP_OFFSET, lightViewProj(camera, lighting.shadowRadius, 0.6))
             device.queue.writeBuffer(uniformBuffer, LIGHT_VP_NEAR_OFFSET, lightViewProj(camera, SHADOW_NEAR_RADIUS, 0.5))
         }
-        if (lighting.ao) onCamera?.(viewProj, invert(viewProj), eye)
+        if (lighting.ao || lighting.sky || lighting.edge > 0) onCamera?.(viewProj, invert(viewProj), eye)
     }
-    /** 카메라가 바뀔 때 다른 pass(SSAO)에도 알린다 */
+    /** 카메라가 바뀔 때 다른 pass(SSAO·하늘)에도 알린다 */
     let onCamera: ((viewProj: Float32Array, invViewProj: Float32Array, eye: Vec3) => void) | null = null
     const setCameraListener = (fn: typeof onCamera) => {
         onCamera = fn
@@ -664,9 +682,15 @@ const createTerrainDrawingPassAndUpdaters = (
             new Float32Array([next.ambient, next.diffuse, next.shadows ? 1 : 0, next.fogDensity]),
         )
         device.queue.writeBuffer(uniformBuffer, HEMI_OFFSET, new Float32Array([next.hemisphere, 0, 0, 0]))
+        writeSky()
         if (lastCamera) cameraUpdater(lastCamera)
     }
     const currentLighting = () => lighting
+    /** 하늘의 태양 방향(그림자 빛의 방위각 + 테마의 고도). paletteUpdater 가 바꾼다 */
+    let sunDir: Vec3 = sunDirection(60, [LIGHT_DIR[0], LIGHT_DIR[1]])
+    const writeSky = () =>
+        device.queue.writeBuffer(uniformBuffer, SKY_OFFSET, new Float32Array([...sunDir, lighting.sky ? 1 : 0]))
+    const currentSun = () => sunDir
     lightingUpdater(DEFAULT_LIGHTING)
 
     /** 안개색(배경색)을 쓴다. 테마 전환 때 배경색과 함께 */
@@ -691,10 +715,12 @@ const createTerrainDrawingPassAndUpdaters = (
      *
      * @param theme 색표 단계 STOP_COUNT 개(높이 오름차순)와 건물색을 가진 테마
      */
-    const paletteUpdater = (theme: Pick<TerrainTheme, "stops" | "buildingColor">) => {
+    const paletteUpdater = (theme: Pick<TerrainTheme, "stops" | "buildingColor" | "sunAltitude">) => {
         device.queue.writeBuffer(uniformBuffer, STOPS_OFFSET, stopsToUniform(theme.stops))
         const { r, g, b } = hexToRgb(theme.buildingColor)
         device.queue.writeBuffer(uniformBuffer, BUILDING_COLOR_OFFSET, new Float32Array([r, g, b, 1]))
+        sunDir = sunDirection(DEBUG_SUN_ALTITUDE ?? theme.sunAltitude, [LIGHT_DIR[0], LIGHT_DIR[1]])
+        writeSky()
     }
 
     /**
@@ -826,6 +852,7 @@ const createTerrainDrawingPassAndUpdaters = (
         shadowPass,
         lightingUpdater,
         currentLighting,
+        currentSun,
         setCameraListener,
         fogColorUpdater,
         streamTileUpdater,
@@ -887,13 +914,32 @@ export const createTerrainRenderFunctionAndUpdateFunctions = async ({
 
     const background = { color: backgroundColor }
     const backgroundPass = renderBackgroundPassFactory(background, depth)
-    const { scenePass, shadowPass, aspectUpdater, fogColorUpdater, currentLighting, setCameraListener, ...sceneUpdaters } =
-        createTerrainDrawingPassAndUpdaters(device, format, depth, width / height)
+    const {
+        scenePass,
+        shadowPass,
+        aspectUpdater,
+        fogColorUpdater,
+        currentLighting,
+        currentSun,
+        setCameraListener,
+        ...sceneUpdaters
+    } = createTerrainDrawingPassAndUpdaters(device, format, depth, width / height)
     fogColorUpdater(backgroundColor)
-    // SSAO(걸어 보기): 오프스크린 장면 텍스처 + AO pass. 카메라가 바뀌면 같은 행렬을 받는다
+    // SSAO·외곽선(둘러보기): 오프스크린 장면 텍스처 + 합성 pass. 하늘 pass 는 장면 뒤 빈 픽셀을 채운다. 카메라가 바뀌면 같은 행렬을 받는다
     const ao = createAoPasses(device, format)
     ao.resize(width, height, depth.view)
-    setCameraListener(ao.setCamera)
+    const sky = createSkyPass(device, format, DEPTH_FORMAT)
+    sky.setSize(width, height)
+    sky.setSun(currentSun())
+    setCameraListener((viewProj, invViewProj, eye) => {
+        ao.setCamera(viewProj, invViewProj, eye)
+        sky.setCamera(invViewProj, eye)
+    })
+    /** 색표·건물색·태양 고도(테마)를 바꾼다. 하늘 pass 에도 태양을 알린다 */
+    const paletteUpdater = (theme: Parameters<typeof sceneUpdaters.paletteUpdater>[0]) => {
+        sceneUpdaters.paletteUpdater(theme)
+        sky.setSun(currentSun())
+    }
     /** 배경색(= 안개색)을 바꾼다(다음 프레임부터). 테마 전환용 */
     const backgroundUpdater = (color: { r: number; g: number; b: number }) => {
         background.color = color
@@ -914,30 +960,34 @@ export const createTerrainRenderFunctionAndUpdateFunctions = async ({
         depth.texture.destroy()
         Object.assign(depth, next)
         ao.resize(w, h, depth.view)
+        sky.setSize(w, h)
         aspectUpdater(w / h)
     }
 
     /**
-     * 한 프레임을 그린다: 섀도 pass(그림자가 켜져 있을 때) → 배경 pass → 장면 pass → (AO 가 켜져 있으면) SSAO·흐림·합성.
-     * AO 가 켜져 있으면 배경·장면은 오프스크린 텍스처에 그리고 합성 pass 가 캔버스에 쓴다
+     * 한 프레임을 그린다: 섀도 pass(그림자가 켜져 있을 때) → 배경 pass → 장면 pass → (하늘이 켜져 있으면) 하늘 pass →
+     * (AO 나 외곽선이 켜져 있으면) SSAO·흐림·합성. 합성이 있으면 배경·장면·하늘은 오프스크린 텍스처에 그리고 합성 pass 가 캔버스에 쓴다
      */
     const render = () => {
         const encoder = device.createCommandEncoder()
         const canvasView = context.getCurrentTexture().createView()
-        const offscreen = currentLighting().ao ? ao.sceneView() : null
+        const lighting = currentLighting()
+        const offscreen = lighting.ao || lighting.edge > 0 ? ao.sceneView() : null
         const target = offscreen ?? canvasView
         shadowPass(encoder)
         backgroundPass(encoder, target)
         scenePass(encoder, target)
-        if (offscreen) ao.run(encoder, canvasView)
+        if (lighting.sky) sky.run(encoder, target, depth.view)
+        if (offscreen) ao.run(encoder, canvasView, { ao: lighting.ao, edge: lighting.edge, fogDensity: lighting.fogDensity })
         device.queue.submit([encoder.finish()])
     }
 
-    const updaters = { ...sceneUpdaters, backgroundUpdater, resizeUpdater }
+    const updaters = { ...sceneUpdaters, paletteUpdater, backgroundUpdater, resizeUpdater }
 
     /** GPU device 와 그에 속한 버퍼·텍스처를 모두 해제한다. 컴포넌트 언마운트 때 호출 */
     const destroy = () => {
         ao.destroy()
+        sky.destroy()
         device.destroy()
     }
 

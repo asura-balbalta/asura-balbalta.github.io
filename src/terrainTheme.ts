@@ -69,6 +69,8 @@ export type TerrainTheme = {
     stops: ElevationStop[]
     /** 건물 레이어 색("#RRGGBB"). 지붕 기준이고 벽은 셰이더가 25% 어둡게 한다 */
     buildingColor: string
+    /** 둘러보기 하늘의 태양 고도(°). 방위각은 그림자 빛(남동)과 같다. 음수면 지평선 아래(저녁) */
+    sunAltitude: number
 }
 
 /** "#RRGGBB" → 0 ~ 1 rgb */
@@ -126,6 +128,7 @@ export const TERRAIN_THEMES: Record<Theme, TerrainTheme> = {
             "glass-highlight": "rgba(255, 255, 255, 0.55)",
         },
         background: hexToRgb("#5B6064"),
+        sunAltitude: 60,
         stops: [
             { z: 3, hex: "#B3BDC1" }, // 수면
             { z: 8, hex: "#EEEFED" }, // 강변 평지
@@ -175,6 +178,7 @@ export const TERRAIN_THEMES: Record<Theme, TerrainTheme> = {
             "glass-highlight": "rgba(255, 255, 255, 0.08)",
         },
         background: hexToRgb("#0B0C0E"),
+        sunAltitude: -4,
         stops: [
             { z: 3, hex: "#15171A" }, // 수면
             { z: 8, hex: "#313335" }, // 강변 평지
