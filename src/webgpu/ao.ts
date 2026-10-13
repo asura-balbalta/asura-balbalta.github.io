@@ -86,7 +86,7 @@ const aoShader = (): GPUShaderModuleDescriptor => ({
     fn fragmentMain(@builtin(position) fragPos: vec4f) -> @location(0) vec4f {
         let uv = fragPos.xy / a.size;
         let d = depthAt(uv);
-        if (d >= 1.0) { return vec4f(1.0); } // 배경
+        if (d <= 0.0) { return vec4f(1.0); } // 배경(역순 깊이: 0 이 가장 멀다)
         let P = worldAt(uv, d);
         let dist = distance(P, a.eye);
         let maxDist = a.params.z;

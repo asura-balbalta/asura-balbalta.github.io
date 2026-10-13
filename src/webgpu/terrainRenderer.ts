@@ -12,7 +12,8 @@ import {
     SHADOW_MAP_SIZE,
 } from "./shaders"
 
-const DEPTH_FORMAT: GPUTextureFormat = "depth24plus"
+/** 장면 깊이. 32비트 부동소수 + 역순 깊이(camera.ts perspective 참고): 비교 greater, 지움 0 */
+const DEPTH_FORMAT: GPUTextureFormat = "depth32float"
 
 /** 깊이 텍스처 홀더. pass 들이 공유하며, 캔버스 크기가 바뀌면 resizeUpdater 가 안의 텍스처·view 를 바꿔 끼운다 */
 type DepthHolder = { texture: GPUTexture; view: GPUTextureView; width: number; height: number }
@@ -52,14 +53,16 @@ export const DEFAULT_LIGHTING: Lighting = {
     hemisphere: 0,
     ao: false,
 }
+/** 디버그: URL ?ao=0 이면 SSAO 끔, ?shadow=0 이면 그림자 끔(원인 가르기용) */
+const debugParams = new URLSearchParams(window.location.search)
 export const WALK_LIGHTING: Lighting = {
     ambient: 0.5,
     diffuse: 0.5,
-    shadows: true,
+    shadows: debugParams.get("shadow") !== "0",
     shadowRadius: 250,
     fogDensity: 1 / 1200,
     hemisphere: 0.35,
-    ao: true,
+    ao: debugParams.get("ao") !== "0",
 }
 
 /** 지형 표현 방식. tin: 정점 법선으로 부드럽게, stepped: 계단형(면 법선, 법선 버퍼 없음) */
@@ -96,7 +99,7 @@ const renderBackgroundPassFactory =
             depthStencilAttachment: {
                 view: depth.view,
                 depthLoadOp: "clear",
-                depthClearValue: 1,
+                depthClearValue: 0, // 역순 깊이: 0 이 가장 멀다
                 depthStoreOp: "store",
             },
         })
@@ -349,7 +352,7 @@ const createTerrainDrawingPassAndUpdaters = (
             depthStencil: {
                 format: DEPTH_FORMAT,
                 depthWriteEnabled: true,
-                depthCompare: "less",
+                depthCompare: "greater", // 역순 깊이
             },
         })
         const bindGroup = device.createBindGroup({

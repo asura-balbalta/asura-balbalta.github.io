@@ -27,7 +27,10 @@ const normalize = (a: Vec3): Vec3 => {
 /**
  * 원근 투영 행렬을 만든다. 카메라 좌표(카메라가 -z 방향을 봄)를 clip 공간으로 옮긴다.
  *
- * WebGPU clip 공간의 깊이는 0(near) ~ 1(far)이라, OpenGL(-1 ~ 1)용 공식과 3열이 다르다.
+ * WebGPU clip 공간의 깊이는 0 ~ 1 인데, 여기서는 역순(reversed-Z: near → 1, far → 0)으로 쓴다(2026-10-13).
+ * 깊이 버퍼가 32비트 부동소수(depth32float)일 때 역순이면 부동소수의 정밀도가 먼 곳까지 고르게 쓰여, 걸어 보기(near 0.3 m ·
+ * far 20 km)에서 수십 m 거리의 깊이 오차가 cm 에서 mm 아래로 내려간다. SSAO 가 깊이에서 법선을 복원할 때의 노이즈가 이 때문이었다.
+ * 렌더러의 깊이 비교는 "greater", 지움 값은 0 이다. 직교 투영(ortho, 섀도 맵)은 정순 그대로다.
  *
  * @param fovY 세로 시야각(라디안)
  * @param aspect 화면 가로/세로 비율
@@ -42,12 +45,12 @@ export const perspective = (
     far: number,
 ): Mat4 => {
     const f = 1 / Math.tan(fovY / 2)
-    const nf = 1 / (near - far)
+    const d = far - near
     return new Float32Array([
         f / aspect, 0, 0, 0,
         0, f, 0, 0,
-        0, 0, far * nf, -1,
-        0, 0, far * near * nf, 0,
+        0, 0, near / d, -1,
+        0, 0, (far * near) / d, 0,
     ])
 }
 
