@@ -24,10 +24,23 @@ const LIGHT_VP_OFFSET = BUILDING_COLOR_OFFSET + 16 // 빛 기준 viewProj mat4x4
 const LIGHTING_OFFSET = LIGHT_VP_OFFSET + 64 // vec4f: 주변광, 난반사, 그림자 켬, 안개 밀도
 const FOG_COLOR_OFFSET = LIGHTING_OFFSET + 16 // vec4f: 안개색
 const HEMI_OFFSET = FOG_COLOR_OFFSET + 16 // vec4f: 반구 조명 세기
-const UNIFORM_SIZE = HEMI_OFFSET + 16 // viewProj(0~64) + zRange(64~72) + eye(80~92) + stops + buildingColor + lightViewProj + lighting + fogColor + hemi
+const LIGHT_VP_NEAR_OFFSET = HEMI_OFFSET + 16 // 가까운 캐스케이드의 빛 기준 viewProj mat4x4f
+const UNIFORM_SIZE = LIGHT_VP_NEAR_OFFSET + 64 // viewProj(0~64) + zRange(64~72) + eye(80~92) + stops + buildingColor + lightViewProj + lighting + fogColor + hemi + lightViewProjNear
 const SHADOW_FORMAT: GPUTextureFormat = "depth32float"
 /** 빛 방향(표면에서 빛으로). shaders.ts 의 LIGHT_DIR 과 같아야 한다 */
 const LIGHT_DIR: Vec3 = [0.5, -0.5, 1]
+/** 가까운 섀도 캐스케이드의 반지름(m). 2048 텍셀이면 텍셀 약 4 cm */
+const SHADOW_NEAR_RADIUS = 40
+const normalize3 = (v: Vec3): Vec3 => {
+    const len = Math.hypot(v[0], v[1], v[2])
+    return [v[0] / len, v[1] / len, v[2] / len]
+}
+const cross3 = (a: Vec3, b: Vec3): Vec3 => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+const dot3 = (a: Vec3, b: Vec3) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+/** 빛 기준 축(lookAt 과 같은 규칙: z = 빛 쪽, x = up × z, y = z × x). 상자 중심을 텍셀 단위로 스냅할 때 쓴다 */
+const LIGHT_Z = normalize3(LIGHT_DIR)
+const LIGHT_X = normalize3(cross3([0, 0, 1], LIGHT_Z))
+const LIGHT_Y = cross3(LIGHT_Z, LIGHT_X)
 
 /**
  * 조명 설정. 걸어 보기는 그림자·안개를 켜고 대비를 올려 입체감을 내고, 궤도 보기는 지도 톤(주변광 60%)을 유지한다.
@@ -330,6 +343,13 @@ const createTerrainDrawingPassAndUpdaters = (
         usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
     })
     const shadowView = shadowTexture.createView()
+    const shadowTextureNear = device.createTexture({
+        label: "shadow map (near)",
+        size: [SHADOW_MAP_SIZE, SHADOW_MAP_SIZE],
+        format: SHADOW_FORMAT,
+        usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+    })
+    const shadowViewNear = shadowTextureNear.createView()
     const shadowSampler = device.createSampler({ compare: "less", magFilter: "linear", minFilter: "linear" })
 
     /** 파이프라인과 그 바인드그룹을 만든다(uniform + 섀도 맵 + 비교 샘플러) */
@@ -362,31 +382,36 @@ const createTerrainDrawingPassAndUpdaters = (
                 { binding: 0, resource: { buffer: uniformBuffer } },
                 { binding: 1, resource: shadowView },
                 { binding: 2, resource: shadowSampler },
+                { binding: 3, resource: shadowViewNear },
             ],
         })
         return { pipeline, bindGroup }
     }
 
-    // 섀도 pass 파이프라인: 정점 위치만 받아 빛 기준 깊이를 기록한다. 색 출력 없음. 깊이 바이어스로 자기 그림자를 줄인다
-    const shadowModule = device.createShaderModule(createShadowShader())
-    const shadowPipeline = device.createRenderPipeline({
-        label: "pipeline (shadow)",
-        layout: "auto",
-        vertex: { module: shadowModule, entryPoint: "vertexMain", buffers: [float32x3Layout(0)] },
-        primitive: { topology: "triangle-list", cullMode: "none" },
-        depthStencil: {
-            format: SHADOW_FORMAT,
-            depthWriteEnabled: true,
-            depthCompare: "less",
-            depthBias: 2,
-            depthBiasSlopeScale: 2,
-        },
-    })
-    const shadowBindGroup = device.createBindGroup({
-        label: "bind group (shadow)",
-        layout: shadowPipeline.getBindGroupLayout(0),
-        entries: [{ binding: 0, resource: { buffer: uniformBuffer } }],
-    })
+    // 섀도 pass 파이프라인(캐스케이드마다 하나): 정점 위치만 받아 빛 기준 깊이를 기록한다. 색 출력 없음. 깊이 바이어스로 자기 그림자를 줄인다
+    const createShadowCascade = (cascade: "far" | "near", view: GPUTextureView) => {
+        const module = device.createShaderModule(createShadowShader(cascade))
+        const pipeline = device.createRenderPipeline({
+            label: `pipeline (shadow ${cascade})`,
+            layout: "auto",
+            vertex: { module, entryPoint: "vertexMain", buffers: [float32x3Layout(0)] },
+            primitive: { topology: "triangle-list", cullMode: "none" },
+            depthStencil: {
+                format: SHADOW_FORMAT,
+                depthWriteEnabled: true,
+                depthCompare: "less",
+                depthBias: 2,
+                depthBiasSlopeScale: 2,
+            },
+        })
+        const bindGroup = device.createBindGroup({
+            label: `bind group (shadow ${cascade})`,
+            layout: pipeline.getBindGroupLayout(0),
+            entries: [{ binding: 0, resource: { buffer: uniformBuffer } }],
+        })
+        return { pipeline, bindGroup, view }
+    }
+    const shadowCascades = [createShadowCascade("far", shadowView), createShadowCascade("near", shadowViewNear)]
 
     const pipelines: Record<TerrainMode | OverlayLayerId, ReturnType<typeof createPipelineSet>> = {
         tin: createPipelineSet("terrain tin", createSmoothTerrainShader(), [
@@ -580,7 +605,10 @@ const createTerrainDrawingPassAndUpdaters = (
         const eye = cameraEye(camera)
         device.queue.writeBuffer(uniformBuffer, 0, viewProj)
         device.queue.writeBuffer(uniformBuffer, 80, new Float32Array(eye))
-        if (lighting.shadows) device.queue.writeBuffer(uniformBuffer, LIGHT_VP_OFFSET, lightViewProj(camera))
+        if (lighting.shadows) {
+            device.queue.writeBuffer(uniformBuffer, LIGHT_VP_OFFSET, lightViewProj(camera, lighting.shadowRadius, 0.6))
+            device.queue.writeBuffer(uniformBuffer, LIGHT_VP_NEAR_OFFSET, lightViewProj(camera, SHADOW_NEAR_RADIUS, 0.5))
+        }
         if (lighting.ao) onCamera?.(viewProj, invert(viewProj), eye)
     }
     /** 카메라가 바뀔 때 다른 pass(SSAO)에도 알린다 */
@@ -592,25 +620,34 @@ const createTerrainDrawingPassAndUpdaters = (
     let lighting: Lighting = DEFAULT_LIGHTING
 
     /**
-     * 빛 기준 viewProj. 카메라 주변 shadowRadius 상자를 빛 방향에서 직교 투영한다. 1인칭이면 보는 방향 앞쪽에 상자를 두어
-     * 섀도 맵을 알차게 쓴다
+     * 빛 기준 viewProj. 카메라 주변 반지름 r 상자를 빛 방향에서 직교 투영한다. 1인칭이면 보는 방향 앞쪽(r × aheadRatio)에
+     * 상자를 두어 섀도 맵을 알차게 쓴다. 상자 중심은 빛 기준 x·y 축에서 텍셀 크기 단위로 반올림해, 카메라가 움직여도 텍셀 격자가
+     * 땅에 고정되게 한다(그렇지 않으면 그림자 가장자리의 계단이 매 프레임 다른 자리에 생겨 흔들린다)
+     *
+     * @param camera 카메라
+     * @param r 상자 반지름(m)
+     * @param aheadRatio 1인칭에서 앞쪽으로 둘 거리(r 의 배수)
      */
-    const lightViewProj = (camera: Camera) => {
-        const r = lighting.shadowRadius
+    const lightViewProj = (camera: Camera, r: number, aheadRatio: number) => {
         const eye = cameraEye(camera)
         let focus: Vec3 = eye
         if (isFpsCamera(camera)) {
             const f = fpsForward(camera)
-            focus = [eye[0] + f[0] * r * 0.6, eye[1] + f[1] * r * 0.6, eye[2]]
+            focus = [eye[0] + f[0] * r * aheadRatio, eye[1] + f[1] * r * aheadRatio, eye[2]]
         } else {
             focus = camera.target
         }
-        const len = Math.hypot(...LIGHT_DIR)
-        const lightEye: Vec3 = [
-            focus[0] + (LIGHT_DIR[0] / len) * r * 2,
-            focus[1] + (LIGHT_DIR[1] / len) * r * 2,
-            focus[2] + (LIGHT_DIR[2] / len) * r * 2,
+        const texel = (2 * r) / SHADOW_MAP_SIZE
+        const fx = dot3(focus, LIGHT_X)
+        const fy = dot3(focus, LIGHT_Y)
+        const sx = Math.round(fx / texel) * texel - fx
+        const sy = Math.round(fy / texel) * texel - fy
+        focus = [
+            focus[0] + LIGHT_X[0] * sx + LIGHT_Y[0] * sy,
+            focus[1] + LIGHT_X[1] * sx + LIGHT_Y[1] * sy,
+            focus[2] + LIGHT_X[2] * sx + LIGHT_Y[2] * sy,
         ]
+        const lightEye: Vec3 = [focus[0] + LIGHT_Z[0] * r * 2, focus[1] + LIGHT_Z[1] * r * 2, focus[2] + LIGHT_Z[2] * r * 2]
         return multiply(ortho(-r, r, -r, r, 0.1, r * 4), lookAt(lightEye, focus, [0, 0, 1]))
     }
 
@@ -718,27 +755,31 @@ const createTerrainDrawingPassAndUpdaters = (
     }
 
     /**
-     * 섀도 맵을 뜨는 pass. 그림자가 켜져 있을 때만, 보이는 레이어의 조각을 빛 기준으로 깊이만 그린다(정점 버퍼 0 만 바인딩).
+     * 섀도 맵을 뜨는 pass(캐스케이드 둘: 먼 250 m, 가까운 40 m). 그림자가 켜져 있을 때만, 보이는 조각을 빛 기준으로 깊이만
+     * 그린다(정점 버퍼 0 만 바인딩).
      * 배경 pass 보다 먼저 실행한다
      *
      * @param encoder 이번 프레임의 command encoder
      */
     const shadowPass = (encoder: GPUCommandEncoder) => {
         if (!lighting.shadows) return
-        const pass = encoder.beginRenderPass({
-            colorAttachments: [],
-            depthStencilAttachment: { view: shadowView, depthLoadOp: "clear", depthClearValue: 1, depthStoreOp: "store" },
-        })
-        pass.setPipeline(shadowPipeline)
-        pass.setBindGroup(0, shadowBindGroup)
-        for (const { chunks } of collectDraws()) {
-            for (const c of chunks) {
-                pass.setVertexBuffer(0, c.vertexBuffer)
-                pass.setIndexBuffer(c.indexBuffer, "uint32")
-                pass.drawIndexed(c.indexCount)
+        const draws = collectDraws()
+        for (const cascade of shadowCascades) {
+            const pass = encoder.beginRenderPass({
+                colorAttachments: [],
+                depthStencilAttachment: { view: cascade.view, depthLoadOp: "clear", depthClearValue: 1, depthStoreOp: "store" },
+            })
+            pass.setPipeline(cascade.pipeline)
+            pass.setBindGroup(0, cascade.bindGroup)
+            for (const { chunks } of draws) {
+                for (const c of chunks) {
+                    pass.setVertexBuffer(0, c.vertexBuffer)
+                    pass.setIndexBuffer(c.indexBuffer, "uint32")
+                    pass.drawIndexed(c.indexCount)
+                }
             }
+            pass.end()
         }
-        pass.end()
     }
 
     /**

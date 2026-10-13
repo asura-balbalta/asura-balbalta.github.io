@@ -156,6 +156,11 @@ export const TerrainViewCanvas = ({
     const walkRef = useRef<Player | null>(null)
     /** mesh 별 지형 높이 조회기(걸어 보기에 들어갈 때 만들고 같은 mesh 면 다시 쓴다) */
     const samplerRef = useRef<{ mesh: TinMesh; sampler: HeightSampler } | null>(null)
+    /** 선택 범위 건물의 지붕 높이 조회기(건물이 바뀌면 다시). 걸어 보기가 지붕 위에 서고 벽을 못 넘게 하는 데 쓴다 */
+    const roofRef = useRef<HeightSampler | null>(null)
+    useEffect(() => {
+        roofRef.current = buildings ? createHeightSampler(buildings, { highest: true }) : null
+    }, [buildings])
     const canvasId = `terrain-canvas-${useId()}`
     const canvasRef = useRef<HTMLCanvasElement | null>(null)
     // canvas 속성은 실제 픽셀 수(× devicePixelRatio), style 은 화면에 보이는 크기. 창 크기가 바뀌면 다시 잰다
@@ -357,6 +362,7 @@ export const TerrainViewCanvas = ({
         // 스트리밍 도엽까지 합친 높이 조회기. 선택 범위 메쉬를 먼저 보고, 없으면 도엽들을 본다.
         // min·max 는 도엽이 오갈 때마다 다시 재며 플레이어가 매 프레임 읽는다(범위 밖 클램프)
         const tiles = new Map<string, HeightSampler>()
+        const tileRoofs = new Map<string, HeightSampler>()
         const combined: HeightSampler = {
             heightAt: (x, y) => {
                 const h = sampler.heightAt(x, y)
@@ -367,6 +373,18 @@ export const TerrainViewCanvas = ({
                     if (th !== null) return th
                 }
                 return null
+            },
+            // 지붕: 선택 범위 건물과 도엽 건물 중 가장 높은 것
+            roofAt: (x, y) => {
+                let best: number | null = null
+                const take = (s: HeightSampler | null | undefined) => {
+                    if (!s || x < s.min[0] || x > s.max[0] || y < s.min[1] || y > s.max[1]) return
+                    const h = s.heightAt(x, y)
+                    if (h !== null && (best === null || h > best)) best = h
+                }
+                take(roofRef.current)
+                for (const s of tileRoofs.values()) take(s)
+                return best
             },
             min: [...sampler.min],
             max: [...sampler.max],
@@ -398,11 +416,13 @@ export const TerrainViewCanvas = ({
                   onTile: (tile) => {
                       renderer.updaters.streamTileUpdater(tile.id, { terrain: tile.terrain, buildings: tile.buildings })
                       tiles.set(tile.id, createHeightSampler(tile.tin))
+                      if (tile.buildings) tileRoofs.set(tile.id, createHeightSampler(tile.buildings, { highest: true }))
                       refit()
                   },
                   onRemove: (id) => {
                       renderer.updaters.streamTileUpdater(id, null)
                       tiles.delete(id)
+                      tileRoofs.delete(id)
                       refit()
                   },
                   onCovers: (covers) => renderer.updaters.streamCoverUpdater(covers),

@@ -11,6 +11,8 @@ import { TinMesh } from "./terrainData"
 export type HeightSampler = {
     /** 점이 메쉬 안이면 그 자리의 지표 높이, 밖이면 null */
     heightAt: (x: number, y: number) => number | null
+    /** 건물 지붕 높이(있으면). 걸어 보기가 발 높이를 지형과 지붕 중 높은 쪽으로 잡고, 벽은 못 넘게 하는 데 쓴다 */
+    roofAt?: (x: number, y: number) => number | null
     /** 메쉬 xyz 범위 */
     min: [number, number, number]
     max: [number, number, number]
@@ -18,8 +20,11 @@ export type HeightSampler = {
 
 /**
  * @param mesh 원본 TIN(positions 는 origin 을 뺀 로컬 좌표)
+ * @param options.highest 겹치는 삼각형이 여럿이면 가장 높은 z 를 돌려준다(건물 메쉬의 지붕 조회용. 건물 상자는 바닥면이 없고
+ *   벽은 수직이라 xy 면적이 0 으로 건너뛰므로, 남는 것은 지붕뿐이다). 기본은 처음 만난 삼각형
  */
-export const createHeightSampler = (mesh: TinMesh): HeightSampler => {
+export const createHeightSampler = (mesh: TinMesh, options: { highest?: boolean } = {}): HeightSampler => {
+    const highest = !!options.highest
     const p = mesh.positions
     const idx = mesh.indices
     const triCount = idx.length / 3
@@ -62,6 +67,7 @@ export const createHeightSampler = (mesh: TinMesh): HeightSampler => {
     const heightAt = (x: number, y: number): number | null => {
         if (x < min[0] || x > max[0] || y < min[1] || y > max[1]) return null
         const c = cellY(y) * nx + cellX(x)
+        let best: number | null = null
         for (let k = offsets[c]; k < offsets[c + 1]; k++) {
             const t = fill[k]
             const a = idx[t * 3] * 3
@@ -78,9 +84,11 @@ export const createHeightSampler = (mesh: TinMesh): HeightSampler => {
             const l2 = 1 - l0 - l1
             const eps = -1e-6
             if (l0 < eps || l1 < eps || l2 < eps) continue
-            return l0 * p[a + 2] + l1 * p[b + 2] + l2 * p[cc + 2]
+            const z = l0 * p[a + 2] + l1 * p[b + 2] + l2 * p[cc + 2]
+            if (!highest) return z
+            if (best === null || z > best) best = z
         }
-        return null
+        return best
     }
     return { heightAt, min, max }
 }

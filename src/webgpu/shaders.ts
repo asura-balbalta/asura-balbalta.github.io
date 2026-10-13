@@ -34,10 +34,12 @@ const commonWgsl = /* wgsl */ `
         lighting: vec4f, // x 주변광, y 난반사, z 그림자 켬(0/1), w 안개 밀도(1/m, 0 이면 없음)
         fogColor: vec4f, // 안개색(배경색)
         hemi: vec4f, // x 반구 조명 세기(0 이면 없음)
+        lightViewProjNear: mat4x4f, // 가까운 캐스케이드(카메라 주변 40 m, 텍셀 4 cm)의 빛 기준 투영
     };
     @group(0) @binding(0) var<uniform> u: Uniforms;
     @group(0) @binding(1) var shadowMap: texture_depth_2d;
     @group(0) @binding(2) var shadowSampler: sampler_comparison;
+    @group(0) @binding(3) var shadowMapNear: texture_depth_2d;
 
     const LIGHT_DIR = vec3f(0.5, -0.5, 1.0); // 남동쪽 위에서 비추는 빛(고도각 약 55°). 지도 음영 관례는 북서(315°)이나 비교를 위해 바꿔 봄
 
@@ -54,24 +56,35 @@ const commonWgsl = /* wgsl */ `
         return u.stops[STOP_COUNT - 1u].yzw;
     }
 
-    // 이 점이 빛을 받는 비율(0 그림자 ~ 1 밝음). 그림자가 꺼져 있거나 섀도 맵 상자 밖이면 1
-    fn shadowFactor(world: vec3f, n: vec3f, l: vec3f) -> f32 {
-        if (u.lighting.z < 0.5) { return 1.0; }
-        // 빛을 향한 면만 법선 방향으로 조금 띄운다(자기 그림자 줄임). 빛을 등진 면은 어차피 난반사가 0
-        let offset = n * 0.4 * step(0.0, dot(n, l));
-        let p = u.lightViewProj * vec4f(world + offset, 1.0);
-        let ndc = p.xyz / p.w;
-        let uv = vec2f(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
-        if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 || ndc.z > 1.0 || ndc.z < 0.0) { return 1.0; }
+    // 섀도 맵 한 장에서 5×5 PCF(비교 샘플러의 선형 보간까지 합쳐 부드럽게). Level 판이라 분기 안에서도 쓸 수 있다
+    fn pcf(map: texture_depth_2d, uv: vec2f, z: f32) -> f32 {
         var lit = 0.0;
-        for (var y = -1; y <= 1; y = y + 1) {
-            for (var x = -1; x <= 1; x = x + 1) {
+        for (var y = -2; y <= 2; y = y + 1) {
+            for (var x = -2; x <= 2; x = x + 1) {
                 let o = vec2f(f32(x), f32(y)) * SHADOW_TEXEL;
-                // Level 판이라 균일하지 않은 분기 안에서도 쓸 수 있다(미분이 필요 없음)
-                lit = lit + textureSampleCompareLevel(shadowMap, shadowSampler, uv + o, ndc.z - 0.0012);
+                lit = lit + textureSampleCompareLevel(map, shadowSampler, uv + o, z - 0.0012);
             }
         }
-        return lit / 9.0;
+        return lit / 25.0;
+    }
+    // 빛 기준 투영 → (uv, 깊이, 상자 안이면 1)
+    fn lightCoord(m: mat4x4f, p: vec3f) -> vec4f {
+        let c = m * vec4f(p, 1.0);
+        let ndc = c.xyz / c.w;
+        let uv = vec2f(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+        let inside = uv.x >= 0.0 && uv.x <= 1.0 && uv.y >= 0.0 && uv.y <= 1.0 && ndc.z >= 0.0 && ndc.z <= 1.0;
+        return vec4f(uv, ndc.z, select(0.0, 1.0, inside));
+    }
+    // 이 점이 빛을 받는 비율(0 그림자 ~ 1 밝음). 가까운 캐스케이드 상자 안이면 그것을, 아니면 먼 것을 쓴다.
+    // 그림자가 꺼져 있거나 두 상자 밖이면 1. 빛을 향한 면만 법선 방향으로 조금 띄운다(자기 그림자 줄임. 텍셀 크기에 맞춰 4 cm / 40 cm)
+    fn shadowFactor(world: vec3f, n: vec3f, l: vec3f) -> f32 {
+        if (u.lighting.z < 0.5) { return 1.0; }
+        let facing = step(0.0, dot(n, l));
+        let near = lightCoord(u.lightViewProjNear, world + n * 0.08 * facing);
+        if (near.w > 0.5) { return pcf(shadowMapNear, near.xy, near.z); }
+        let far = lightCoord(u.lightViewProj, world + n * 0.4 * facing);
+        if (far.w < 0.5) { return 1.0; }
+        return pcf(shadowMap, far.xy, far.z);
     }
 
     fn shade(base: vec3f, n: vec3f, world: vec3f) -> vec3f {
@@ -207,16 +220,17 @@ export const createBuildingShader = () => ({
  * 섀도 맵을 뜨는 셰이더(정점만). 빛 기준 viewProj 로 깊이만 기록한다. 정점 입력은 위치 하나라 지형(tin·stepped)·건물의
  * 정점 버퍼를 그대로 쓴다(tin 의 법선 버퍼는 바인딩하지 않는다)
  *
+ * @param cascade "far"(카메라 주변 250 m) 또는 "near"(40 m). 쓰는 행렬이 다르다
  * @returns `{ label, code }` 형태의 GPUShaderModuleDescriptor
  */
-export const createShadowShader = () => ({
-    label: "shadow depth shader",
+export const createShadowShader = (cascade: "far" | "near") => ({
+    label: `shadow depth shader (${cascade})`,
     code: /* wgsl */ `
     ${commonWgsl}
 
     @vertex
     fn vertexMain(@location(0) pos: vec3f) -> @builtin(position) vec4f {
-        return u.lightViewProj * vec4f(pos, 1);
+        return u.${cascade === "near" ? "lightViewProjNear" : "lightViewProj"} * vec4f(pos, 1);
     }
     `,
 })

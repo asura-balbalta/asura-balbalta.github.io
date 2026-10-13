@@ -6,8 +6,10 @@ import { FpsCamera } from "./webgpu/camera"
  * 렌더 루프가 프레임마다 step(dt) 로 물리를 진행해 1인칭 카메라를 받아 간다.
  *
  * 동작 규칙은 예전 three.js 게임(../app/game, playerController)에서 가져왔다: 포인터 잠금 마우스 시점, WASD(화살표) 이동,
- * Space 점프(공중 점프 2번까지), W 두 번(0.32초 안) 대시. 충돌은 지형 높이(HeightSampler)만: 발이 지표 아래로 못 가고
- * 메쉬 범위 밖으로 못 나간다. 건물은 통과한다(최소 버전).
+ * Space 점프(공중 점프 2번까지), W 두 번(0.32초 안) 대시. 충돌은 높이 조회(HeightSampler)로만 한다: 발 높이는 지형과 건물 지붕
+ * (roofAt) 중 높은 쪽이고, 발이 그 아래로 못 가며, 새 자리의 발 높이가 지금보다 STEP_UP_MAX 보다 높으면(건물 벽) 못 간다.
+ * 막히면 x·y 한 축씩 따로 시도해 벽을 따라 미끄러진다. 시작점이 건물 안이면 지붕 위에서 시작한다(2026-10-13. 처음엔 건물을 통과했다).
+ * 메쉬 범위 밖으로 못 나간다.
  *
  * 움직임은 예전 코드와 같은 관성 모델(2026-10-13, 처음의 "누른 키 × 속도" 는 대시가 뚝 끊겨서 바꿈): 수평 속도를 상태로 두고
  * 키는 가속도(최고 속도 × 감쇠)로 더하며 매 프레임 e^(−k·dt) 로 감쇠한다(지상 k = damping, 공중은 0.15배라 거의 미끄러짐,
@@ -79,6 +81,8 @@ const PITCH_LIMIT = 1.5
 const FOV_Y = (70 * Math.PI) / 180
 /** 범위 가장자리에서 안쪽으로 둘 여유(m) */
 const EDGE_MARGIN = 0.5
+/** 걸어서 오를 수 있는 턱(m). 계단형 지형의 층 간격(1 m)은 넘고 건물 벽(4 m 이상)은 못 넘게 */
+const STEP_UP_MAX = 1.5
 /** onMove 알림 간격(초) */
 const MOVE_NOTIFY_INTERVAL = 0.1
 const MAX_DT = 0.05
@@ -115,11 +119,23 @@ export const createPlayer = ({
 }): Player => {
     let physics: WalkPhysics = { ...DEFAULT_WALK_PHYSICS, ...initialPhysics }
     let groundStep = initialGroundStep
-    /** 발 아래 지표 높이. 계단형이면 층 바닥으로 내림 */
+    /** 발 아래 높이: 지형(계단형이면 층 바닥으로 내림)과 건물 지붕 중 높은 쪽 */
     const groundAt = (gx: number, gy: number) => {
         const h = sampler.heightAt(gx, gy)
         if (h === null) return null
-        return groundStep ? Math.floor(h / groundStep) * groundStep : h
+        let g = groundStep ? Math.floor(h / groundStep) * groundStep : h
+        const roof = sampler.roofAt?.(gx, gy)
+        if (roof !== undefined && roof !== null && roof > g) g = roof
+        return g
+    }
+    /** 새 자리로 갈 수 있는지(메쉬 안이고 턱이 STEP_UP_MAX 이하). 가면 x·y·ground 를 바꾼다 */
+    const tryMove = (nx: number, ny: number, z: number) => {
+        const g = groundAt(nx, ny)
+        if (g === null || g > z + STEP_UP_MAX) return false
+        x = nx
+        y = ny
+        ground = g
+        return true
     }
     let x = clamp(spawn[0], sampler.min[0] + EDGE_MARGIN, sampler.max[0] - EDGE_MARGIN)
     let y = clamp(spawn[1], sampler.min[1] + EDGE_MARGIN, sampler.max[1] - EDGE_MARGIN)
@@ -279,15 +295,13 @@ export const createPlayer = ({
             if (Math.abs(vx) + Math.abs(vy) > 1e-4) {
                 const nx = clamp(x + vx * dt, sampler.min[0] + EDGE_MARGIN, sampler.max[0] - EDGE_MARGIN)
                 const ny = clamp(y + vy * dt, sampler.min[1] + EDGE_MARGIN, sampler.max[1] - EDGE_MARGIN)
-                const g = groundAt(nx, ny)
-                // 메쉬 밖(가장자리의 빈 삼각형)이나 범위 끝에서는 멈춘다
-                if (g !== null) {
-                    x = nx
-                    y = ny
-                    ground = g
-                } else {
-                    vx = 0
-                    vy = 0
+                // 막히면(메쉬 밖·범위 끝·건물 벽) 한 축씩 따로 시도해 벽을 따라 미끄러지고, 막힌 축의 속도는 버린다
+                if (!tryMove(nx, ny, z)) {
+                    const movedX = tryMove(nx, y, z)
+                    const movedY = !movedX && tryMove(x, ny, z)
+                    if (!movedX) vx = 0
+                    if (!movedY && !movedX) vy = 0
+                    else if (movedX) vy = 0
                 }
             }
             vz -= physics.gravity * dt
