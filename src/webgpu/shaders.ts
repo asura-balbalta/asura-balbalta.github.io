@@ -75,16 +75,21 @@ const commonWgsl = /* wgsl */ `
         let inside = uv.x >= 0.0 && uv.x <= 1.0 && uv.y >= 0.0 && uv.y <= 1.0 && ndc.z >= 0.0 && ndc.z <= 1.0;
         return vec4f(uv, ndc.z, select(0.0, 1.0, inside));
     }
-    // 이 점이 빛을 받는 비율(0 그림자 ~ 1 밝음). 가까운 캐스케이드 상자 안이면 그것을, 아니면 먼 것을 쓴다.
-    // 그림자가 꺼져 있거나 두 상자 밖이면 1. 빛을 향한 면만 법선 방향으로 조금 띄운다(자기 그림자 줄임. 텍셀 크기에 맞춰 4 cm / 40 cm)
+    // 이 점이 빛을 받는 비율(0 그림자 ~ 1 밝음). 가까운 캐스케이드 상자 안이면 그것을, 아니면 먼 것을 쓰되, 가까운 상자의
+    // 가장자리 15% 띠에서는 둘을 서서히 섞어 경계선이 보이지 않게 한다(2026-10-13, 칼같이 나뉘던 것).
+    // 그림자가 꺼져 있거나 두 상자 밖이면 1. 빛을 향한 면만 법선 방향으로 조금 띄운다(자기 그림자 줄임. 텍셀 크기에 맞춰 8 cm / 40 cm)
     fn shadowFactor(world: vec3f, n: vec3f, l: vec3f) -> f32 {
         if (u.lighting.z < 0.5) { return 1.0; }
         let facing = step(0.0, dot(n, l));
         let near = lightCoord(u.lightViewProjNear, world + n * 0.08 * facing);
-        if (near.w > 0.5) { return pcf(shadowMapNear, near.xy, near.z); }
+        let edge = min(min(near.x, 1.0 - near.x), min(near.y, 1.0 - near.y));
+        let w = select(0.0, smoothstep(0.0, 0.15, edge), near.w > 0.5);
+        if (w >= 1.0) { return pcf(shadowMapNear, near.xy, near.z); }
         let far = lightCoord(u.lightViewProj, world + n * 0.4 * facing);
-        if (far.w < 0.5) { return 1.0; }
-        return pcf(shadowMap, far.xy, far.z);
+        var farLit = 1.0;
+        if (far.w > 0.5) { farLit = pcf(shadowMap, far.xy, far.z); }
+        if (w <= 0.0) { return farLit; }
+        return mix(farLit, pcf(shadowMapNear, near.xy, near.z), w);
     }
 
     fn shade(base: vec3f, n: vec3f, world: vec3f) -> vec3f {
