@@ -35,7 +35,7 @@ import { LIQUID_GLASS_DEFAULT, useLiquidGlass } from "./ui/liquidGlass"
 import { WalkControls } from "./ui/WalkControls"
 import { WalkHud } from "./ui/WalkHud"
 import { OrbitHud } from "./ui/OrbitHud"
-import { BuildingCard } from "./ui/BuildingCard"
+import { TargetHud } from "./ui/TargetHud"
 import type { BuildingHit } from "./buildingPick"
 import { PillPosition, WalkPill } from "./ui/WalkPill"
 import { DEFAULT_WALK_PHYSICS, PlayerMove, WalkPhysics } from "./player"
@@ -490,8 +490,14 @@ function App({
     const [terrainProgress, setTerrainProgress] = useState<Progress | null>(null)
     /** 만드는 중인 내보내기 형식과 진행률 */
     const [exporting, setExporting] = useState<{ kind: ExportKind; ratio?: number } | null>(null)
-    /** 걸어 보기 중 클릭으로 고정한 건물(속성 카드). 바라보기만 한 건물은 렌더러가 강조만 하고 여기 두지 않는다 */
+    /** 걸어 보기 중 조준점이 가리키는 건물(TargetHud 요약·조준경 반응)과 클릭으로 고정한 건물(TargetHud 8행). 강조는 렌더러가 직접 */
+    const [lookedBuilding, setLookedBuilding] = useState<BuildingHit | null>(null)
     const [pinnedBuilding, setPinnedBuilding] = useState<BuildingHit | null>(null)
+    // 고정 중 조준점이 다른 건물에 걸리면 고정을 풀고 그 건물 요약을 보인다(2026-10-15, by @nanangqq). 아무것도 안 보면 고정 유지
+    useEffect(() => {
+        if (!pinnedBuilding || !lookedBuilding) return
+        if (lookedBuilding.tileId !== pinnedBuilding.tileId || lookedBuilding.index !== pinnedBuilding.index) setPinnedBuilding(null)
+    }, [lookedBuilding])
 
     /**
      * 범위의 지형을 도엽 단위로 받아 올린다. 사각형 확정이 부른다. 진행·도엽·완료는 아래 구독이 받는다.
@@ -704,6 +710,7 @@ function App({
                     onWalkTileCount={setWalkTileCount}
                     renderDebug={renderDebug}
                     walkStart={preset && { spawn: preset.spawn, yaw: preset.yaw, pitch: preset.pitch }}
+                    onBuildingLook={setLookedBuilding}
                     onBuildingPin={setPinnedBuilding}
                     onError={(err) => {
                         // 렌더러를 못 만들면(어댑터 없음 등) 도엽은 받아도 올릴 곳이 없다. 원인을 보이고 잠금을 푼다
@@ -769,9 +776,16 @@ function App({
             )}
             {/* 궤도 보기 중 위 가운데 마우스 조작 안내. 걸어 보기에 들어가면 같은 자리에 WalkHud 가 선다 */}
             {!isMobile && view === "3d" && terrainReady && !walking && <OrbitHud />}
-            {walking && <WalkHud focused={walkFocused} showEscHint={escHint} onExit={stopWalking} />}
-            {/* 둘러보기 중 클릭으로 고정한 건물의 속성 카드(오른쪽 아래). 캔버스가 걸어 보기에서 나가면 null 로 지운다 */}
-            {walking && pinnedBuilding && <BuildingCard hit={pinnedBuilding} onClose={() => setPinnedBuilding(null)} />}
+            {walking && (
+                <WalkHud
+                    focused={walkFocused}
+                    showEscHint={escHint}
+                    onExit={stopWalking}
+                    targeting={!!lookedBuilding}
+                />
+            )}
+            {/* 둘러보기 중 조준점 오른쪽의 건물 정보(바라보면 요약, 클릭으로 고정하면 8행). 캔버스가 걸어 보기에서 나가면 둘 다 null */}
+            {walking && walkFocused && <TargetHud looked={lookedBuilding} pinned={pinnedBuilding} />}
             {walking && (
                 <WalkControls
                     physics={walkPhysics}

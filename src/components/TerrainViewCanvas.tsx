@@ -8,6 +8,9 @@ import type { TileData } from "../terrainTiles.worker"
 import { TERRAIN_THEMES, Theme } from "../terrainTheme"
 import { FpsCamera, fpsForward, OrbitCamera } from "../webgpu/camera"
 import { BuildingHit, createBuildingPicker } from "../buildingPick"
+
+/** 둘러보기 조준점의 건물 찾기 사거리(m). 처음 300 은 멀리 있는 건물에 조준경이 반응하지 않아 1 km 로(2026-10-15, by @nanangqq) */
+const PICK_RANGE_M = 1000
 import {
     createTerrainRenderFunctionAndUpdateFunctions,
     DEFAULT_LIGHTING,
@@ -407,7 +410,7 @@ export const TerrainViewCanvas = ({
         // 거리 거르기(L4): 반경 밖 도엽은 그리지 않는다. 궤도 보기로 돌아가면 끈다
         renderer.updaters.cullRadiusUpdater(renderDebugRef.current?.walkRadius ?? WALK_CULL_RADIUS)
         player.attach(canvas)
-        // 조준점 건물 찾기(10 Hz, 사거리 300 m): 바뀌면 렌더러 강조와 부모(onBuildingLook)에 알린다. pick=0 이면 끈다
+        // 조준점 건물 찾기(10 Hz, 사거리 PICK_RANGE_M): 바뀌면 렌더러 강조와 부모(onBuildingLook)에 알린다. pick=0 이면 끈다
         const picker = createBuildingPicker()
         const pickTimer =
             renderDebugRef.current?.pick === false
@@ -422,7 +425,7 @@ export const TerrainViewCanvas = ({
                           const step = groundStepRef.current
                           return g === null || step === null ? g : Math.floor(g / step) * step
                       }
-                      const hit = picker.pick(tiles.tiles.values(), cam.eye, fpsForward(cam), 300, groundAt)
+                      const hit = picker.pick(tiles.tiles.values(), cam.eye, fpsForward(cam), PICK_RANGE_M, groundAt)
                       const prev = lookedRef.current
                       if (hit?.tileId === prev?.tileId && hit?.index === prev?.index) return
                       lookedRef.current = hit

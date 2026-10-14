@@ -41,7 +41,8 @@ const FOG_COLOR_OFFSET = LIGHTING_OFFSET + 16 // vec4f: 안개색
 const HEMI_OFFSET = FOG_COLOR_OFFSET + 16 // vec4f: 반구 조명 세기
 const LIGHT_VP_NEAR_OFFSET = HEMI_OFFSET + 16 // 가까운 캐스케이드의 빛 기준 viewProj mat4x4f
 const SKY_OFFSET = LIGHT_VP_NEAR_OFFSET + 64 // vec4f: 태양 방향 xyz + 하늘 켬
-const UNIFORM_SIZE = SKY_OFFSET + 16 // viewProj(0~64) + zRange(64~72) + eye(80~92) + stops + buildingColor + lightViewProj + lighting + fogColor + hemi + lightViewProjNear + sky
+const HIGHLIGHT_COLOR_OFFSET = SKY_OFFSET + 16 // vec4f: 조준점 건물 강조색(테마 accent) + 투명도
+const UNIFORM_SIZE = HIGHLIGHT_COLOR_OFFSET + 16 // viewProj(0~64) + zRange(64~72) + eye(80~92) + stops + buildingColor + lightViewProj + lighting + fogColor + hemi + lightViewProjNear + sky + highlightColor
 const SHADOW_FORMAT: GPUTextureFormat = "depth32float"
 /** 빛 방향(표면에서 빛으로, 남동 위 고도각 60°). shaders.ts 의 LIGHT_DIR 과 같아야 한다. 하늘의 태양은 이 방위각에 테마의 고도를 쓴다 */
 const LIGHT_DIR: Vec3 = [0.40825, -0.40825, 1]
@@ -112,7 +113,7 @@ export type RenderDebug = {
     pointerLock?: boolean
     /** false 면 마우스로 시점을 돌리지 않는다(자동 캡처의 결정론: 보이는 창 위를 지나는 실제 마우스가 시점을 바꾸지 않게) */
     mouseLook?: boolean
-    /** false 면 둘러보기 중 조준점의 건물 찾기(강조·속성 카드)를 끈다(TerrainViewCanvas·buildingPick.ts) */
+    /** false 면 둘러보기 중 조준점의 건물 찾기(강조·조준점 옆 정보)를 끈다(TerrainViewCanvas·buildingPick.ts) */
     pick?: boolean
 }
 /**
@@ -696,11 +697,14 @@ const createTerrainDrawingPassAndUpdaters = (
      *
      * @param theme 색표 단계 STOP_COUNT 개(높이 오름차순)와 건물색을 가진 테마. 태양 고도는 디버그 설정(sun)이 있으면 그 값
      */
-    const paletteUpdater = (theme: Pick<TerrainTheme, "stops" | "buildingColor" | "sunAltitude">) => {
+    const paletteUpdater = (theme: Pick<TerrainTheme, "stops" | "buildingColor" | "sunAltitude" | "ui">) => {
         lastTheme = theme
         device.queue.writeBuffer(uniformBuffer, STOPS_OFFSET, stopsToUniform(theme.stops))
         const { r, g, b } = hexToRgb(theme.buildingColor)
         device.queue.writeBuffer(uniformBuffer, BUILDING_COLOR_OFFSET, new Float32Array([r, g, b, 1]))
+        // 조준점 건물 강조색: UI 강조색(accent, 라이트 #0f6cbd · 다크 #bae6fd)을 0.45 로 덮는다
+        const accent = hexToRgb(theme.ui.accent)
+        device.queue.writeBuffer(uniformBuffer, HIGHLIGHT_COLOR_OFFSET, new Float32Array([accent.r, accent.g, accent.b, 0.45]))
         sunDir = sunDirection(getDebug().sun ?? theme.sunAltitude, [LIGHT_DIR[0], LIGHT_DIR[1]])
         writeSky()
     }

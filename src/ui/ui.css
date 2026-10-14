@@ -577,61 +577,77 @@ button.ui-status-pill:focus-visible,
 }
 
 /* 테스트용 물리 조절 패널: 미니맵 아래 오른쪽 */
-/* 둘러보기 중 클릭으로 고정한 건물의 속성 카드(BuildingCard): 오른쪽 아래, 상태 표시줄(28px) 위. 물리 조절 패널과 같은 단색 판 */
-.ui-building-card {
+/* 둘러보기 중 조준점 오른쪽의 건물 정보(TargetHud): 유리 판 없이 리더 라인(가로선 → 세로 막대)과 accent 글자. 밝은 지형 위에서도
+   읽히도록 글자에 판 색의 흐린 테두리. 입력은 받지 않는다 */
+.ui-target-hud {
     position: fixed;
-    right: 12px;
-    bottom: 40px;
+    left: calc(50% + 18px);
+    top: 50%;
     z-index: 20;
-    width: 280px;
-    box-sizing: border-box;
-    padding: 8px 12px 10px;
-    font-size: 12px;
-    line-height: 18px;
-}
-.ui-building-card-header {
+    pointer-events: none;
     display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-    margin-bottom: 6px;
-}
-.ui-building-card-title {
-    font-weight: 600;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    align-items: flex-start;
+    color: var(--ui-accent-text);
+    /* 영화 HUD 글씨처럼 고정폭(2026-10-15, by @nanangqq). 한글은 시스템 한글 글꼴로 떨어진다 */
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+    font-size: 12px;
+    line-height: 16px;
     white-space: nowrap;
+    text-shadow:
+        0 0 3px var(--ui-panel),
+        0 0 6px var(--ui-panel),
+        0 0 10px var(--ui-panel);
 }
-.ui-building-card-close {
+.ui-target-hud-lead {
     flex: none;
     width: 22px;
-    height: 22px;
-    border: 0;
-    border-radius: 6px;
-    background: transparent;
-    color: var(--ui-text-secondary);
-    font-size: 16px;
-    line-height: 22px;
-    cursor: pointer;
+    height: 1px;
+    margin-top: -0.5px;
+    background: var(--ui-accent);
 }
-.ui-building-card-close:hover {
-    background: var(--ui-hover);
+.ui-target-hud-body {
+    margin-top: -9px;
+    padding-left: 8px;
+    border-left: 1px solid var(--ui-accent);
 }
-.ui-building-card-rows {
+.ui-target-hud-title {
+    font-size: 13px;
+    line-height: 18px;
+    font-weight: 600;
+}
+.ui-target-hud-summary {
+    opacity: 0.85;
+}
+/* 고정으로 8행이 펼쳐질 때 조준경이 벌어지듯 살짝 커지며 나타난다 */
+@keyframes ui-target-expand {
+    from {
+        opacity: 0;
+        transform: scale(0.92) translateY(-4px);
+    }
+    to {
+        opacity: 1;
+        transform: none;
+    }
+}
+.ui-target-hud-rows {
     display: grid;
-    grid-template-columns: 76px 1fr;
+    grid-template-columns: 64px 1fr;
     column-gap: 8px;
-    row-gap: 1px;
+    row-gap: 0;
+    margin: 4px 0 0;
+    transform-origin: 0 0;
+    animation: ui-target-expand 0.18s ease-out;
+}
+.ui-target-hud-rows dt {
+    opacity: 0.7;
+}
+.ui-target-hud-rows dd {
     margin: 0;
 }
-.ui-building-card-rows dt {
-    color: var(--ui-text-secondary);
-}
-.ui-building-card-rows dd {
-    margin: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+.ui-target-hud-hint {
+    margin-top: 4px;
+    font-size: 11px;
+    opacity: 0.6;
 }
 
 .ui-walk-controls {
@@ -770,11 +786,47 @@ button.ui-status-pill:focus-visible,
     z-index: 20;
     pointer-events: none;
 }
-.ui-crosshair-halo {
+/* 조준경(WalkHud Reticle): 흐린 테두리(halo) 위에 선. 평소엔 십자만, 건물이 걸리면(.ui-reticle-targeting) 십자가 1.35배 벌어지며
+   팔 끝에 걸치는 원이 나타나고(투명 → 불투명, 0.6 → 1배) accent 색 */
+.ui-reticle-halo {
     stroke: var(--ui-crosshair-halo);
+    stroke-width: 3.2;
 }
-.ui-crosshair-line {
+.ui-reticle-line {
     stroke: var(--ui-text);
+    stroke-width: 1.2;
+    transition: stroke 0.15s;
+}
+.ui-reticle-dot-halo {
+    fill: var(--ui-crosshair-halo);
+}
+.ui-reticle-dot {
+    fill: var(--ui-text);
+    transition: fill 0.15s;
+}
+.ui-reticle-arms,
+.ui-reticle-ring {
+    transform-origin: 0 0;
+    transition:
+        transform 0.18s ease-out,
+        opacity 0.18s ease-out;
+}
+.ui-reticle-ring {
+    opacity: 0;
+    transform: scale(0.6);
+}
+.ui-reticle-targeting .ui-reticle-arms {
+    transform: scale(1.35);
+}
+.ui-reticle-targeting .ui-reticle-ring {
+    opacity: 1;
+    transform: scale(1);
+}
+.ui-reticle-targeting .ui-reticle-line {
+    stroke: var(--ui-accent);
+}
+.ui-reticle-targeting .ui-reticle-dot {
+    fill: var(--ui-accent);
 }
 
 /* ---- 레이어 패널 ---- */

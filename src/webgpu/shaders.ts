@@ -38,6 +38,7 @@ const commonWgsl = /* wgsl */ `
         hemi: vec4f, // x 반구 조명 세기(0 이면 없음)
         lightViewProjNear: mat4x4f, // 가까운 캐스케이드(카메라 주변 40 m, 텍셀 4 cm)의 빛 기준 투영
         sky: vec4f, // xyz 태양 방향(하늘·안개용), w 하늘 켬(0/1)
+        highlightColor: vec4f, // 조준점 건물 강조색(테마 accent) rgb + 투명도
     };
     @group(0) @binding(0) var<uniform> u: Uniforms;
     @group(0) @binding(1) var shadowMap: texture_depth_2d;
@@ -262,7 +263,7 @@ export const createBuildingHighlightShader = () => ({
 
     @fragment
     fn fragmentMain() -> @location(0) vec4f {
-        return vec4f(1.0, 0.72, 0.2, 0.45);
+        return u.highlightColor;
     }
     `,
 })
