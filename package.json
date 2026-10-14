@@ -11,6 +11,7 @@
         "dev": "esbuild --bundle src/index.tsx src/*.worker.ts src/export/*.worker.ts --outdir=dist --sourcemap --watch",
         "test": "echo \"Error: no test specified\" && exit 1",
         "typecheck": "tsc --noEmit",
+        "render-check": "node scripts/render-check.mjs",
         "postinstall": "patch-package"
     },
     "author": "",
@@ -44,6 +45,7 @@
         "esbuild": "^0.28.2",
         "firebase-tools": "^15.30.1",
         "patch-package": "^8.0.1",
+        "playwright": "^1.64.0",
         "typescript": "6.0.3"
     }
 }
