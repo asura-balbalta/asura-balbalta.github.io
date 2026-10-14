@@ -244,6 +244,30 @@ export const createBuildingShader = () => ({
 })
 
 /**
+ * 둘러보기 중 조준점이 가리키는 건물을 덮는 강조 셰이더. 건물 셰이더와 같은 정점 입력·uniform 으로 같은 삼각형 범위를 한 번 더
+ * 그리며, 조각은 반투명 주황 한 색(블렌딩은 파이프라인이, 깊이는 greater-equal 로 같은 면을 통과). 조명은 넣지 않아 어느 면이든
+ * 같은 색으로 보인다
+ *
+ * @returns `{ label, code }` 형태의 GPUShaderModuleDescriptor
+ */
+export const createBuildingHighlightShader = () => ({
+    label: "building highlight shader",
+    code: /* wgsl */ `
+    ${commonWgsl}
+
+    @vertex
+    fn vertexMain(@location(0) pos: vec3f) -> @builtin(position) vec4f {
+        return u.viewProj * vec4f(pos, 1);
+    }
+
+    @fragment
+    fn fragmentMain() -> @location(0) vec4f {
+        return vec4f(1.0, 0.72, 0.2, 0.45);
+    }
+    `,
+})
+
+/**
  * 섀도 맵을 뜨는 셰이더(정점만). 빛 기준 viewProj 로 깊이만 기록한다. 정점 입력은 위치 하나라 지형(tin·stepped)·건물의
  * 정점 버퍼를 그대로 쓴다(tin 의 법선 버퍼는 바인딩하지 않는다)
  *

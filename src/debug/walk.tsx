@@ -69,6 +69,7 @@ export const parseWalkParams = (params: URLSearchParams): { preset: AppPreset; r
         aodebug,
         pointerLock: flag(params, "lock"),
         mouseLook: flag(params, "look"),
+        pick: flag(params, "pick"),
     }
     return { preset, renderDebug, notes }
 }

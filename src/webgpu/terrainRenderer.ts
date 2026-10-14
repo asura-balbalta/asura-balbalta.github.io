@@ -20,6 +20,7 @@ import {
 } from "./camera"
 import { initWebGPU } from "./device"
 import {
+    createBuildingHighlightShader,
     createBuildingShader,
     createShadowShader,
     createSmoothTerrainShader,
@@ -111,6 +112,8 @@ export type RenderDebug = {
     pointerLock?: boolean
     /** false 면 마우스로 시점을 돌리지 않는다(자동 캡처의 결정론: 보이는 창 위를 지나는 실제 마우스가 시점을 바꾸지 않게) */
     mouseLook?: boolean
+    /** false 면 둘러보기 중 조준점의 건물 찾기(강조·속성 카드)를 끈다(TerrainViewCanvas·buildingPick.ts) */
+    pick?: boolean
 }
 /**
  * 둘러보기 중 장면에 그릴 반경(m). 이보다 먼 도엽은 그리지 않는다(L4, 2026-10-14). 안개 1/1200 에서 5 km 의 가시도는 약 1.5 % 라
@@ -326,6 +329,8 @@ const createTerrainDrawingPassAndUpdaters = (
         name: string,
         shader: GPUShaderModuleDescriptor,
         buffers: GPUVertexBufferLayout[],
+        /** overlay: 반투명으로 덮어 그리는 파이프라인(건물 강조). 알파 블렌딩, 깊이는 읽기만(같은 면을 통과하도록 greater-equal) */
+        options: { overlay?: boolean } = {},
     ) => {
         const shaderModule = device.createShaderModule(shader)
         const pipeline = device.createRenderPipeline({
@@ -335,24 +340,38 @@ const createTerrainDrawingPassAndUpdaters = (
             fragment: {
                 module: shaderModule,
                 entryPoint: "fragmentMain",
-                targets: [{ format }],
+                targets: [
+                    options.overlay
+                        ? {
+                              format,
+                              blend: {
+                                  color: { srcFactor: "src-alpha", dstFactor: "one-minus-src-alpha", operation: "add" },
+                                  alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" },
+                              },
+                          }
+                        : { format },
+                ],
             },
             primitive: { topology: "triangle-list", cullMode: "none" },
             depthStencil: {
                 format: DEPTH_FORMAT,
-                depthWriteEnabled: true,
-                depthCompare: "greater", // 역순 깊이
+                depthWriteEnabled: !options.overlay,
+                depthCompare: options.overlay ? "greater-equal" : "greater", // 역순 깊이
             },
         })
+        // layout "auto" 는 셰이더가 실제로 쓰는 바인딩만 레이아웃에 넣는다. 강조(overlay) 셰이더는 uniform 만 써서 섀도 맵 entry 를
+        // 넣으면 바인드그룹이 무효가 되고(그 프레임의 command buffer 전체가 버려져 화면이 검게 됨, 2026-10-15), 0 번만 넣는다
         const bindGroup = device.createBindGroup({
             label: `bind group (${name})`,
             layout: pipeline.getBindGroupLayout(0),
-            entries: [
-                { binding: 0, resource: { buffer: uniformBuffer } },
-                { binding: 1, resource: shadowView },
-                { binding: 2, resource: shadowSampler },
-                { binding: 3, resource: shadowViewNear },
-            ],
+            entries: options.overlay
+                ? [{ binding: 0, resource: { buffer: uniformBuffer } }]
+                : [
+                      { binding: 0, resource: { buffer: uniformBuffer } },
+                      { binding: 1, resource: shadowView },
+                      { binding: 2, resource: shadowSampler },
+                      { binding: 3, resource: shadowViewNear },
+                  ],
         })
         return { pipeline, bindGroup }
     }
@@ -382,7 +401,7 @@ const createTerrainDrawingPassAndUpdaters = (
     }
     const shadowCascades = [createShadowCascade("far", shadowView), createShadowCascade("near", shadowViewNear)]
 
-    const pipelines: Record<TerrainMode | OverlayLayerId, ReturnType<typeof createPipelineSet>> = {
+    const pipelines: Record<TerrainMode | OverlayLayerId | "buildingHighlight", ReturnType<typeof createPipelineSet>> = {
         tin: createPipelineSet("terrain tin", createSmoothTerrainShader(), [
             float32x3Layout(0),
             float32x3Layout(1),
@@ -391,6 +410,7 @@ const createTerrainDrawingPassAndUpdaters = (
             float32x3Layout(0),
         ]),
         buildings: createPipelineSet("buildings", createBuildingShader(), [float32x3Layout(0)]),
+        buildingHighlight: createPipelineSet("building highlight", createBuildingHighlightShader(), [float32x3Layout(0)], { overlay: true }),
     }
 
     let mode: TerrainMode = "tin"
@@ -399,6 +419,8 @@ const createTerrainDrawingPassAndUpdaters = (
         normalBuffer: GPUBuffer | null
         indexBuffer: GPUBuffer
         indexCount: number
+        /** 원본 메쉬 인덱스 배열에서 이 조각이 시작하는 자리(조각이 삼각형 순서대로 나뉘므로). 건물 강조가 삼각형 범위를 조각 안 자리로 옮기는 데 쓴다 */
+        indexStart: number
     }
     /** 레이어별로 GPU 에 올라간 메쉬 조각들. 한 프레임에 보이는 레이어의 조각 수만큼 drawIndexed 한다 */
     const layerChunks: Record<LayerId, GpuChunk[]> = { terrain: [], buildings: [] }
@@ -420,11 +442,12 @@ const createTerrainDrawingPassAndUpdaters = (
     }
 
     /** 조각을 GPU 버퍼로 올린 GpuChunk 를 만든다 */
-    const uploadChunk = (label: string, chunk: MeshChunk): GpuChunk => ({
+    const uploadChunk = (label: string, chunk: MeshChunk, indexStart = 0): GpuChunk => ({
         vertexBuffer: uploadBuffer(`${label} vertices`, GPUBufferUsage.VERTEX, chunk.positions),
         normalBuffer: chunk.normals ? uploadBuffer(`${label} normals`, GPUBufferUsage.VERTEX, chunk.normals) : null,
         indexBuffer: uploadBuffer(`${label} indices`, GPUBufferUsage.INDEX, chunk.indices),
         indexCount: chunk.indices.length,
+        indexStart,
     })
 
     /**
@@ -733,8 +756,10 @@ const createTerrainDrawingPassAndUpdaters = (
         const buildings: GpuChunk[] = []
         if (tile.buildings) {
             const b = tile.buildings
+            let indexStart = 0
             for (const c of splitMeshIntoChunks(b.positions, b.indices, undefined, device.limits.maxBufferSize)) {
-                buildings.push(uploadChunk(`tile ${id} buildings`, c))
+                buildings.push(uploadChunk(`tile ${id} buildings`, c, indexStart))
+                indexStart += c.indices.length
             }
         }
         streamTiles.set(id, { terrain, buildings, mode: tile.mode, bounds: tile.bounds ?? null })
@@ -843,7 +868,36 @@ const createTerrainDrawingPassAndUpdaters = (
                 pass.drawIndexed(c.indexCount)
             }
         }
+        // 건물 강조: 장면을 다 그린 뒤 그 건물의 삼각형 범위만 반투명으로 한 번 더(조각이 여럿이면 범위가 걸치는 조각마다 그 부분)
+        const h = highlight
+        const tile = h && layerVisible.buildings ? streamTiles.get(h.tileId) : undefined
+        if (h && tile) {
+            const first = h.faceStart * 3
+            const end = h.faceEnd * 3
+            const set = pipelines.buildingHighlight
+            pass.setPipeline(set.pipeline)
+            pass.setBindGroup(0, set.bindGroup)
+            for (const c of tile.buildings) {
+                const from = Math.max(first, c.indexStart)
+                const to = Math.min(end, c.indexStart + c.indexCount)
+                if (from >= to) continue
+                pass.setVertexBuffer(0, c.vertexBuffer)
+                pass.setIndexBuffer(c.indexBuffer, "uint32")
+                pass.drawIndexed(to - from, 1, from - c.indexStart)
+            }
+        }
         pass.end()
+    }
+
+    /** 강조할 건물: 도엽 id 와 그 도엽 건물 메쉬 안 삼각형 범위 [faceStart, faceEnd). null 이면 없음 */
+    let highlight: { tileId: string; faceStart: number; faceEnd: number } | null = null
+    /**
+     * 둘러보기 중 조준점이 가리키는 건물을 바꾼다(TerrainViewCanvas 가 buildingPick 결과로 10 Hz 쯤 부른다). 다음 프레임부터 반영
+     *
+     * @param next 도엽 id 와 삼각형 범위(BuildingTable 의 faceBase[k] ~ 다음 세운 건물). null 이면 강조 없음
+     */
+    const highlightUpdater = (next: { tileId: string; faceStart: number; faceEnd: number } | null) => {
+        highlight = next
     }
 
     return {
@@ -859,6 +913,7 @@ const createTerrainDrawingPassAndUpdaters = (
         streamClearUpdater,
         elevationRangeUpdater,
         cullRadiusUpdater,
+        highlightUpdater,
         meshUpdater,
         meshStreamStarter,
         streamedMeshUpdater,

@@ -577,6 +577,63 @@ button.ui-status-pill:focus-visible,
 }
 
 /* 테스트용 물리 조절 패널: 미니맵 아래 오른쪽 */
+/* 둘러보기 중 클릭으로 고정한 건물의 속성 카드(BuildingCard): 오른쪽 아래, 상태 표시줄(28px) 위. 물리 조절 패널과 같은 단색 판 */
+.ui-building-card {
+    position: fixed;
+    right: 12px;
+    bottom: 40px;
+    z-index: 20;
+    width: 280px;
+    box-sizing: border-box;
+    padding: 8px 12px 10px;
+    font-size: 12px;
+    line-height: 18px;
+}
+.ui-building-card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 6px;
+}
+.ui-building-card-title {
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.ui-building-card-close {
+    flex: none;
+    width: 22px;
+    height: 22px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--ui-text-secondary);
+    font-size: 16px;
+    line-height: 22px;
+    cursor: pointer;
+}
+.ui-building-card-close:hover {
+    background: var(--ui-hover);
+}
+.ui-building-card-rows {
+    display: grid;
+    grid-template-columns: 76px 1fr;
+    column-gap: 8px;
+    row-gap: 1px;
+    margin: 0;
+}
+.ui-building-card-rows dt {
+    color: var(--ui-text-secondary);
+}
+.ui-building-card-rows dd {
+    margin: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
 .ui-walk-controls {
     position: fixed;
     right: 12px;

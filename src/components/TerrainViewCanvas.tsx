@@ -6,7 +6,8 @@ import { createHeightSampler, HeightSampler, nearestTriangleCentroid } from "../
 import type { TerrainTilesClient } from "../terrainTilesClient"
 import type { TileData } from "../terrainTiles.worker"
 import { TERRAIN_THEMES, Theme } from "../terrainTheme"
-import { OrbitCamera } from "../webgpu/camera"
+import { FpsCamera, fpsForward, OrbitCamera } from "../webgpu/camera"
+import { BuildingHit, createBuildingPicker } from "../buildingPick"
 import {
     createTerrainRenderFunctionAndUpdateFunctions,
     DEFAULT_LIGHTING,
@@ -90,6 +91,8 @@ const initialCamera = ({ min, max }: MeshBounds): OrbitCamera => ({
  *   바뀌면 새로고침 없이 반영된다(렌더러 debugUpdater + 걸어 보기 중이면 조명 다시 쓰기). 운영은 undefined
  * @param props.walkStart 걸어 보기 시작점·yaw·pitch(디버그 페이지 프리셋). 들어갈 때 한 번 읽는다
  * @param props.onError 렌더러를 만들지 못했을 때(WebGPU 미지원·어댑터 없음 등). 부모가 토스트로 알리고 busy 를 푼다
+ * @param props.onBuildingLook 걸어 보기 중 조준점이 가리키는 건물이 바뀔 때(buildingPick.ts, 10 Hz. 없으면 null). 강조는 렌더러가 직접
+ * @param props.onBuildingPin 포커스 중 클릭했을 때 그 건물(없는 곳을 클릭하면 null). 걸어 보기에서 나가면 null
  */
 export const TerrainViewCanvas = ({
     tiles,
@@ -108,6 +111,8 @@ export const TerrainViewCanvas = ({
     renderDebug,
     walkStart,
     onError,
+    onBuildingLook,
+    onBuildingPin,
 }: {
     tiles: TerrainTilesClient
     layers?: LayerStates
@@ -125,6 +130,8 @@ export const TerrainViewCanvas = ({
     renderDebug?: RenderDebug
     walkStart?: WalkStart
     onError?: (err: Error) => void
+    onBuildingLook?: (hit: BuildingHit | null) => void
+    onBuildingPin?: (hit: BuildingHit | null) => void
 }) => {
     // 콜백이 렌더마다 새로 만들어져도 effect 를 다시 돌리지 않도록 ref 로 받는다
     const onWalkMoveRef = useRef(onWalkMove)
@@ -139,6 +146,14 @@ export const TerrainViewCanvas = ({
     renderDebugRef.current = renderDebug
     const onErrorRef = useRef(onError)
     onErrorRef.current = onError
+    const onBuildingLookRef = useRef(onBuildingLook)
+    onBuildingLookRef.current = onBuildingLook
+    const onBuildingPinRef = useRef(onBuildingPin)
+    onBuildingPinRef.current = onBuildingPin
+    /** 걸어 보기 중 마지막 프레임의 1인칭 카메라(조준점 건물 찾기가 눈·시선으로 쓴다) */
+    const walkCameraRef = useRef<FpsCamera | null>(null)
+    /** 지금 조준점이 가리키는 건물(클릭하면 이것을 고정한다) */
+    const lookedRef = useRef<BuildingHit | null>(null)
     const walkStartRef = useRef(walkStart)
     walkStartRef.current = walkStart
     /** 걸어 보기 중인 플레이어. 렌더 루프가 프레임마다 step 해 카메라를 쓴다 */
@@ -180,7 +195,9 @@ export const TerrainViewCanvas = ({
                     const player = walkRef.current
                     const dt = now - last
                     if (player) {
-                        r.updaters.cameraUpdater(player.step(dt / 1000))
+                        const cam = player.step(dt / 1000)
+                        walkCameraRef.current = cam
+                        r.updaters.cameraUpdater(cam)
                         frameSum += dt
                         frameCount++
                         if (now - frameReportAt >= 500) {
@@ -390,7 +407,35 @@ export const TerrainViewCanvas = ({
         // 거리 거르기(L4): 반경 밖 도엽은 그리지 않는다. 궤도 보기로 돌아가면 끈다
         renderer.updaters.cullRadiusUpdater(renderDebugRef.current?.walkRadius ?? WALK_CULL_RADIUS)
         player.attach(canvas)
+        // 조준점 건물 찾기(10 Hz, 사거리 300 m): 바뀌면 렌더러 강조와 부모(onBuildingLook)에 알린다. pick=0 이면 끈다
+        const picker = createBuildingPicker()
+        const pickTimer =
+            renderDebugRef.current?.pick === false
+                ? 0
+                : window.setInterval(() => {
+                      const cam = walkCameraRef.current
+                      if (!cam) return
+                      // 지형이 가로막은 건물은 고르지 않도록 지표 높이를 넘긴다. 계단형이면 그려진 면은 층 바닥(floor(z / step) · step)이라
+                      // 매끈한 TIN 보다 낮다. TIN 그대로 쓰면 계단 윗면을 스치는 시선이 "지형에 막힘" 으로 잘못 걸린다(플레이어 발 높이와 같은 규칙)
+                      const groundAt = (x: number, y: number) => {
+                          const g = combined.heightAt(x, y)
+                          const step = groundStepRef.current
+                          return g === null || step === null ? g : Math.floor(g / step) * step
+                      }
+                      const hit = picker.pick(tiles.tiles.values(), cam.eye, fpsForward(cam), 300, groundAt)
+                      const prev = lookedRef.current
+                      if (hit?.tileId === prev?.tileId && hit?.index === prev?.index) return
+                      lookedRef.current = hit
+                      renderer.updaters.highlightUpdater(hit && { tileId: hit.tileId, faceStart: hit.faceStart, faceEnd: hit.faceEnd })
+                      onBuildingLookRef.current?.(hit)
+                  }, 100)
         return () => {
+            window.clearInterval(pickTimer)
+            lookedRef.current = null
+            walkCameraRef.current = null
+            renderer.updaters.highlightUpdater(null)
+            onBuildingLookRef.current?.(null)
+            onBuildingPinRef.current?.(null)
             walkRef.current = null
             player.detach()
             unsubscribe()
@@ -472,8 +517,9 @@ export const TerrainViewCanvas = ({
             }}
             onPointerDown={(e) => {
                 if (walkRef.current) {
-                    // 걸어 보기 중 클릭: 포커스가 풀려 있으면 다시 잠금
-                    walkRef.current.focus()
+                    // 걸어 보기 중 클릭: 포커스가 풀려 있으면 다시 잠금, 포커스 중이면 조준점의 건물을 고정(없으면 고정 해제)
+                    if (walkFocused) onBuildingPinRef.current?.(lookedRef.current)
+                    else walkRef.current.focus()
                     return
                 }
                 pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY, button: e.button, pointerType: e.pointerType })

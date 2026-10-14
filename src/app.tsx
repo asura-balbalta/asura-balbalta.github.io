@@ -35,6 +35,8 @@ import { LIQUID_GLASS_DEFAULT, useLiquidGlass } from "./ui/liquidGlass"
 import { WalkControls } from "./ui/WalkControls"
 import { WalkHud } from "./ui/WalkHud"
 import { OrbitHud } from "./ui/OrbitHud"
+import { BuildingCard } from "./ui/BuildingCard"
+import type { BuildingHit } from "./buildingPick"
 import { PillPosition, WalkPill } from "./ui/WalkPill"
 import { DEFAULT_WALK_PHYSICS, PlayerMove, WalkPhysics } from "./player"
 import { clearPlayerMarker, showPlayerMarker } from "./playerMarker"
@@ -488,6 +490,8 @@ function App({
     const [terrainProgress, setTerrainProgress] = useState<Progress | null>(null)
     /** 만드는 중인 내보내기 형식과 진행률 */
     const [exporting, setExporting] = useState<{ kind: ExportKind; ratio?: number } | null>(null)
+    /** 걸어 보기 중 클릭으로 고정한 건물(속성 카드). 바라보기만 한 건물은 렌더러가 강조만 하고 여기 두지 않는다 */
+    const [pinnedBuilding, setPinnedBuilding] = useState<BuildingHit | null>(null)
 
     /**
      * 범위의 지형을 도엽 단위로 받아 올린다. 사각형 확정이 부른다. 진행·도엽·완료는 아래 구독이 받는다.
@@ -700,6 +704,7 @@ function App({
                     onWalkTileCount={setWalkTileCount}
                     renderDebug={renderDebug}
                     walkStart={preset && { spawn: preset.spawn, yaw: preset.yaw, pitch: preset.pitch }}
+                    onBuildingPin={setPinnedBuilding}
                     onError={(err) => {
                         // 렌더러를 못 만들면(어댑터 없음 등) 도엽은 받아도 올릴 곳이 없다. 원인을 보이고 잠금을 푼다
                         setBusy(false)
@@ -765,6 +770,8 @@ function App({
             {/* 궤도 보기 중 위 가운데 마우스 조작 안내. 걸어 보기에 들어가면 같은 자리에 WalkHud 가 선다 */}
             {!isMobile && view === "3d" && terrainReady && !walking && <OrbitHud />}
             {walking && <WalkHud focused={walkFocused} showEscHint={escHint} onExit={stopWalking} />}
+            {/* 둘러보기 중 클릭으로 고정한 건물의 속성 카드(오른쪽 아래). 캔버스가 걸어 보기에서 나가면 null 로 지운다 */}
+            {walking && pinnedBuilding && <BuildingCard hit={pinnedBuilding} onClose={() => setPinnedBuilding(null)} />}
             {walking && (
                 <WalkControls
                     physics={walkPhysics}
