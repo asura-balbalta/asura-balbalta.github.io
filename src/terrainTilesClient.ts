@@ -1,5 +1,6 @@
 import type { Extent } from "ol/extent"
 
+import { BuildingTable, mergeBuildingTables } from "./buildingTable"
 import type { TinMesh } from "./terrainData"
 import type { TerrainTilesRequest, TerrainTilesResponse, TileData, TileStyle, TileSummary } from "./terrainTiles.worker"
 import type { MeshBounds } from "./webgpu/terrainRenderer"
@@ -150,8 +151,12 @@ export const createTerrainTiles = () => {
                 listeners.delete(listener)
             }
         },
-        /** 범위를 골랐을 때. 도엽 목록을 찾고 5K 파일을 받은 뒤 중심에서 가까운 순으로 도엽을 만든다 */
-        select: (bbox: Extent, style: TileStyle) => send({ type: "select", bbox, style, maxBytes: CHUNK_BYTES }),
+        /** 범위를 골랐을 때. 도엽 목록을 찾고 5K 파일을 받은 뒤 중심에서 가까운 순으로 도엽을 만든다. bbox 는 콘솔에 디버그 주소와 함께 찍는다 */
+        select: (bbox: Extent, style: TileStyle) => {
+            const text = bbox.map((v) => Math.round(v)).join(",")
+            console.log(`선택 범위 bbox(3857): ${text}\n디버그 주소: ${location.origin}${location.pathname}#/debug/walk?bbox=${text}`)
+            send({ type: "select", bbox, style, maxBytes: CHUNK_BYTES })
+        },
         /** 표현 방식·층 간격을 바꾼다. 들고 있는 도엽을 다시 만들어 교체한다(끝나면 done) */
         setStyle: (style: TileStyle) => send({ type: "style", style }),
         /** 걸어 보기 시작·위치 갱신(5179 m). 선택 범위 밖 도엽을 반경 안에서 더한다 */
@@ -173,11 +178,12 @@ export const createTerrainTiles = () => {
         },
         /**
          * 선택 도엽(밖 도엽 제외)의 TIN·건물을 각각 한 메쉬로 합친다(내보내기용). 도엽 경계의 정점은 중복되지만 파일에는 무해하다.
-         * 건물 속성 표는 아직 합치지 않는다(계획서 L3)
+         * 건물 메쉬에는 도엽별 건물 표를 정점·삼각형 오프셋에 맞춰 합친 표(table)를 붙여 SKP·3DM 이 건물마다 그룹·속성을 만들 수 있게 한다(L3)
          */
-        mergedMeshes: (): { terrain: TinMesh | null; buildings: TinMesh | null } => {
+        mergedMeshes: (): { terrain: TinMesh | null; buildings: (TinMesh & { table?: BuildingTable }) | null } => {
             if (!origin) return { terrain: null, buildings: null }
-            const concat = (parts: TinMesh[]): TinMesh | null => {
+            /** 메쉬들을 잇고 각 조각이 시작하는 정점·삼각형 번호를 돌려준다 */
+            const concat = (parts: TinMesh[]): { mesh: TinMesh; offsets: { vertex: number; face: number }[] } | null => {
                 if (parts.length === 0) return null
                 let nv = 0
                 let ni = 0
@@ -187,21 +193,32 @@ export const createTerrainTiles = () => {
                 }
                 const positions = new Float32Array(nv)
                 const indices = new Uint32Array(ni)
+                const offsets: { vertex: number; face: number }[] = []
                 let ov = 0
                 let oi = 0
                 for (const m of parts) {
+                    offsets.push({ vertex: ov / 3, face: oi / 3 })
                     positions.set(m.positions, ov)
                     const base = ov / 3
                     for (let i = 0; i < m.indices.length; i++) indices[oi + i] = m.indices[i] + base
                     ov += m.positions.length
                     oi += m.indices.length
                 }
-                return { origin: origin!, positions, indices }
+                return { mesh: { origin: origin!, positions, indices }, offsets }
             }
             const selected = [...tiles.values()].filter((t) => !t.extra)
+            const withBuildings = selected.filter((t): t is TileData & { buildings: TinMesh } => !!t.buildings)
+            const terrain = concat(selected.map((t) => t.tin))
+            const buildings = concat(withBuildings.map((t) => t.buildings))
+            let table: BuildingTable | null = null
+            if (buildings && withBuildings.every((t) => t.buildingTable)) {
+                table = mergeBuildingTables(
+                    withBuildings.map((t, i) => ({ table: t.buildingTable!, vertexOffset: buildings.offsets[i].vertex, faceOffset: buildings.offsets[i].face })),
+                )
+            }
             return {
-                terrain: concat(selected.map((t) => t.tin)),
-                buildings: concat(selected.map((t) => t.buildings).filter((b): b is TinMesh => !!b)),
+                terrain: terrain?.mesh ?? null,
+                buildings: buildings ? (table ? { ...buildings.mesh, table } : buildings.mesh) : null,
             }
         },
         terminate: () => {

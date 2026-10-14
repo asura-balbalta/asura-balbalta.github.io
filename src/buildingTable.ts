@@ -119,6 +119,79 @@ export const createBuildingTable = (
     return table
 }
 
+/**
+ * 도엽별 건물 표를 하나로 합친다(2026-10-14 L3. 데이터 단위가 1K 도엽이 되면서 내보내기 때 도엽 메쉬를 이어 붙이므로 표도 같이 잇는다).
+ * 건물 단위 배열은 순서대로 잇고, 안에서 가리키는 번호는 오프셋을 더한다: pointStart·holeStart 는 앞 표들의 점 수(xy 길이의 절반)·구멍 수,
+ * vertexBase·faceBase 는 그 도엽 메쉬가 합친 메쉬에서 시작하는 정점·삼각형 번호(못 세운 건물의 NOT_BUILT 는 그대로).
+ * 코드 이름 표(useNames·structNames·useGroupNames)는 도엽마다 같으므로 첫 표의 것을 쓴다.
+ *
+ * @param parts 도엽 순서대로. vertexOffset·faceOffset 은 그 도엽 건물 메쉬가 합친 메쉬에서 시작하는 정점·삼각형 번호
+ * @returns 합친 표(새 배열). parts 가 비면 null
+ */
+export const mergeBuildingTables = (parts: { table: BuildingTable; vertexOffset: number; faceOffset: number }[]): BuildingTable | null => {
+    if (parts.length === 0) return null
+    const count = parts.reduce((n, p) => n + p.table.count, 0)
+    const xyLength = parts.reduce((n, p) => n + p.table.xy.length, 0)
+    const holeCount = parts.reduce((n, p) => n + p.table.holeLen.length, 0)
+    const first = parts[0].table
+    const out: BuildingTable = {
+        count,
+        ids: new Uint32Array(count),
+        heights: new Float32Array(count),
+        floors: new Uint8Array(count),
+        floorsUnder: new Uint8Array(count),
+        useCd: new Uint8Array(count),
+        structCd: new Uint8Array(count),
+        flags: new Uint8Array(count),
+        pointStart: new Uint32Array(count + 1),
+        xy: new Int32Array(xyLength),
+        holeStart: new Uint32Array(count + 1),
+        holeLen: new Uint32Array(holeCount),
+        vertexBase: new Uint32Array(count),
+        faceBase: new Uint32Array(count),
+        baseZ: new Float32Array(count),
+        builtHeight: new Float32Array(count),
+        names: [],
+        dongs: [],
+        nameSrc: new Uint8Array(count),
+        useNames: first.useNames.slice(),
+        structNames: first.structNames.slice(),
+        useGroupNames: first.useGroupNames.slice(),
+    }
+    let k0 = 0
+    let point0 = 0
+    let hole0 = 0
+    for (const { table: t, vertexOffset, faceOffset } of parts) {
+        const n = t.count
+        out.ids.set(t.ids, k0)
+        out.heights.set(t.heights, k0)
+        out.floors.set(t.floors, k0)
+        out.floorsUnder.set(t.floorsUnder, k0)
+        out.useCd.set(t.useCd, k0)
+        out.structCd.set(t.structCd, k0)
+        out.flags.set(t.flags, k0)
+        out.baseZ.set(t.baseZ, k0)
+        out.builtHeight.set(t.builtHeight, k0)
+        out.nameSrc.set(t.nameSrc, k0)
+        out.xy.set(t.xy, 2 * point0)
+        out.holeLen.set(t.holeLen, hole0)
+        for (let k = 0; k < n; k++) {
+            out.pointStart[k0 + k] = t.pointStart[k] + point0
+            out.holeStart[k0 + k] = t.holeStart[k] + hole0
+            out.vertexBase[k0 + k] = t.vertexBase[k] === NOT_BUILT ? NOT_BUILT : t.vertexBase[k] + vertexOffset
+            out.faceBase[k0 + k] = t.faceBase[k] === NOT_BUILT ? NOT_BUILT : t.faceBase[k] + faceOffset
+        }
+        out.names.push(...t.names)
+        out.dongs.push(...t.dongs)
+        k0 += n
+        point0 += t.xy.length / 2
+        hole0 += t.holeLen.length
+    }
+    out.pointStart[count] = point0
+    out.holeStart[count] = hole0
+    return out
+}
+
 /** 표의 typed array 버퍼 목록(postMessage 의 transfer 용). 문자열 배열은 transfer 대상이 아니라 복사된다 */
 export const buildingTableBuffers = (t: BuildingTable): ArrayBuffer[] =>
     [t.ids, t.heights, t.floors, t.floorsUnder, t.useCd, t.structCd, t.flags, t.pointStart, t.xy, t.holeStart, t.holeLen, t.vertexBase, t.faceBase, t.baseZ, t.builtHeight, t.nameSrc].map(
