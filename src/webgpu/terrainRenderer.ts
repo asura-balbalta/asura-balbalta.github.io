@@ -3,6 +3,7 @@ import { MeshChunk, TinMesh } from "../terrainData"
 import { hexToRgb, STOP_COUNT, stopsToUniform, TerrainTheme } from "../terrainTheme"
 import { createAoPasses } from "./ao"
 import { createSkyPass, sunDirection } from "./sky"
+import type { AoDebugMode } from "./ao"
 import {
     Camera,
     cameraEye,
@@ -86,27 +87,45 @@ export const DEFAULT_LIGHTING: Lighting = {
     sky: false,
     edge: 0,
 }
-/** 디버그: URL ?ao=0 이면 SSAO 끔, ?shadow=0 이면 그림자 끔, ?sky=0 이면 하늘 끔, ?edge=0.25 외곽선 세기, ?sun=60 태양 고도(°) */
-const debugParams = new URLSearchParams(window.location.search)
-const debugNumber = (key: string) => {
-    const v = Number(debugParams.get(key))
-    return debugParams.has(key) && Number.isFinite(v) ? v : null
+/**
+ * 렌더 디버그 설정. 운영 App 은 비운 채({}) 쓰고, 디버그 페이지(src/debug/walk.tsx)가 주소 해시의 파라미터를 해석해 채운다.
+ * 2026-10-14 까지는 운영 주소의 ?ao=0·?shadow=0·?sky=0·?edge=·?sun=·?lock=0 을 여기(모듈 상단)와 player.ts 가 직접 읽었다.
+ * 모든 항목은 선택이고, 없으면 기본 동작
+ */
+export type RenderDebug = {
+    /** false 면 둘러보기 SSAO 끔 */
+    ao?: boolean
+    /** false 면 둘러보기 그림자 끔 */
+    shadow?: boolean
+    /** false 면 절차적 하늘 끔(안개는 배경색으로) */
+    sky?: boolean
+    /** 외곽선 세기(0 ~ 1, 0 이면 끔). 없으면 EDGE_STRENGTH */
+    edge?: number
+    /** 하늘 태양 고도(°). 없으면 테마 값 */
+    sun?: number
+    /** SSAO 합성 pass 의 디버그 출력 모드(ao.ts AoDebugMode). 없으면 0 */
+    aodebug?: AoDebugMode
+    /** false 면 포인터 잠금 API 없이 흉내(내장 브라우저·자동 캡처용. player.ts) */
+    pointerLock?: boolean
 }
-/** 외곽선 기본 세기(0.18 = 18% 어둡게. 0.25 는 진했다, 2026-10-13). Chrome 에서 ?edge= 로 비교해 정하면 바꾼다 by @nanangqq */
+/** 외곽선 기본 세기(0.18 = 18% 어둡게. 0.25 는 진했다, 2026-10-13). Chrome 에서 edge= 로 비교해 정하면 바꾼다 by @nanangqq */
 const EDGE_STRENGTH = 0.18
-export const WALK_LIGHTING: Lighting = {
+/**
+ * 둘러보기(걸어 보기) 조명. 디버그 설정으로 SSAO·그림자·하늘을 끄거나 외곽선 세기를 바꿀 수 있다
+ *
+ * @param debug 렌더 디버그 설정(운영은 {})
+ */
+export const walkLighting = (debug: RenderDebug = {}): Lighting => ({
     ambient: 0.5,
     diffuse: 0.5,
-    shadows: debugParams.get("shadow") !== "0",
+    shadows: debug.shadow !== false,
     shadowRadius: 250,
     fogDensity: 1 / 1200,
     hemisphere: 0.35,
-    ao: debugParams.get("ao") !== "0",
-    sky: debugParams.get("sky") !== "0",
-    edge: debugNumber("edge") ?? EDGE_STRENGTH,
-}
-/** 테마의 태양 고도 대신 쓸 값(?sun=). null 이면 테마 값 */
-const DEBUG_SUN_ALTITUDE = debugNumber("sun")
+    ao: debug.ao !== false,
+    sky: debug.sky !== false,
+    edge: debug.edge ?? EDGE_STRENGTH,
+})
 
 /** 지형 표현 방식. tin: 정점 법선으로 부드럽게, stepped: 계단형(면 법선, 법선 버퍼 없음) */
 export type TerrainMode = "tin" | "stepped"
@@ -355,6 +374,8 @@ const createTerrainDrawingPassAndUpdaters = (
     format: GPUTextureFormat,
     depth: DepthHolder,
     initialAspect: number,
+    /** 지금 렌더 디버그 설정(태양 고도 덮어쓰기). 바뀌면 paletteUpdater 를 다시 불러야 반영된다 */
+    getDebug: () => RenderDebug,
 ) => {
     let aspect = initialAspect
     /** 마지막으로 올린 카메라. 비율이 바뀌면 같은 카메라로 viewProj 를 다시 쓴다 */
@@ -729,14 +750,20 @@ const createTerrainDrawingPassAndUpdaters = (
      * 표고 색표(uniform offset STOPS_OFFSET)와 건물색(BUILDING_COLOR_OFFSET)을 쓴다. 테마 전환 때 부른다.
      * 셰이더·파이프라인은 그대로다.
      *
-     * @param theme 색표 단계 STOP_COUNT 개(높이 오름차순)와 건물색을 가진 테마
+     * @param theme 색표 단계 STOP_COUNT 개(높이 오름차순)와 건물색을 가진 테마. 태양 고도는 디버그 설정(sun)이 있으면 그 값
      */
     const paletteUpdater = (theme: Pick<TerrainTheme, "stops" | "buildingColor" | "sunAltitude">) => {
+        lastTheme = theme
         device.queue.writeBuffer(uniformBuffer, STOPS_OFFSET, stopsToUniform(theme.stops))
         const { r, g, b } = hexToRgb(theme.buildingColor)
         device.queue.writeBuffer(uniformBuffer, BUILDING_COLOR_OFFSET, new Float32Array([r, g, b, 1]))
-        sunDir = sunDirection(DEBUG_SUN_ALTITUDE ?? theme.sunAltitude, [LIGHT_DIR[0], LIGHT_DIR[1]])
+        sunDir = sunDirection(getDebug().sun ?? theme.sunAltitude, [LIGHT_DIR[0], LIGHT_DIR[1]])
         writeSky()
+    }
+    /** 마지막 테마. 디버그 설정이 바뀌면 같은 테마로 태양을 다시 쓴다(refreshPalette) */
+    let lastTheme: Parameters<typeof paletteUpdater>[0] | null = null
+    const refreshPalette = () => {
+        if (lastTheme) paletteUpdater(lastTheme)
     }
 
     /**
@@ -882,6 +909,7 @@ const createTerrainDrawingPassAndUpdaters = (
         cameraUpdater,
         aspectUpdater,
         paletteUpdater,
+        refreshPalette,
     }
 }
 
@@ -899,21 +927,25 @@ const createTerrainDrawingPassAndUpdaters = (
  * @param options.width 캔버스 실제 픽셀 너비(canvas width 속성과 같아야 한다)
  * @param options.height 캔버스 실제 픽셀 높이
  * @param options.backgroundColor 처음 배경색(0 ~ 1). backgroundUpdater 로 바꿀 수 있다
+ * @param options.debug 처음 렌더 디버그 설정(태양 고도·AO 디버그 출력). debugUpdater 로 바꿀 수 있다. 운영은 생략
  * @returns render(한 프레임 그리기), updaters(meshUpdater, meshStreamStarter, streamedMeshUpdater, layerMeshUpdater,
- *   layerVisibilityUpdater, cameraUpdater, paletteUpdater, lightingUpdater, backgroundUpdater, resizeUpdater), destroy(device 해제)
+ *   layerVisibilityUpdater, cameraUpdater, paletteUpdater, lightingUpdater, backgroundUpdater, resizeUpdater, debugUpdater), destroy(device 해제)
  */
 export const createTerrainRenderFunctionAndUpdateFunctions = async ({
     canvasId,
     width,
     height,
     backgroundColor,
+    debug: initialDebug = {},
 }: {
     canvasId: string
     width: number
     height: number
     backgroundColor: { r: number; g: number; b: number }
+    debug?: RenderDebug
 }) => {
     const { context, device, format } = await initWebGPU(canvasId)
+    let debug = initialDebug
 
     /** 캔버스 픽셀 크기의 깊이 텍스처를 만든다(SSAO 가 읽으므로 TEXTURE_BINDING 도) */
     const createDepth = (w: number, h: number): DepthHolder => {
@@ -938,8 +970,9 @@ export const createTerrainRenderFunctionAndUpdateFunctions = async ({
         currentLighting,
         currentSun,
         setCameraListener,
+        refreshPalette,
         ...sceneUpdaters
-    } = createTerrainDrawingPassAndUpdaters(device, format, depth, width / height)
+    } = createTerrainDrawingPassAndUpdaters(device, format, depth, width / height, () => debug)
     fogColorUpdater(backgroundColor)
     // SSAO·외곽선(둘러보기): 오프스크린 장면 텍스처 + 합성 pass. 하늘 pass 는 장면 뒤 빈 픽셀을 채운다. 카메라가 바뀌면 같은 행렬을 받는다
     const ao = createAoPasses(device, format)
@@ -960,6 +993,12 @@ export const createTerrainRenderFunctionAndUpdateFunctions = async ({
     const backgroundUpdater = (color: { r: number; g: number; b: number }) => {
         background.color = color
         fogColorUpdater(color)
+    }
+    /** 렌더 디버그 설정을 바꾼다(태양 고도는 즉시 다시 쓰고, AO 디버그 출력은 다음 프레임부터). 조명 항목은 호출자가 lightingUpdater 로 */
+    const debugUpdater = (next: RenderDebug) => {
+        debug = next
+        refreshPalette()
+        sky.setSun(currentSun())
     }
 
     /**
@@ -988,17 +1027,20 @@ export const createTerrainRenderFunctionAndUpdateFunctions = async ({
         const encoder = device.createCommandEncoder()
         const canvasView = context.getCurrentTexture().createView()
         const lighting = currentLighting()
-        const offscreen = lighting.ao || lighting.edge > 0 ? ao.sceneView() : null
+        const aoDebug = debug.aodebug ?? 0
+        const offscreen = lighting.ao || lighting.edge > 0 || aoDebug !== 0 ? ao.sceneView() : null
         const target = offscreen ?? canvasView
         shadowPass(encoder)
         backgroundPass(encoder, target)
         scenePass(encoder, target)
         if (lighting.sky) sky.run(encoder, target, depth.view)
-        if (offscreen) ao.run(encoder, canvasView, { ao: lighting.ao, edge: lighting.edge, fogDensity: lighting.fogDensity })
+        if (offscreen) {
+            ao.run(encoder, canvasView, { ao: lighting.ao, edge: lighting.edge, fogDensity: lighting.fogDensity, debug: aoDebug })
+        }
         device.queue.submit([encoder.finish()])
     }
 
-    const updaters = { ...sceneUpdaters, paletteUpdater, backgroundUpdater, resizeUpdater }
+    const updaters = { ...sceneUpdaters, paletteUpdater, backgroundUpdater, resizeUpdater, debugUpdater }
 
     /** GPU device 와 그에 속한 버퍼·텍스처를 모두 해제한다. 컴포넌트 언마운트 때 호출 */
     const destroy = () => {

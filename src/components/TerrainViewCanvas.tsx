@@ -14,8 +14,9 @@ import {
     DEFAULT_LIGHTING,
     MeshBounds,
     meshBounds,
+    RenderDebug,
     TerrainMode,
-    WALK_LIGHTING,
+    walkLighting,
 } from "../webgpu/terrainRenderer"
 
 /** esbuild 가 src/terrainSteps.worker.ts 를 별도 entry 로 묶어 내는 파일. index.html 의 index.js 와 같은 폴더(dist)에 있다 */
@@ -42,6 +43,16 @@ const readViewportSize = () => ({
 type TRenderer = Awaited<
     ReturnType<typeof createTerrainRenderFunctionAndUpdateFunctions>
 >
+
+/** 걸어 보기 시작 상태(디버그 페이지 프리셋). 없는 항목은 기본 규칙(범위 가운데, 북쪽, 수평) */
+export type WalkStart = {
+    /** 시작 xy(메쉬 로컬, m). 거기에 메쉬가 없으면 가장 가까운 삼각형 위로 */
+    spawn?: [number, number]
+    /** 시작 방향(라디안. 0 = 동쪽, 반시계) */
+    yaw?: number
+    /** 시작 위아래 시점(라디안, 수평선 위로 +) */
+    pitch?: number
+}
 
 /**
  * 메쉬 범위에 맞춘 초기 카메라를 만든다.
@@ -95,6 +106,9 @@ const initialCamera = ({ min, max }: MeshBounds): OrbitCamera => ({
  * @param props.onWalkFrameTime 걸어 보기 중 프레임 간격(ms, 최근 평균)을 0.5초마다. rAF 간격이라 GPU 가 병목이면 그만큼 늘어난다
  * @param props.walkSelection 선택 범위(3857). 걸어 보기 중 주변 도엽을 스트리밍(walkTiles)하고, 선택 범위를 다 덮으면 선택 메쉬를 숨긴다
  * @param props.onWalkTileCount 스트리밍으로 들고 있는 도엽 수가 바뀔 때
+ * @param props.renderDebug 렌더 디버그 설정(디버그 페이지). 둘러보기 조명(SSAO·그림자·하늘·외곽선)·태양 고도·AO 디버그 출력·잠금 흉내.
+ *   바뀌면 새로고침 없이 반영된다(렌더러 debugUpdater + 걸어 보기 중이면 조명 다시 쓰기). 운영은 undefined
+ * @param props.walkStart 걸어 보기 시작점·yaw·pitch(디버그 페이지 프리셋). 들어갈 때 한 번 읽는다
  */
 export const TerrainViewCanvas = ({
     mesh,
@@ -115,6 +129,8 @@ export const TerrainViewCanvas = ({
     onWalkFrameTime,
     walkSelection,
     onWalkTileCount,
+    renderDebug,
+    walkStart,
 }: {
     mesh: TinMesh
     buildings?: TinMesh | null
@@ -134,6 +150,8 @@ export const TerrainViewCanvas = ({
     onWalkFrameTime?: (ms: number) => void
     walkSelection?: Extent
     onWalkTileCount?: (count: number) => void
+    renderDebug?: RenderDebug
+    walkStart?: WalkStart
 }) => {
     // 콜백이 렌더마다 새로 만들어져도 메쉬 effect 를 다시 돌리지 않도록 ref 로 받는다
     const onDoneRef = useRef(onDone)
@@ -152,6 +170,10 @@ export const TerrainViewCanvas = ({
     onWalkTileCountRef.current = onWalkTileCount
     const walkSelectionRef = useRef(walkSelection)
     walkSelectionRef.current = walkSelection
+    const renderDebugRef = useRef(renderDebug)
+    renderDebugRef.current = renderDebug
+    const walkStartRef = useRef(walkStart)
+    walkStartRef.current = walkStart
     /** 걸어 보기 중인 플레이어. 렌더 루프가 프레임마다 step 해 카메라를 쓴다 */
     const walkRef = useRef<Player | null>(null)
     /** mesh 별 지형 높이 조회기(걸어 보기에 들어갈 때 만들고 같은 mesh 면 다시 쓴다) */
@@ -185,6 +207,7 @@ export const TerrainViewCanvas = ({
             width: Math.round(size.width * size.dpr),
             height: Math.round(size.height * size.dpr),
             backgroundColor: TERRAIN_THEMES[theme].background,
+            debug: renderDebugRef.current,
         })
             .then((r) => {
                 if (cancelled) return r.destroy()
@@ -429,12 +452,16 @@ export const TerrainViewCanvas = ({
                   onError: (message) => console.error("도엽 스트리밍:", message),
               })
             : null
-        // 시작점: 선택 범위 가운데. 거기에 메쉬가 없으면(도엽 없는 바다 등) 가장 가까운 삼각형 위로
-        const center: [number, number] = [(sampler.min[0] + sampler.max[0]) / 2, (sampler.min[1] + sampler.max[1]) / 2]
+        // 시작점: 프리셋(디버그 페이지)이 있으면 그 자리, 아니면 선택 범위 가운데. 거기에 메쉬가 없으면(도엽 없는 바다 등) 가장 가까운 삼각형 위로
+        const start = walkStartRef.current
+        const center: [number, number] = start?.spawn ?? [(sampler.min[0] + sampler.max[0]) / 2, (sampler.min[1] + sampler.max[1]) / 2]
         const spawn = sampler.heightAt(center[0], center[1]) !== null ? center : (nearestTriangleCentroid(mesh, center[0], center[1]) ?? center)
         const player = createPlayer({
             sampler: combined,
             spawn,
+            yaw: start?.yaw,
+            pitch: start?.pitch,
+            pointerLock: renderDebugRef.current?.pointerLock !== false,
             onFocusChange: (focused) => onWalkFocusChangeRef.current?.(focused),
             onMove: (move) => {
                 onWalkMoveRef.current?.(move)
@@ -450,7 +477,7 @@ export const TerrainViewCanvas = ({
         })
         walkRef.current = player
         pointersRef.current.clear()
-        renderer.updaters.lightingUpdater(WALK_LIGHTING)
+        renderer.updaters.lightingUpdater(walkLighting(renderDebugRef.current))
         player.attach(canvas)
         return () => {
             walkRef.current = null
@@ -467,6 +494,12 @@ export const TerrainViewCanvas = ({
     useEffect(() => {
         if (walkPhysics) walkRef.current?.setPhysics(walkPhysics)
     }, [walkPhysics])
+    // 렌더 디버그 설정이 바뀌면(디버그 페이지에서 해시를 고침) 새로고침 없이 반영: 태양·AO 출력은 렌더러에, 조명 항목은 걸어 보기 중일 때 다시 쓴다
+    useEffect(() => {
+        if (!renderer) return
+        renderer.updaters.debugUpdater(renderDebug ?? {})
+        if (walkRef.current) renderer.updaters.lightingUpdater(walkLighting(renderDebug))
+    }, [renderer, renderDebug])
     /** 계단형이면 층 간격, 아니면 null. 플레이어 발 높이를 계단 바닥에 맞추는 데 쓴다 */
     const groundStep = mode === "stepped" ? stepInterval : null
     const groundStepRef = useRef(groundStep)

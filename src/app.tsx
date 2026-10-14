@@ -46,7 +46,25 @@ import { VWORLD_KEY } from "./config"
 import { clearSearchPin, showSearchPin } from "./searchPin"
 import { SearchHandle, searchPlaces, SearchResult, trimDanglingJamo } from "./vworld"
 import { Button, Menu, MenuItem, MenuList, MenuPopover, MenuTrigger } from "@fluentui/react-components"
-import { TerrainMode } from "./webgpu/terrainRenderer"
+import { RenderDebug, TerrainMode } from "./webgpu/terrainRenderer"
+
+/**
+ * 초기 상태 프리셋(디버그 페이지 src/debug/walk.tsx 가 주소 해시에서 만들어 넘긴다. 운영은 undefined).
+ * 지도가 준비되면 bbox 를 사용자가 그린 것처럼 확정해 같은 로딩 경로를 타고, 3D 가 준비되면(walk) 둘러보기에 자동으로 들어간다.
+ * 한 번만 적용한다(해시가 바뀌어도 범위를 다시 만들지 않는다)
+ */
+export type AppPreset = {
+    /** 선택 범위(EPSG:3857 extent: minx, miny, maxx, maxy) */
+    bbox?: Extent
+    /** 3D 가 준비되면 둘러보기에 자동 진입 */
+    walk?: boolean
+    /** 둘러보기 시작 xy(메쉬 로컬, m) */
+    spawn?: [number, number]
+    /** 시작 방향(라디안. 0 = 동쪽, 반시계) */
+    yaw?: number
+    /** 시작 위아래 시점(라디안, 수평선 위로 +) */
+    pitch?: number
+}
 
 /** localStorage 의 JSON 값. 없거나 깨졌으면 기본값. 걸어 보기의 테스트용 물리 값·알약 위치 저장에 쓴다 */
 const readStored = <T,>(key: string, fallback: T): T => {
@@ -128,15 +146,18 @@ const extentKmText = (extent: Extent) => {
 /**
  * 앱 뿌리. 테마를 들고 Fluent Provider 와 CSS 변수(--ui-*)를 건다. 화면 자체는 App 이 그린다.
  * Provider 가 그리는 div 가 지도·캔버스를 가리지 않도록 배경은 투명하게 둔다
+ *
+ * @param props.preset 초기 상태 프리셋(디버그 페이지). 운영은 없음
+ * @param props.renderDebug 렌더 디버그 설정(디버그 페이지). 운영은 없음
  */
-export default function AppRoot() {
+export default function AppRoot({ preset, renderDebug }: { preset?: AppPreset; renderDebug?: RenderDebug } = {}) {
     const [theme, setTheme] = useState<Theme>(INITIAL_THEME)
     const isMobile = useMediaQuery(MOBILE_QUERY)
     /** 리퀴드 글래스 프로토타입의 루트(유리 요소·3D 캔버스의 부모) */
     const rootRef = useRef<HTMLDivElement | null>(null)
     return (
         <FluentProvider ref={rootRef} theme={fluentTheme(theme)} style={{ ...uiCssVars(theme), background: "transparent" }}>
-            <App theme={theme} setTheme={setTheme} isMobile={isMobile} rootRef={rootRef} />
+            <App theme={theme} setTheme={setTheme} isMobile={isMobile} rootRef={rootRef} preset={preset} renderDebug={renderDebug} />
             {/* 모바일은 탭 막대 위(ui.css --ui-above-tabbar: 20 + 56 + 8) */}
             <AppToaster bottom={isMobile ? 84 : 40} />
         </FluentProvider>
@@ -152,17 +173,23 @@ export default function AppRoot() {
  * 3D 를 숨기고 지도 화면으로 돌아가며, 상태 표시줄의 "3D로 돌아가기" 로 되돌아온다. 로딩 중에는 버튼을 숨기지 않고 비활성으로 둔다
  *
  * @param props.isMobile 모바일 그릇을 쓸지
+ * @param props.preset 초기 상태 프리셋(AppPreset). 지도 준비 뒤 bbox 확정, 3D 준비 뒤 둘러보기 진입
+ * @param props.renderDebug 렌더 디버그 설정. TerrainViewCanvas 로 그대로 넘긴다
  */
 function App({
     theme,
     setTheme,
     isMobile,
     rootRef,
+    preset,
+    renderDebug,
 }: {
     theme: Theme
     setTheme: (theme: Theme) => void
     isMobile: boolean
     rootRef: React.RefObject<HTMLDivElement | null>
+    preset?: AppPreset
+    renderDebug?: RenderDebug
 }) {
     const toast = useAppToast()
     const mapRef = useRef<Map | null>(null)
@@ -240,6 +267,14 @@ function App({
         escHintShownRef.current = false
         setWalking(true)
     }
+    /** 프리셋의 자동 둘러보기 진입을 한 번만 하기 위한 표시 */
+    const presetWalkedRef = useRef(false)
+    useEffect(() => {
+        if (!preset?.walk || presetWalkedRef.current) return
+        if (view !== "3d" || !terrainReady || busy || !mesh || isMobile) return
+        presetWalkedRef.current = true
+        startWalking()
+    }, [preset, view, terrainReady, busy, mesh, isMobile])
     /** 포커스(포인터 잠금) 중인지. Esc 로 풀리면 커서가 보이고 "클릭하면 다시 조작" 안내 */
     const [walkFocused, setWalkFocused] = useState(false)
     /** 포커스가 처음 잡힌 직후 몇 초 보이는 "Esc 를 누르면 마우스 포인터가 나타납니다" 안내 */
@@ -452,8 +487,17 @@ function App({
             if (HAS_FINE_POINTER) squareTool.setActive(true)
             // #map 의 높이는 CSS(.ui-map 100%)로 정해져 지도 생성 시점에 아직 0 일 수 있다. 다음 프레임에 크기를 다시 잰다
             requestAnimationFrame(() => map.updateSize())
+            // 프리셋 범위(디버그 페이지): 사용자가 그린 것과 같은 확정 경로(도엽 외곽선 → startTerrainLoad)를 탄다
+            const bbox = presetRef.current?.bbox
+            if (bbox) {
+                map.getView().fit(bbox, { padding: [20, 20, 20, 20] })
+                squareTool.confirm(bbox)
+            }
         })
     }, [])
+    /** 지도 준비 콜백(마운트 때 한 번)이 최신 프리셋을 읽도록 ref 로 */
+    const presetRef = useRef(preset)
+    presetRef.current = preset
 
     useEffect(() => {
         const map = mapRef.current
@@ -640,6 +684,8 @@ function App({
                     onWalkFrameTime={setWalkFrameMs}
                     walkSelection={selection ?? undefined}
                     onWalkTileCount={setWalkTileCount}
+                    renderDebug={renderDebug}
+                    walkStart={preset && { spawn: preset.spawn, yaw: preset.yaw, pitch: preset.pitch }}
                 />
             )}
             {/* 독(탭 막대)이 지도 틀보다 앞에 와야 Tab 키가 도구부터 닿는다. 겹침은 z-index 가 정한다. 걸어 보기 중에는 숨긴다 */}

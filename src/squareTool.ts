@@ -22,6 +22,8 @@ export type SquareTool = {
     /** 선택 모드 켜기/끄기. 확정되면 저절로 꺼진다 */
     setActive: (active: boolean) => void
     isActive: () => boolean
+    /** 범위를 코드로 확정한다(디버그 페이지의 bbox 프리셋). 박스를 그리고 사용자가 그린 것과 같은 onConfirmed 경로를 탄다 */
+    confirm: (extent: Extent) => void
 }
 
 /** 포인터 이벤트가 터치에서 왔는지. OpenLayers 는 pointer 이벤트를 쓰므로 originalEvent 가 PointerEvent 다 */
@@ -152,5 +154,11 @@ export const installSquareTool = (
     })
     dragBox.on("boxcancel", () => source.clear())
 
-    return { setActive, isActive: () => active }
+    const confirmExtent = (extent: Extent) => {
+        showBox()
+        box.setGeometry(fromExtent(extent))
+        confirm(extent)
+    }
+
+    return { setActive, isActive: () => active, confirm: confirmExtent }
 }

@@ -35,10 +35,16 @@ export const AO_PARAMS = {
     /** 이 거리(m)부터 효과가 사라진다(60% 지점부터 서서히) */
     maxDist: 400,
 }
-/** AO uniform: viewProj(0) + invViewProj(64) + eye(128) + radius(140) + params(144: bias, strength, maxDist, biasPerMeter) + size(160) + depthSize(168) + offset(176: normalOffsetPerMeter, 외곽선 세기, 안개 밀도, AO 켬) */
-const AO_UNIFORM_SIZE = 192
-/** 합성 pass 옵션. ao 가 꺼지면 차폐·흐림 pass 를 건너뛰고 외곽선만 */
-export type CompositeOptions = { ao: boolean; edge: number; fogDensity: number }
+/** AO uniform: viewProj(0) + invViewProj(64) + eye(128) + radius(140) + params(144: bias, strength, maxDist, biasPerMeter) + size(160) + depthSize(168) + offset(176: normalOffsetPerMeter, 외곽선 세기, 안개 밀도, AO 켬) + debug(192: 출력 모드) */
+const AO_UNIFORM_SIZE = 208
+/**
+ * 합성 pass 의 디버그 출력 모드(디버그 페이지 `aodebug=`. 운영 경로는 0). 흰색 = 0 으로 두어 판독이 쉽다.
+ * 1 흐린 AO(대비 8배) · 2 흐림 전 AO(대비 8배) · 3 복원 법선(n·0.5+0.5) · 4 거리 등고선(fract(d/0.25)) ·
+ * 5 이웃 행(아래)과의 거리 차 ×10 · 6 같은 차폐 계산을 전해상도로(대비 8배. 반해상도 pass 의 읽기 문제를 가르는 비교용)
+ */
+export type AoDebugMode = 0 | 1 | 2 | 3 | 4 | 5 | 6
+/** 합성 pass 옵션. ao 가 꺼지면(그리고 debug 가 0 이면) 차폐·흐림 pass 를 건너뛰고 외곽선만 */
+export type CompositeOptions = { ao: boolean; edge: number; fogDensity: number; debug: AoDebugMode }
 
 const fullscreenVertex = /* wgsl */ `
     // 정점 3개로 화면을 덮는 삼각형
@@ -61,6 +67,7 @@ const aoCommon = /* wgsl */ `
         size: vec2f, // AO 텍스처 크기(px)
         depthSize: vec2f, // 깊이 텍스처 크기(px)
         offset: vec4f, // x normalOffsetPerMeter, y 외곽선 세기(0 이면 없음), z 안개 밀도(1/m), w AO 켬(0/1)
+        debug: vec4f, // x 디버그 출력 모드(AoDebugMode. 0 이면 없음)
     };
     @group(0) @binding(0) var<uniform> a: AoUniforms;
     @group(0) @binding(1) var depthTex: texture_depth_2d;
@@ -98,12 +105,6 @@ const aoCommon = /* wgsl */ `
         if (dot(n, -P) < 0.0) { n = -n; }
         return n;
     }
-`
-
-const aoShader = (): GPUShaderModuleDescriptor => ({
-    label: "ssao shader",
-    code: /* wgsl */ `
-    ${aoCommon}
 
     const SAMPLE_COUNT = 12u;
     // 4×4 타일의 회전 순서(0 ~ 15 를 섞은 것). 이웃끼리 각도가 멀어 흐림 전에도 띠가 덜 보인다
@@ -115,22 +116,15 @@ const aoShader = (): GPUShaderModuleDescriptor => ({
         vec3f(-0.20, -0.55, 0.40), vec3f(0.62, 0.08, 0.46), vec3f(-0.52, -0.38, 0.60), vec3f(0.22, -0.60, 0.72),
     );
 
-    ${fullscreenVertex}
-
-    @fragment
-    fn fragmentMain(@builtin(position) fragPos: vec4f) -> @location(0) vec4f {
-        // 이 AO 픽셀이 덮는 깊이 픽셀을 정수로 고르고(절반 해상도면 2i+1) 그 픽셀 중심으로 복원한다.
-        // uv = fragPos / size 로 하면 절반 해상도 픽셀 중심이 깊이 픽셀의 경계에 정확히 걸려, floor(uv × 크기)가 f32 오차로
-        // 행마다 2j 와 2j+1 로 갈리고 복원 위치가 반 픽셀씩 지그재그했다. 수평선 가까운 바닥은 한 행이 5 ~ 10 cm 라 bias 를
-        // 넘어 거짓 차폐가 가로 줄무늬로 보였고, 어느 행이 갈리는지가 캔버스 높이에 따라 달랐다(946 은 줄무늬, 945 는 없음. 2026-10-14)
-        let c0 = vec2i(floor(fragPos.xy * (a.depthSize / a.size)));
+    // 깊이 픽셀 c0 의 차폐(1 = 밝음). cell 은 4×4 타일 안의 자리(회전 패턴). AO pass(반해상도)와 디버그 6(전해상도 비교)이 같은 함수를 쓴다
+    fn aoAtPixel(c0: vec2i, cell: vec2u) -> f32 {
         let uv = pixelUv(c0);
         let d = depthAtPixel(c0);
-        if (d <= 0.0) { return vec4f(1.0); } // 배경(역순 깊이: 0 이 가장 멀다)
+        if (d <= 0.0) { return 1.0; } // 배경(역순 깊이: 0 이 가장 멀다)
         let P = worldAt(uv, d);
         let dist = length(P);
         let maxDist = a.params.z;
-        if (dist > maxDist) { return vec4f(1.0); }
+        if (dist > maxDist) { return 1.0; }
 
         // 법선: 좌우·상하 이웃 중 깊이 차가 작은 쪽으로 위치 차를 잡아 모서리에서 번지지 않게
         let Pr = worldAtPixel(c0 + vec2i(1, 0));
@@ -140,7 +134,6 @@ const aoShader = (): GPUShaderModuleDescriptor => ({
         let n = normalAt(P, Pr, Pl, Pd, Pu);
 
         // 4×4 타일 안의 자리로 정해지는 회전(16개 각도가 한 번씩)으로 돌린 접선 틀
-        let cell = vec2u(fragPos.xy) % 4u;
         let ang = f32(ROTATION[cell.x + cell.y * 4u]) * (6.2831853 / 16.0);
         let rnd = vec3f(cos(ang), sin(ang), 0.37);
         let t = normalize(rnd - n * dot(rnd, n));
@@ -165,7 +158,26 @@ const aoShader = (): GPUShaderModuleDescriptor => ({
         }
         var ao = 1.0 - (occlusion / f32(SAMPLE_COUNT)) * a.params.y;
         ao = mix(ao, 1.0, smoothstep(maxDist * 0.6, maxDist, dist));
-        return vec4f(ao, 0.0, 0.0, 1.0);
+        return ao;
+    }
+`
+
+const aoShader = (): GPUShaderModuleDescriptor => ({
+    label: "ssao shader",
+    code: /* wgsl */ `
+    ${aoCommon}
+
+    ${fullscreenVertex}
+
+    @fragment
+    fn fragmentMain(@builtin(position) fragPos: vec4f) -> @location(0) vec4f {
+        // 이 AO 픽셀이 덮는 깊이 픽셀을 정수로 고르고(절반 해상도면 2i+1) 그 픽셀 중심으로 복원한다(aoAtPixel).
+        // uv = fragPos / size 로 하면 절반 해상도 픽셀 중심이 깊이 픽셀의 경계에 정확히 걸려, floor(uv × 크기)가 f32 오차로
+        // 행마다 2j 와 2j+1 로 갈리고 복원 위치가 반 픽셀씩 지그재그했다. 수평선 가까운 바닥은 한 행이 5 ~ 10 cm 라 bias 를
+        // 넘어 거짓 차폐가 가로 줄무늬로 보였고, 어느 행이 갈리는지가 캔버스 높이에 따라 달랐다(946 은 줄무늬, 945 는 없음. 2026-10-14)
+        let c0 = vec2i(floor(fragPos.xy * (a.depthSize / a.size)));
+        let cell = vec2u(fragPos.xy) % 4u;
+        return vec4f(aoAtPixel(c0, cell), 0.0, 0.0, 1.0);
     }
     `,
 })
@@ -200,6 +212,7 @@ const compositeShader = (): GPUShaderModuleDescriptor => ({
     @group(0) @binding(2) var sceneTex: texture_2d<f32>;
     @group(0) @binding(3) var aoTex: texture_2d<f32>;
     @group(0) @binding(4) var aoSampler: sampler;
+    @group(0) @binding(5) var rawAoTex: texture_2d<f32>; // 흐림 전 AO(디버그 2)
 
     ${fullscreenVertex}
 
@@ -222,11 +235,38 @@ const compositeShader = (): GPUShaderModuleDescriptor => ({
         return max(smoothstep(0.35, 0.8, crease), smoothstep(0.6, 1.5, jump));
     }
 
+    // 대비 8배 회색(1 = 흰색 = 차폐 없음)
+    fn contrast8(v: f32) -> vec4f {
+        return vec4f(vec3f(1.0 - (1.0 - v) * 8.0), 1.0);
+    }
+    // 디버그 출력(AoDebugMode). 배경은 흰색
+    fn debugOut(mode: i32, fragXY: vec2f, d: f32, aoBlurred: f32) -> vec4f {
+        if (d <= 0.0) { return vec4f(1.0); }
+        let c = vec2i(fragXY);
+        if (mode == 1) { return contrast8(aoBlurred); }
+        if (mode == 2) {
+            let ac = clamp(vec2i(floor(fragXY * (a.size / a.depthSize))), vec2i(0), vec2i(a.size) - 1);
+            return contrast8(textureLoad(rawAoTex, ac, 0).r);
+        }
+        if (mode == 6) { return contrast8(aoAtPixel(c, vec2u(fragXY) % 4u)); }
+        let P = worldAtPixel(c);
+        if (mode == 4) { return vec4f(vec3f(fract(length(P) / 0.25)), 1.0); }
+        let Pd = worldAtPixel(c + vec2i(0, 1));
+        if (mode == 5) { return vec4f(vec3f(1.0 - abs(length(Pd) - length(P)) * 10.0), 1.0); }
+        // 3: 복원 법선
+        let Pr = worldAtPixel(c + vec2i(1, 0));
+        let Pl = worldAtPixel(c - vec2i(1, 0));
+        let Pu = worldAtPixel(c - vec2i(0, 1));
+        return vec4f(normalAt(P, Pr, Pl, Pd, Pu) * 0.5 + 0.5, 1.0);
+    }
+
     @fragment
     fn fragmentMain(@builtin(position) fragPos: vec4f) -> @location(0) vec4f {
         let c = textureLoad(sceneTex, vec2i(fragPos.xy), 0);
         let uv = fragPos.xy / a.depthSize;
         let aoSample = textureSample(aoTex, aoSampler, uv).r;
+        let mode = i32(a.debug.x);
+        if (mode != 0) { return debugOut(mode, fragPos.xy, depthAt(uv), aoSample); }
         let ao = select(1.0, aoSample, a.offset.w > 0.5);
         var edge = 0.0;
         let d = depthAt(uv);
@@ -347,6 +387,7 @@ export const createAoPasses = (device: GPUDevice, format: GPUTextureFormat) => {
                     { binding: 2, resource: sceneView },
                     { binding: 3, resource: blurView },
                     { binding: 4, resource: linearSampler },
+                    { binding: 5, resource: aoView },
                 ],
             }),
         }
@@ -393,7 +434,7 @@ export const createAoPasses = (device: GPUDevice, format: GPUTextureFormat) => {
     /**
      * (AO 가 켜져 있으면) 차폐 계산 → 흐림 → 캔버스에 합성(AO × 외곽선). 오프스크린 장면이 그려진 뒤 부른다
      *
-     * @param options ao 켬, 외곽선 세기(0 ~ 1, 0 이면 없음), 안개 밀도(외곽선이 안개와 같이 사라지도록)
+     * @param options ao 켬, 외곽선 세기(0 ~ 1, 0 이면 없음), 안개 밀도(외곽선이 안개와 같이 사라지도록), 디버그 출력 모드(0 이면 없음)
      */
     const run = (encoder: GPUCommandEncoder, canvasView: GPUTextureView, options: CompositeOptions) => {
         if (!targets) return
@@ -401,16 +442,18 @@ export const createAoPasses = (device: GPUDevice, format: GPUTextureFormat) => {
             !lastOptions ||
             lastOptions.ao !== options.ao ||
             lastOptions.edge !== options.edge ||
-            lastOptions.fogDensity !== options.fogDensity
+            lastOptions.fogDensity !== options.fogDensity ||
+            lastOptions.debug !== options.debug
         ) {
             lastOptions = { ...options }
             device.queue.writeBuffer(
                 uniformBuffer,
                 176,
-                new Float32Array([AO_PARAMS.normalOffsetPerMeter, options.edge, options.fogDensity, options.ao ? 1 : 0]),
+                new Float32Array([AO_PARAMS.normalOffsetPerMeter, options.edge, options.fogDensity, options.ao ? 1 : 0, options.debug, 0, 0, 0]),
             )
         }
-        if (options.ao) {
+        // 디버그 출력(1·2·6)은 AO 가 꺼져 있어도 차폐 텍스처가 있어야 한다
+        if (options.ao || options.debug !== 0) {
             fullscreen(encoder, "ssao", targets.aoView, aoPipeline, targets.aoBindGroup)
             fullscreen(encoder, "ao blur", targets.blurView, blurPipeline, targets.blurBindGroup)
         }

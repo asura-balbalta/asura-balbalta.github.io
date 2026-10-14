@@ -21,8 +21,8 @@ import { FpsCamera } from "./webgpu/camera"
  * 포커스(Unreal 식, 2026-10-12 결정 by @nanangqq): 들어가면 포인터 잠금(커서 숨김, 무한 회전)으로 "포커스" 상태. Esc 는 잠금만 풀어
  * 커서가 보이고 입력이 멈추지만 걸어 보기는 유지된다. 화면을 클릭하면 다시 잠금. 궤도 보기로 나가는 것은 "나가기" 버튼.
  * 처음엔 잠금 없는 방식을 골랐으나 화면을 많이 돌릴 때 가장자리에서 멈춰 불편해 바꿨다.
- * URL ?lock=0 은 잠금 API 없이 같은 흐름을 흉내 내는 테스트용(앱 내장 브라우저는 잠금을 지원하지 않는다): Esc 키가 포커스를
- * 끄고, 마우스는 어디서 움직이든 시점이 돈다
+ * pointerLock: false 는 잠금 API 없이 같은 흐름을 흉내 내는 테스트용(앱 내장 브라우저는 잠금을 지원하지 않는다. 디버그 페이지
+ * lock=0): Esc 키가 포커스를 끄고, 마우스는 어디서 움직이든 시점이 돈다
  */
 export type PlayerMove = {
     /** 발 위치(메쉬 로컬, m) */
@@ -86,15 +86,14 @@ const STEP_UP_MAX = 1.5
 /** onMove 알림 간격(초) */
 const MOVE_NOTIFY_INTERVAL = 0.1
 const MAX_DT = 0.05
-/** 포인터 잠금 API 를 쓸지. ?lock=0 이면 안 쓰고 흉내 낸다(테스트용) */
-export const USE_POINTER_LOCK = new URLSearchParams(window.location.search).get("lock") !== "0"
-
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v))
 
 /**
  * @param options.sampler 지형 높이 조회기(범위 포함)
  * @param options.spawn 시작 xy(메쉬 로컬). 발은 그 자리 지표 위에 둔다
- * @param options.yaw 시작 방향(기본 북쪽)
+ * @param options.yaw 시작 방향(라디안. 기본 북쪽)
+ * @param options.pitch 시작 위아래 시점(라디안, 수평선 위로 +. 기본 0)
+ * @param options.pointerLock 포인터 잠금 API 를 쓸지(기본 true). false 면 잠금 없이 흉내 낸다
  * @param options.onFocusChange 포커스(포인터 잠금)가 잡히거나 풀렸을 때(Esc, 창 전환, 요청 실패). 부모가 커서·안내를 바꾼다
  * @param options.onMove 위치가 바뀔 때 약 10 Hz 로(미니맵·상태 표시줄용)
  * @param options.physics 처음 물리 값(없는 항목은 기본값)
@@ -104,6 +103,8 @@ export const createPlayer = ({
     sampler,
     spawn,
     yaw: initialYaw = Math.PI / 2,
+    pitch: initialPitch = 0,
+    pointerLock: usePointerLock = true,
     onFocusChange,
     onMove,
     physics: initialPhysics,
@@ -112,6 +113,8 @@ export const createPlayer = ({
     sampler: HeightSampler
     spawn: [number, number]
     yaw?: number
+    pitch?: number
+    pointerLock?: boolean
     onFocusChange?: (focused: boolean) => void
     onMove?: (move: PlayerMove) => void
     physics?: Partial<WalkPhysics>
@@ -145,7 +148,7 @@ export const createPlayer = ({
     let vy = 0
     let vz = 0
     let yaw = initialYaw
-    let pitch = 0
+    let pitch = clamp(initialPitch, -PITCH_LIMIT, PITCH_LIMIT)
     let grounded = true
     let airJumps = 0
     let dashUntil = 0
@@ -163,7 +166,7 @@ export const createPlayer = ({
     const onKeyDown = (e: KeyboardEvent) => {
         if (isTyping(e)) return
         const code = e.code
-        if (code === "Escape" && !USE_POINTER_LOCK) {
+        if (code === "Escape" && !usePointerLock) {
             // 잠금 흉내: Esc 로 포커스를 끈다(실제 잠금에서는 브라우저가 풀고 pointerlockchange 로 안다)
             setLocked(false)
             return
@@ -211,7 +214,7 @@ export const createPlayer = ({
         onFocusChange?.(next)
     }
     const onLockChange = () => {
-        if (!USE_POINTER_LOCK) return
+        if (!usePointerLock) return
         setLocked(document.pointerLockElement === canvas)
     }
     const onLockError = () => setLocked(false)
@@ -219,7 +222,7 @@ export const createPlayer = ({
     /** 포인터 잠금을 요청한다(흉내 모드면 바로 포커스). 결과는 pointerlockchange/error 로 온다 */
     const requestLock = () => {
         if (!canvas) return
-        if (!USE_POINTER_LOCK) {
+        if (!usePointerLock) {
             setLocked(true)
             return
         }
