@@ -45,8 +45,9 @@ npm run build       # esbuild → dist/. 미리보기 전에 반드시
 
 ## 3.5 자동 캡처: `scripts/render-check.mjs`
 
-Playwright 로 Chromium 을 **보이는 창**으로 띄워(헤드리스는 WebGPU 가 꺼지거나 소프트웨어로 떨어질 수 있다) 디버그 페이지를 창 크기 × 파라미터 조합마다 열고,
-둘러보기에 들어가 안정된 뒤 **원본 해상도 PNG**(dpr 2) 와 지표를 `docs/render-checks/<날짜>/`(git 제외) 에 남긴다. 서버는 사용자가 띄운다(`npm run build` → `npx serve dist`).
+Playwright 로 Chrome 을 **보이는 창**으로 띄워(헤드리스는 WebGPU 가 꺼지거나 소프트웨어로 떨어질 수 있다) 디버그 페이지를 창 크기 × 파라미터 조합마다 열고,
+둘러보기에 들어가 **주변 도엽 스트리밍이 멈춘 뒤**(준비 신호: 디버그 페이지의 `data-walk-tiles` 가 `--stable` 2초 동안 그대로) **원본 해상도 PNG**(dpr 2) 와 지표를
+`docs/render-checks/<날짜>/`(git 제외) 에 남긴다. 서버는 사용자가 띄운다(`npm run build` → `npx serve dist`).
 
 ```bash
 npm run render-check -- --params "bbox=14135700,4513980,14136500,4514780&yaw=90&pitch=-15" --params "bbox=…&aodebug=1" --sizes 878x946,1024x768 --heights 940-950
@@ -55,7 +56,9 @@ npm run render-check -- --params "bbox=14135700,4513980,14136500,4514780&yaw=90&
 - `--params` 는 해시 쿼리(여러 번 가능, 조합마다 한 장). `lock=0` 은 없으면 붙인다. `--heights a-b` 는 첫 너비로 높이를 훑는다(크기 의존 증상).
 - 지표(`index.json`): 영역(`--region x,y,w,h` 비율, 기본 아래쪽 `0,0.45,1,0.5`)의 **이웃 행·열 밝기 차** 평균·최대·최대 위치와 행별 값의 자기상관이 가장 큰 간격(주기, 2 ~ 64 px)과 상관. 숫자만 내고 통과/실패는 사람이 판단한다.
   같은 자리에서 효과를 끈 것과 비교하거나(aodebug·ao=0), 높이별로 행 차 최대가 튀는 높이를 찾는 식으로 쓴다. 행 차 최대 위치는 영역 기준 행 번호(PNG 픽셀).
-- 캡처에는 HUD·조절 패널·파라미터 표가 함께 찍힌다. 영역 기본값은 그것들을 피한 아래쪽이다.
+- 캡처에는 HUD·조절 패널·파라미터 표가 함께 찍힌다. 지표 영역 기본값은 그것들을 피한 아래쪽이고, 비교(아래)는 마스크로 뺀다.
+- **비교**: `npm run render-check -- --compare <beforeDir> <afterDir>` 가 같은 이름의 PNG 를 짝지어 마스크(HUD·파라미터 표·미니맵·조절 패널·상태 표시줄·가운데 안내. CSS px 단위, `--mask x,y,w,h` 로 추가, `--no-default-masks`)를 칠한 뒤 `pixelmatch`(`--threshold` 0.1, 안티앨리어싱 제외)로 다른 픽셀 비율을 내고 `--max-diff-ratio`(0.001) 이하면 "같음". diff PNG 는 `<afterDir>/diff/`, 마스크를 칠한 사본은 `diff/masked.png`(마스크가 UI 를 덮는지 눈으로 확인), 요약은 `compare.json`. 두 폴더의 브라우저·버전이 다르면 비교를 거부한다. 같은 폴더 안의 기본 ↔ `ao=0` 쌍을 "재검증" 으로 같이 재어 "다름" 이 나오는지 보인다(안 나오면 비교가 무뎌진 것).
+- 2026-10-14 K2 확인: 같은 코드로 before/after 를 찍어 두 조합 모두 다른 픽셀 0(지표도 같음), 재검증 기본 ↔ `ao=0` 1.47 %(마스크 뒤) 로 "다름". 준비까지 8.5 ~ 10 초(도엽 11 ~ 12).
 - 브라우저는 기본으로 **설치된 Chrome**(`channel: "chrome"`, 별도 임시 프로필. 사용자가 보는 것과 같은 브라우저)을 띄우고, 없거나 실패하면 받아 둔 Chromium(한 메이저 앞선 Chrome for Testing)으로 넘어간다. `--browser chromium` 으로 예비 쪽을 고를 수 있고, `index.json` 의 `browser` 에 이름·버전이 남는다.
 - 설치는 사용자가: `npm i -D playwright` 와 `npx playwright install chromium`(수백 MB. Chrome 만 쓰면 생략 가능).
 - 운영 Chrome 에서 디버그 주소로 자동 진입하면 "화면을 클릭하면 다시 조작합니다" 가 뜬다. 사용자 클릭 없이 포인터 잠금을 요청할 수 없어서이고, 클릭하면 잠긴다(정상).
@@ -89,7 +92,13 @@ npm run render-check -- --params "bbox=14135700,4513980,14136500,4514780&yaw=90&
 범위·자리·각도를 고정한 조합. 효과별로 하나씩 끈 것을 포함해 회귀가 어느 pass 에서 났는지 바로 가를 수 있게 한다. 한 번에 8장, 약 1 ~ 2분.
 
 ```bash
-npm run render-check -- --sizes 878x946,1024x768 --out docs/render-checks/$(date +%F)-before   --params "bbox=14135700,4513980,14136500,4514780&yaw=90&pitch=-15"   --params "bbox=14135700,4513980,14136500,4514780&yaw=90&pitch=-15&ao=0"   --params "bbox=14135700,4513980,14136500,4514780&yaw=90&pitch=-15&shadow=0&sky=0&edge=0"   --params "bbox=14135700,4513980,14136500,4514780&yaw=0&pitch=5"
+npm run render-check -- --sizes 878x946,1024x768 --out docs/render-checks/$(date +%F)-before \
+  --params "bbox=14135700,4513980,14136500,4514780&yaw=90&pitch=-15" \
+  --params "bbox=14135700,4513980,14136500,4514780&yaw=90&pitch=-15&ao=0" \
+  --params "bbox=14135700,4513980,14136500,4514780&yaw=90&pitch=-15&shadow=0&sky=0&edge=0" \
+  --params "bbox=14135700,4513980,14136500,4514780&yaw=0&pitch=5"
+# 작업 뒤 같은 명령을 --out …-after 로 찍고
+npm run render-check -- --compare docs/render-checks/$(date +%F)-before docs/render-checks/$(date +%F)-after
 ```
 
 - 증상을 본 자리 by @nanangqq 가 있으면 그 bbox·spawn·yaw·pitch 를 세트에 더한다(계획서 해당 절에 주소를 적어 둔다).
@@ -100,8 +109,8 @@ npm run render-check -- --sizes 878x946,1024x768 --out docs/render-checks/$(date
 1. **작업 전 기준 캡처.** 위 명령으로 `-before/` 를 찍는다(서버는 `npm run build` → `npx serve dist`, 또는 돌고 있는 watch + 서버).
 2. **구현.** 새 효과·동작에는 끄는 파라미터를 같이 둔다. 감각이 갈리는 값은 파라미터로 두 경로를 둔다(4절).
 3. **작업 후 캡처.** 같은 명령을 `--out …-after` 로. 새 기능을 켠/끈 조합을 세트에 더해 찍는다.
-4. **비교.**(7절의 규칙으로)
-   - 회귀: 새 기능을 **끈** 조합(과 기존 조합)은 before 와 같아야 한다. 픽셀 차 비율이 허용치 안이고 `index.json` 지표(행·열 차 평균·최대·주기)가 소수 셋째 자리까지 같으면 같다고 본다. 차이가 나면 diff PNG 로 어디가 다른지 본다(도엽 스트리밍 수가 달라 멀리 있는 건물이 다를 수 있다 → 준비 신호·마스크로 막는다).
+4. **비교.** `--compare before after`(7절의 규칙으로)
+   - 회귀: 새 기능을 **끈** 조합(과 기존 조합)은 before 와 "같음" 이어야 한다(다른 픽셀 비율 ≤ 0.1 %, `index.json` 지표도 같음). 차이가 나면 `diff/` PNG 로 어디가 다른지 본다(도엽 스트리밍 수가 달라 멀리 있는 건물이 다를 수 있다 → 준비 신호·마스크로 막는다).
    - 새 기능: 켠 조합의 PNG 를 눈으로(Chrome by @nanangqq 또는 원본 PNG) 보고, 효과가 있어야 할 자리에만 차이가 있는지 끈 조합과 견준다.
    - **재검증**: 허용치를 바꿨거나 비교 코드를 고쳤으면, 달라야 하는 쌍(기본 ↔ `ao=0`)이 "다르다" 로 나오는지 먼저 확인한다. 안 나오면 비교가 무뎌진 것이다.
    - 다르면 안 되는 곳이 다르면 3절(재현 → 좁히기 → 수치 → 수정)로.
@@ -112,11 +121,11 @@ npm run render-check -- --sizes 878x946,1024x768 --out docs/render-checks/$(date
 
 다른 팀들이 GPU 렌더링 스크린샷을 비교하며 정착시킨 관행을 우리 환경에 맞게 가져온 것이다. 코드가 아직 없는 항목은 계획서 7절 K2.
 
-1. **결정론 고정.** 주소(bbox·spawn·yaw·pitch)와 옵션(크기·dpr·효과 스위치)이 장면을 완전히 정한다. 애니메이션·시간 의존 값(안내 알약 사라짐, 프레임 ms)은 캡처에 들어가지 않게 한다. 기다림은 `sleep` 이 아니라 준비 신호로: HUD 등장 → **주변 도엽 스트리밍이 멈춤**(도엽 수가 일정 시간 변하지 않음) → 캡처. settle 은 그 뒤의 짧은 여유일 뿐이다.
+1. **결정론 고정.** 주소(bbox·spawn·yaw·pitch)와 옵션(크기·dpr·효과 스위치)이 장면을 완전히 정한다. 애니메이션·시간 의존 값(안내 알약 사라짐, 프레임 ms)은 캡처에 들어가지 않게 한다(마스크). 기다림은 `sleep` 이 아니라 준비 신호로: HUD 등장 → **주변 도엽 스트리밍이 멈춤**(`src/debug/walk.tsx` 의 `data-walk-tiles` 가 `--stable` 2초 동안 그대로) → `--settle` 1초 → 캡처. App 은 `onDebugState` 로 busy·walking·도엽 수를 디버그 페이지에 알린다.
 2. **허용 오차 두 겹.** 픽셀당 색 차 임계값(pixelmatch `threshold`, 기본 0.1)과 다른 픽셀의 최대 비율(기본 0.1 %). 안티앨리어싱 픽셀은 제외(`includeAA: false`). 한 겹만 두면 노이즈에 실패하거나 진짜 회귀를 놓친다. 값은 기본 ↔ `ao=0` 같은 "달라야 하는 쌍" 이 잡히는 범위 안에서만 느슨하게 한다.
-3. **비교 알고리즘은 빌린다.** `pixelmatch` 로 before/after 의 다른 픽셀 비율과 diff PNG(다른 자리를 빨강으로)를 낸다. 지각 차이(odiff 의 YIQ)·SSIM 은 노이즈가 문제될 때 검토한다. 스크립트가 `--compare <before> <after>` 로 같은 이름의 PNG 를 짝지어 `compare.json` 과 diff PNG 를 쓴다.
-4. **기준 환경 하나.** 기준 이미지는 @nanangqq 의 Mac + 설치된 Chrome 의 것이다. `--compare` 는 두 `index.json` 의 `browser`(이름·버전)와 dpr·크기가 다르면 비교를 거부한다. 다른 기기의 캡처는 그 기기의 before 와만 비교한다(플랫폼별 골든).
-5. **가리기.** 변하는 영역은 임계값이 아니라 마스크로 뺀다: HUD(위 가운데), 파라미터 표(왼쪽 위), 미니맵·조절 패널(오른쪽), 상태 표시줄(아래), 조준점·안내 알약(가운데). 기본 마스크 목록을 스크립트에 두고 `--mask x,y,w,h`(비율) 로 더한다. `--region` 은 지표를 재는 영역이고 마스크는 비교에서 빼는 영역이다.
+3. **비교 알고리즘은 빌린다.** `pixelmatch`(+ `pngjs` 로 Node 에서 디코딩. 창 없이 비교)로 before/after 의 다른 픽셀 비율과 diff PNG(다른 자리를 빨강으로)를 낸다. 지각 차이(odiff 의 YIQ)·SSIM 은 노이즈가 문제될 때 검토한다. 스크립트가 `--compare <before> <after>` 로 같은 이름의 PNG 를 짝지어 `compare.json` 과 `diff/` 를 쓴다.
+4. **기준 환경 하나.** 기준 이미지는 @nanangqq 의 Mac + 설치된 Chrome 의 것이다. `--compare` 는 두 `index.json` 의 `browser`(이름·버전)가 다르면 비교를 거부하고, dpr·크기가 다른 쌍은 건너뛴다. 다른 기기의 캡처는 그 기기의 before 와만 비교한다(플랫폼별 골든).
+5. **가리기.** 변하는 영역은 임계값이 아니라 마스크로 뺀다: HUD(위 가운데), 파라미터 표(왼쪽 위), 미니맵·조절 패널(오른쪽), 상태 표시줄(아래), 조준점·안내 알약(가운데). 기본 마스크 목록은 스크립트의 `DEFAULT_MASKS` 이고 단위는 **CSS px**(UI 는 창 비율이 아니라 고정 px 로 놓이므로. 비율로 두었더니 창이 좁을수록 표가 비어져 나왔다): x·y 는 왼쪽·위에서의 px, 음수면 오른쪽·아래에서, `c` 면 가운데. `--mask x,y,w,h` 로 더하고 `diff/masked.png` 로 덮임을 확인한다. 레이아웃을 바꾸면 목록도 고친다. `--region` 은 지표를 재는 영역(비율)이고 마스크는 비교에서 빼는 영역이다.
 6. **느슨하게 했으면 재검증.** 임계값·마스크·준비 신호를 바꾼 뒤에는 "달라야 하는 쌍이 다르다고 나오는지" 를 같은 세트로 한 번 돌려 확인하고 결과를 계획서에 한 줄 남긴다.
 
 ## 5. 후처리 pass 를 쓸 때의 규칙

@@ -45,7 +45,9 @@
         "esbuild": "^0.28.2",
         "firebase-tools": "^15.30.1",
         "patch-package": "^8.0.1",
+        "pixelmatch": "^8.0.0",
         "playwright": "^1.64.0",
+        "pngjs": "^7.0.0",
         "typescript": "6.0.3"
     }
 }

@@ -1,7 +1,7 @@
-import React, { useMemo } from "react"
+import React, { useMemo, useState } from "react"
 import type { Extent } from "ol/extent"
 
-import AppRoot, { AppPreset } from "../app.tsx"
+import AppRoot, { AppDebugState, AppPreset } from "../app.tsx"
 import type { AoDebugMode } from "../webgpu/ao"
 import type { RenderDebug } from "../webgpu/terrainRenderer"
 
@@ -17,7 +17,9 @@ import type { RenderDebug } from "../webgpu/terrainRenderer"
  * - ao·shadow·sky: 0 이면 끔. edge: 외곽선 세기(0 ~ 1). sun: 태양 고도(°). aodebug: SSAO 디버그 출력 모드(ao.ts AoDebugMode 0 ~ 6)
  * - lock=0: 포인터 잠금 없이 흉내(내장 브라우저·Playwright. 마우스는 어디서 움직여도 시점, Esc 가 포커스 끔)
  * 해시를 고치면(새로고침 없이) 렌더 디버그 설정은 바로 반영되고, 프리셋(bbox·spawn·yaw·pitch)은 처음 한 번만 적용된다.
- * 받은 파라미터를 왼쪽 위(둘러보기 중 비어 있는 자리. 오른쪽 위는 미니맵)에 작게 보여 무엇이 적용됐는지 확인할 수 있다(클릭은 통과)
+ * 받은 파라미터를 왼쪽 위(둘러보기 중 비어 있는 자리. 오른쪽 위는 미니맵)에 작게 보여 무엇이 적용됐는지 확인할 수 있다(클릭은 통과).
+ * 그 요소의 data-debug-state(loading | ready | walking)·data-walk-tiles(주변 도엽 수)는 자동 캡처(scripts/render-check.mjs)의
+ * 준비 신호다: 둘러보기 중 도엽 수가 한동안 변하지 않으면 스트리밍이 멈춘 것으로 보고 찍는다
  */
 
 const numberList = (raw: string | null, count: number): number[] | null => {
@@ -75,11 +77,15 @@ export const WalkDebugPage = ({ params }: { params: URLSearchParams }) => {
     const { preset, renderDebug, notes } = useMemo(() => parseWalkParams(new URLSearchParams(query)), [query])
     const rows: [string, string][] = []
     for (const [key, value] of new URLSearchParams(query)) rows.push([key, value])
+    const [state, setState] = useState<AppDebugState>({ busy: false, walking: false, tiles: 0 })
+    const debugState = state.walking ? "walking" : state.busy ? "loading" : "ready"
     return (
         <>
-            <AppRoot preset={preset} renderDebug={renderDebug} />
+            <AppRoot preset={preset} renderDebug={renderDebug} onDebugState={setState} />
             <div
                 data-debug-page="walk"
+                data-debug-state={debugState}
+                data-walk-tiles={state.tiles}
                 style={{
                     position: "fixed",
                     top: 8,
@@ -99,6 +105,7 @@ export const WalkDebugPage = ({ params }: { params: URLSearchParams }) => {
                 {"debug/walk" + (rows.length === 0 ? " (파라미터 없음)" : "")}
                 {rows.map(([key, value]) => `\n${key} = ${value}`).join("")}
                 {notes.map((note) => `\n! ${note}`).join("")}
+                {`\n[${debugState}${state.walking ? ` tiles=${state.tiles}` : ""}]`}
             </div>
         </>
     )

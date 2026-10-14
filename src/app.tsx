@@ -66,6 +66,16 @@ export type AppPreset = {
     pitch?: number
 }
 
+/** 디버그 페이지에 알리는 앱 상태(준비 신호. 자동 캡처가 "도엽 스트리밍이 멈춤" 을 기다리는 데 쓴다) */
+export type AppDebugState = {
+    /** 로딩·변환 중(busy) */
+    busy: boolean
+    /** 둘러보기 중 */
+    walking: boolean
+    /** 둘러보기 중 들고 있는 주변 도엽 수 */
+    tiles: number
+}
+
 /** localStorage 의 JSON 값. 없거나 깨졌으면 기본값. 걸어 보기의 테스트용 물리 값·알약 위치 저장에 쓴다 */
 const readStored = <T,>(key: string, fallback: T): T => {
     try {
@@ -149,15 +159,28 @@ const extentKmText = (extent: Extent) => {
  *
  * @param props.preset 초기 상태 프리셋(디버그 페이지). 운영은 없음
  * @param props.renderDebug 렌더 디버그 설정(디버그 페이지). 운영은 없음
+ * @param props.onDebugState 앱 상태(busy·walking·도엽 수)가 바뀔 때(디버그 페이지의 준비 신호). 운영은 없음
  */
-export default function AppRoot({ preset, renderDebug }: { preset?: AppPreset; renderDebug?: RenderDebug } = {}) {
+export default function AppRoot({
+    preset,
+    renderDebug,
+    onDebugState,
+}: { preset?: AppPreset; renderDebug?: RenderDebug; onDebugState?: (state: AppDebugState) => void } = {}) {
     const [theme, setTheme] = useState<Theme>(INITIAL_THEME)
     const isMobile = useMediaQuery(MOBILE_QUERY)
     /** 리퀴드 글래스 프로토타입의 루트(유리 요소·3D 캔버스의 부모) */
     const rootRef = useRef<HTMLDivElement | null>(null)
     return (
         <FluentProvider ref={rootRef} theme={fluentTheme(theme)} style={{ ...uiCssVars(theme), background: "transparent" }}>
-            <App theme={theme} setTheme={setTheme} isMobile={isMobile} rootRef={rootRef} preset={preset} renderDebug={renderDebug} />
+            <App
+                theme={theme}
+                setTheme={setTheme}
+                isMobile={isMobile}
+                rootRef={rootRef}
+                preset={preset}
+                renderDebug={renderDebug}
+                onDebugState={onDebugState}
+            />
             {/* 모바일은 탭 막대 위(ui.css --ui-above-tabbar: 20 + 56 + 8) */}
             <AppToaster bottom={isMobile ? 84 : 40} />
         </FluentProvider>
@@ -175,6 +198,7 @@ export default function AppRoot({ preset, renderDebug }: { preset?: AppPreset; r
  * @param props.isMobile 모바일 그릇을 쓸지
  * @param props.preset 초기 상태 프리셋(AppPreset). 지도 준비 뒤 bbox 확정, 3D 준비 뒤 둘러보기 진입
  * @param props.renderDebug 렌더 디버그 설정. TerrainViewCanvas 로 그대로 넘긴다
+ * @param props.onDebugState 앱 상태가 바뀔 때(디버그 페이지의 준비 신호)
  */
 function App({
     theme,
@@ -183,6 +207,7 @@ function App({
     rootRef,
     preset,
     renderDebug,
+    onDebugState,
 }: {
     theme: Theme
     setTheme: (theme: Theme) => void
@@ -190,6 +215,7 @@ function App({
     rootRef: React.RefObject<HTMLDivElement | null>
     preset?: AppPreset
     renderDebug?: RenderDebug
+    onDebugState?: (state: AppDebugState) => void
 }) {
     const toast = useAppToast()
     const mapRef = useRef<Map | null>(null)
@@ -267,6 +293,9 @@ function App({
         escHintShownRef.current = false
         setWalking(true)
     }
+    useEffect(() => {
+        onDebugState?.({ busy, walking, tiles: walkTileCount })
+    }, [onDebugState, busy, walking, walkTileCount])
     /** 프리셋의 자동 둘러보기 진입을 한 번만 하기 위한 표시 */
     const presetWalkedRef = useRef(false)
     useEffect(() => {
