@@ -30,7 +30,7 @@ import { BottomSheet } from "./ui/BottomSheet"
 import { StatusPill } from "./ui/StatusPill"
 import { TabBar } from "./ui/TabBar"
 import { MOBILE_QUERY, useMediaQuery } from "./ui/useMediaQuery"
-import { LIQUID_GLASS_ENABLED, useLiquidGlass } from "./ui/liquidGlass"
+import { LIQUID_GLASS_DEFAULT, useLiquidGlass } from "./ui/liquidGlass"
 import { WalkControls } from "./ui/WalkControls"
 import { WalkHud } from "./ui/WalkHud"
 import { PillPosition, WalkPill } from "./ui/WalkPill"
@@ -119,11 +119,17 @@ const HAS_FINE_POINTER = typeof matchMedia === "function" && matchMedia("(pointe
 
 /**
  * 이 브라우저가 WebGPU 를 노출하는지(navigator.gpu). 없으면 3D 지형을 만들 수 없으므로 진입 때 알리고 범위 그리기를 막는다.
- * `?gpu=0` 은 지원 브라우저에서 미지원 경로를 재현하는 스위치(검증용). adapter 까지는 보지 않으므로 adapter 가 없는 환경은
- * 렌더러 생성 실패(TerrainViewCanvas onError)가 받는다
+ * adapter 까지는 보지 않으므로 adapter 가 없는 환경은 렌더러 생성 실패(TerrainViewCanvas onError)가 받는다.
+ * 지원 브라우저에서 미지원 경로를 재현하는 것은 디버그 페이지 `#/debug/app?gpu=0`(AppEnv.webgpu)
  */
-const WEBGPU_SUPPORTED =
-    typeof navigator !== "undefined" && !!navigator.gpu && new URLSearchParams(window.location.search).get("gpu") !== "0"
+const WEBGPU_AVAILABLE = typeof navigator !== "undefined" && !!navigator.gpu
+
+/**
+ * 브라우저 환경 흉내(디버그 페이지 `#/debug/app`, src/debug/app.tsx). 없는 항목은 실제 브라우저 판별을 따른다. 운영은 undefined.
+ * - webgpu: false 면 WebGPU 미지원 브라우저처럼(안내 토스트·알약, 범위 그리기 막음)
+ * - glass: 리퀴드 글래스를 판별과 무관하게 켜거나 끔
+ */
+export type AppEnv = { webgpu?: boolean; glass?: boolean }
 
 /** 상태 표시줄 왼쪽에 보일 진행 상태. ratio 가 없으면 진행 막대가 불확정으로 움직인다 */
 type Progress = { label: string; ratio?: number }
@@ -156,12 +162,14 @@ const extentKmText = (extent: Extent) => {
  * @param props.preset 초기 상태 프리셋(디버그 페이지). 운영은 없음
  * @param props.renderDebug 렌더 디버그 설정(디버그 페이지). 운영은 없음
  * @param props.onDebugState 앱 상태(busy·walking·도엽 수)가 바뀔 때(디버그 페이지의 준비 신호). 운영은 없음
+ * @param props.env 브라우저 환경 흉내(디버그 페이지 `#/debug/app`). 운영은 없음
  */
 export default function AppRoot({
     preset,
     renderDebug,
     onDebugState,
-}: { preset?: AppPreset; renderDebug?: RenderDebug; onDebugState?: (state: AppDebugState) => void } = {}) {
+    env,
+}: { preset?: AppPreset; renderDebug?: RenderDebug; onDebugState?: (state: AppDebugState) => void; env?: AppEnv } = {}) {
     const [theme, setTheme] = useState<Theme>(INITIAL_THEME)
     const isMobile = useMediaQuery(MOBILE_QUERY)
     /** 리퀴드 글래스 프로토타입의 루트(유리 요소·3D 캔버스의 부모) */
@@ -176,6 +184,7 @@ export default function AppRoot({
                 preset={preset}
                 renderDebug={renderDebug}
                 onDebugState={onDebugState}
+                env={env}
             />
             {/* 모바일은 탭 막대 위(ui.css --ui-above-tabbar: 20 + 56 + 8) */}
             <AppToaster bottom={isMobile ? 84 : 40} />
@@ -195,6 +204,7 @@ export default function AppRoot({
  * @param props.preset 초기 상태 프리셋(AppPreset). 지도 준비 뒤 bbox 확정, 3D 준비 뒤 둘러보기 진입
  * @param props.renderDebug 렌더 디버그 설정. TerrainViewCanvas 로 그대로 넘긴다
  * @param props.onDebugState 앱 상태가 바뀔 때(디버그 페이지의 준비 신호)
+ * @param props.env 브라우저 환경 흉내(디버그 페이지). 없는 항목은 실제 판별(WEBGPU_AVAILABLE·LIQUID_GLASS_DEFAULT)
  */
 function App({
     theme,
@@ -204,6 +214,7 @@ function App({
     preset,
     renderDebug,
     onDebugState,
+    env,
 }: {
     theme: Theme
     setTheme: (theme: Theme) => void
@@ -212,12 +223,16 @@ function App({
     preset?: AppPreset
     renderDebug?: RenderDebug
     onDebugState?: (state: AppDebugState) => void
+    env?: AppEnv
 }) {
+    /** WebGPU 를 쓸 수 있는지. 페이지가 사는 동안 바뀌지 않는다 */
+    const webgpuSupported = env?.webgpu ?? WEBGPU_AVAILABLE
+    const glassEnabled = env?.glass ?? LIQUID_GLASS_DEFAULT
     const toast = useAppToast()
-    // WebGPU 가 없으면 들어오자마자 알린다(닫을 때까지 남는 오류 토스트). 알약·범위 버튼 비활성은 아래 JSX 가 WEBGPU_SUPPORTED 로 정한다.
+    // WebGPU 가 없으면 들어오자마자 알린다(닫을 때까지 남는 오류 토스트). 알약·범위 버튼 비활성은 아래 JSX 가 webgpuSupported 로 정한다.
     // AppToaster 는 App 뒤의 형제라 이 effect 시점엔 아직 등록 전이다(그때 띄우면 버려진다). 한 틱 뒤에 띄운다
     useEffect(() => {
-        if (WEBGPU_SUPPORTED) return
+        if (webgpuSupported) return
         const id = setTimeout(
             () =>
                 toast.error(
@@ -227,7 +242,7 @@ function App({
             0,
         )
         return () => clearTimeout(id)
-    }, [toast])
+    }, [toast, webgpuSupported])
     const mapRef = useRef<Map | null>(null)
     /** 사각형 선택 도구. 레일 맨 위 버튼으로 모드를 켜고 끈다 */
     const squareToolRef = useRef<SquareTool | null>(null)
@@ -269,7 +284,7 @@ function App({
         if (view === "map") setMinimapCollapsed(false)
     }, [view])
     // 리퀴드 글래스(?glass=0 으로 끔): 3D 화면에서만
-    useLiquidGlass(LIQUID_GLASS_ENABLED && view === "3d" && !!terrain, rootRef)
+    useLiquidGlass(glassEnabled && view === "3d" && !!terrain, rootRef)
 
     // ---- 걸어 보기(게임 모드, 계획 문서 6절) ----
     /** 1인칭으로 지형 위를 걷는 중. 3D 화면·데스크톱에서만. 지도로 돌아가거나 지형이 바뀌면 끝난다 */
@@ -525,7 +540,7 @@ function App({
             mapRef.current = map
             squareToolRef.current = squareTool
             // 데스크톱은 첫 할 일이 범위 그리기이므로 모드를 켜 둔 채 시작한다. 터치 기기는 레일 버튼으로 켠다. WebGPU 가 없으면 켜지 않는다
-            if (HAS_FINE_POINTER && WEBGPU_SUPPORTED) squareTool.setActive(true)
+            if (HAS_FINE_POINTER && webgpuSupported) squareTool.setActive(true)
             // #map 의 높이는 CSS(.ui-map 100%)로 정해져 지도 생성 시점에 아직 0 일 수 있다. 다음 프레임에 크기를 다시 잰다
             requestAnimationFrame(() => map.updateSize())
             // 프리셋 범위(디버그 페이지): 사용자가 그린 것과 같은 확정 경로(도엽 외곽선 → startTerrainLoad)를 탄다
@@ -695,7 +710,7 @@ function App({
                 <Toolbar
                     drawing={selecting}
                     onToggleDraw={() => squareToolRef.current?.setActive(!selecting)}
-                    drawDisabled={busy || !WEBGPU_SUPPORTED}
+                    drawDisabled={busy || !webgpuSupported}
                     openPanel={openPanel}
                     onOpenPanel={setOpenPanel}
                     panelDisabled={{ layers: !terrainReady, export: !terrainReady }}
@@ -793,9 +808,9 @@ function App({
             )}
 
             {/* WebGPU 가 없으면 지도 화면에 상시 안내. 범위 버튼이 막혀 있어 아래 안내들은 뜨지 않는다 */}
-            {!WEBGPU_SUPPORTED && view === "map" && <HintPill text="이 브라우저는 3D 지형을 볼 수 없습니다." />}
+            {!webgpuSupported && view === "map" && <HintPill text="이 브라우저는 3D 지형을 볼 수 없습니다." />}
             {/* 모바일 지도 화면에서 아무것도 안 하고 있을 때: 첫 할 일 안내(화면 시안 "모바일 · 지도") */}
-            {WEBGPU_SUPPORTED && isMobile && !selecting && view === "map" && !busy && (
+            {webgpuSupported && isMobile && !selecting && view === "map" && !busy && (
                 <HintPill text='아래 "범위"를 누르고 지도를 끌어 그리세요' />
             )}
             {selecting && view === "map" && (

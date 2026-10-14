@@ -1,5 +1,6 @@
 import React from "react"
 
+import { AppDebugPage } from "./app.tsx"
 import { WalkDebugPage } from "./walk.tsx"
 
 /** 디버그 페이지 해시 접두. `index.html#/debug/<페이지>?<쿼리>` */
@@ -24,6 +25,7 @@ export const parseDebugHash = (hash: string) => {
 /** 디버그 페이지 이름 → 컴포넌트. 새 페이지는 src/debug/<이름>.tsx 로 만들고 여기에 더한다 */
 const PAGES: Record<string, (props: { params: URLSearchParams }) => React.ReactElement> = {
     walk: WalkDebugPage,
+    app: AppDebugPage,
 }
 
 /**

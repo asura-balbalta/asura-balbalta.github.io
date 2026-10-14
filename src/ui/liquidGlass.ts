@@ -3,8 +3,9 @@ import { RefObject, useEffect } from "react"
 
 /**
  * 리퀴드 글래스(3D 화면의 유리 그릇). Chromium 엔진에서만 켠다: WebKit(iOS 전체·데스크톱 Safari)은 WebGPU 캔버스를
- * drawImage 로 읽으면 그 프레임의 화면 표시가 건너뛰어져 3D 가 멈춘 것처럼 보였다(2026-10-10 iPhone 확인, ?glass=0 이면 정상).
- * Firefox 는 확인 전이라 같이 뺀다. URL ?glass=0 은 끄기, ?glass=1 은 판별과 무관하게 켜기(디버그).
+ * drawImage 로 읽으면 그 프레임의 화면 표시가 건너뛰어져 3D 가 멈춘 것처럼 보였다(2026-10-10 iPhone 확인, 끄면 정상).
+ * Firefox 는 확인 전이라 같이 뺀다. 판별과 무관하게 끄거나 켜는 것은 디버그 페이지 `#/debug/app?glass=0|1`(src/debug/app.tsx →
+ * App 의 env.glass). 운영 주소에는 스위치가 없다.
  *
  * 라이브러리는 루트의 직계 자식을 캔버스로 떠서(일반 DOM 은 html-to-image, canvas 는 drawImage) 유리 요소 위치에 WebGL 로
  * 굴절·흐림을 그린다. 3D 화면에서만 켠다: WebGPU 캔버스는 루트 직계 자식이라 data-dynamic 을 주면 매 프레임 drawImage 로
@@ -24,9 +25,10 @@ const isChromium = () => {
     return /Chrome\/\d+/.test(ua) && !/CriOS|FxiOS|EdgiOS/.test(ua)
 }
 
+/** 이 브라우저의 기본값(Chromium 이면 켬). App 은 env.glass 가 있으면 그것을 우선한다 */
+export const LIQUID_GLASS_DEFAULT = isChromium()
+
 const searchParams = new URLSearchParams(window.location.search)
-const glassParam = searchParams.get("glass")
-export const LIQUID_GLASS_ENABLED = glassParam === "1" || (glassParam !== "0" && isChromium())
 
 /**
  * 유리 틴트. 셰이더가 색에 GLASS_TINT_COLOR 를 strength 만큼 섞어 곱한다(1 을 넘으면 선형으로 더 강하게).
