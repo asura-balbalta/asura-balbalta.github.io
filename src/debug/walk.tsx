@@ -18,8 +18,8 @@ import type { RenderDebug } from "../webgpu/terrainRenderer"
  * - lock=0: 포인터 잠금 없이 흉내(내장 브라우저·Playwright. 마우스는 어디서 움직여도 시점, Esc 가 포커스 끔)
  * 해시를 고치면(새로고침 없이) 렌더 디버그 설정은 바로 반영되고, 프리셋(bbox·spawn·yaw·pitch)은 처음 한 번만 적용된다.
  * 받은 파라미터를 왼쪽 위(둘러보기 중 비어 있는 자리. 오른쪽 위는 미니맵)에 작게 보여 무엇이 적용됐는지 확인할 수 있다(클릭은 통과).
- * 그 요소의 data-debug-state(loading | ready | walking)·data-walk-tiles(주변 도엽 수)는 자동 캡처(scripts/render-check.mjs)의
- * 준비 신호다: 둘러보기 중 도엽 수가 한동안 변하지 않으면 스트리밍이 멈춘 것으로 보고 찍는다
+ * 그 요소의 data-debug-state(loading | ready | walking)·data-busy(로딩·재생성 중 1)·data-walk-tiles(선택 범위 밖 도엽 수)는
+ * 자동 캡처(scripts/render-check.mjs)의 준비 신호다: 둘러보기 중 busy 가 0 이고 도엽 수가 한동안 변하지 않으면 찍는다
  */
 
 const numberList = (raw: string | null, count: number): number[] | null => {
@@ -85,6 +85,7 @@ export const WalkDebugPage = ({ params }: { params: URLSearchParams }) => {
             <div
                 data-debug-page="walk"
                 data-debug-state={debugState}
+                data-busy={state.busy ? 1 : 0}
                 data-walk-tiles={state.tiles}
                 style={{
                     position: "fixed",
@@ -105,7 +106,7 @@ export const WalkDebugPage = ({ params }: { params: URLSearchParams }) => {
                 {"debug/walk" + (rows.length === 0 ? " (파라미터 없음)" : "")}
                 {rows.map(([key, value]) => `\n${key} = ${value}`).join("")}
                 {notes.map((note) => `\n! ${note}`).join("")}
-                {`\n[${debugState}${state.walking ? ` tiles=${state.tiles}` : ""}]`}
+                {`\n[${debugState}${state.busy ? " busy" : ""}${state.walking ? ` tiles=${state.tiles}` : ""}]`}
             </div>
         </>
     )

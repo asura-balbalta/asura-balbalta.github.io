@@ -3,6 +3,7 @@ import { MeshChunk, TinMesh } from "../terrainData"
 import { hexToRgb, STOP_COUNT, stopsToUniform, TerrainTheme } from "../terrainTheme"
 import { createAoPasses } from "./ao"
 import { createSkyPass, sunDirection } from "./sky"
+import { computeVertexNormals, NORMAL_SMOOTH_ITERATIONS, smoothVertexNormals } from "../meshNormals"
 import type { AoDebugMode } from "./ao"
 import {
     Camera,
@@ -31,7 +32,6 @@ const DEPTH_FORMAT: GPUTextureFormat = "depth32float"
 
 /** 깊이 텍스처 홀더. pass 들이 공유하며, 캔버스 크기가 바뀌면 resizeUpdater 가 안의 텍스처·view 를 바꿔 끼운다 */
 type DepthHolder = { texture: GPUTexture; view: GPUTextureView; width: number; height: number }
-const NORMAL_SMOOTH_ITERATIONS = 2
 const STOPS_OFFSET = 96 // 표고 색표 array<vec4f, STOP_COUNT> 의 시작 (shaders.ts 의 Uniforms 와 같아야 한다)
 const BUILDING_COLOR_OFFSET = STOPS_OFFSET + 16 * STOP_COUNT // 건물색 vec4f
 const LIGHT_VP_OFFSET = BUILDING_COLOR_OFFSET + 16 // 빛 기준 viewProj mat4x4f
@@ -167,97 +167,6 @@ const renderBackgroundPassFactory =
         })
         backgroundPass.end()
     }
-
-/**
- * 정점 법선을 계산한다. 정점에 닿은 삼각형들의 면 법선을 더한 뒤 정규화한다.
- * 면 법선을 정규화하지 않고 더하므로 넓은 삼각형일수록 영향이 크다(면적 가중).
- *
- * 삼각형은 위에서 볼 때 반시계(CCW)라 면 법선이 위(+z)를 향한다.
- * 어떤 삼각형에도 쓰이지 않는 정점은 (0, 0, 1)로 둔다.
- *
- * @param positions 정점 좌표 (x, y, z) 연속 배열
- * @param indices 삼각형 정점 인덱스 (3개씩)
- * @returns positions 와 같은 길이의 정점 법선 (nx, ny, nz) 연속 배열
- */
-const computeVertexNormals = (positions: Float32Array, indices: Uint32Array) => {
-    const normals = new Float32Array(positions.length)
-    for (let t = 0; t < indices.length; t += 3) {
-        const a = indices[t] * 3
-        const b = indices[t + 1] * 3
-        const c = indices[t + 2] * 3
-        const e1x = positions[b] - positions[a]
-        const e1y = positions[b + 1] - positions[a + 1]
-        const e1z = positions[b + 2] - positions[a + 2]
-        const e2x = positions[c] - positions[a]
-        const e2y = positions[c + 1] - positions[a + 1]
-        const e2z = positions[c + 2] - positions[a + 2]
-        const nx = e1y * e2z - e1z * e2y
-        const ny = e1z * e2x - e1x * e2z
-        const nz = e1x * e2y - e1y * e2x
-        for (const v of [a, b, c]) {
-            normals[v] += nx
-            normals[v + 1] += ny
-            normals[v + 2] += nz
-        }
-    }
-    return normalizeVectors(normals)
-}
-
-/**
- * (x, y, z) 연속 배열의 벡터들을 제자리에서 길이 1로 정규화한다. 길이가 0인 벡터는 (0, 0, 1)로 둔다.
- *
- * @param vectors 정규화할 벡터 배열(직접 수정됨)
- * @returns 같은 배열
- */
-const normalizeVectors = (vectors: Float32Array) => {
-    for (let i = 0; i < vectors.length; i += 3) {
-        const len = Math.hypot(vectors[i], vectors[i + 1], vectors[i + 2])
-        if (len === 0) {
-            vectors[i] = 0
-            vectors[i + 1] = 0
-            vectors[i + 2] = 1
-            continue
-        }
-        vectors[i] /= len
-        vectors[i + 1] /= len
-        vectors[i + 2] /= len
-    }
-    return vectors
-}
-
-/**
- * 정점 법선을 이웃 정점의 법선과 섞어 부드럽게 한다. 형상(정점 위치)은 바꾸지 않고 음영만 매끄러워진다.
- *
- * 한 번 반복할 때마다, 각 정점의 법선에 그 정점과 삼각형을 공유하는 이웃 정점들의 법선을 더한 뒤 정규화한다.
- * 등고선 기반 TIN 의 평평한 단과 가파른 턱 사이 음영 차이를 줄이는 용도.
- *
- * @param normals 정점 법선 (nx, ny, nz) 연속 배열
- * @param indices 삼각형 정점 인덱스 (3개씩)
- * @param iterations 반복 횟수. 클수록 넓은 범위가 섞인다
- * @returns 부드럽게 한 정점 법선(새 배열)
- */
-const smoothVertexNormals = (
-    normals: Float32Array,
-    indices: Uint32Array,
-    iterations: number,
-) => {
-    let current = normals
-    for (let it = 0; it < iterations; it++) {
-        const next = new Float32Array(current)
-        for (let t = 0; t < indices.length; t += 3) {
-            for (let k = 0; k < 3; k++) {
-                const v = indices[t + k] * 3
-                const o1 = indices[t + ((k + 1) % 3)] * 3
-                const o2 = indices[t + ((k + 2) % 3)] * 3
-                next[v] += current[o1] + current[o2]
-                next[v + 1] += current[o1 + 1] + current[o2 + 1]
-                next[v + 2] += current[o1 + 2] + current[o2 + 2]
-            }
-        }
-        current = normalizeVectors(next)
-    }
-    return current
-}
 
 /**
  * 메쉬 정점 좌표의 범위를 구한다. 카메라 초기 위치와 표고 색 범위에 쓴다.
@@ -770,7 +679,7 @@ const createTerrainDrawingPassAndUpdaters = (
      * 걸어 보기 스트리밍 도엽(walkTiles): 도엽 id → GPU 조각. 지형 조각은 계단형 파이프라인(면 법선, 법선 버퍼 없음)으로,
      * 건물은 건물 파이프라인으로 그린다. 선택 범위 메쉬(layerChunks)와는 별개로 들고, 나가면 streamClearUpdater 로 모두 비운다
      */
-    const streamTiles = new Map<string, { terrain: GpuChunk[]; buildings: GpuChunk[] }>()
+    const streamTiles = new Map<string, { terrain: GpuChunk[]; buildings: GpuChunk[]; mode: TerrainMode }>()
     /** 스트리밍 도엽이 선택 범위를 다 덮었으면 선택 메쉬(지형·건물)는 그리지 않는다(겹치면 z-fighting) */
     let streamCovers = false
 
@@ -778,9 +687,12 @@ const createTerrainDrawingPassAndUpdaters = (
      * 도엽 하나를 올리거나(이전 것은 교체) 뺀다(null).
      *
      * @param id 도엽 id
-     * @param tile 지형 조각(계단형)과 건물 메쉬. null 이면 뺀다
+     * @param tile 지형 조각(계단형, 또는 법선이 있는 매끈한 면)과 건물 메쉬, 지형 표현 방식. null 이면 뺀다
      */
-    const streamTileUpdater = (id: string, tile: { terrain: MeshChunk[]; buildings: TinMesh | null } | null) => {
+    const streamTileUpdater = (
+        id: string,
+        tile: { terrain: MeshChunk[]; buildings: TinMesh | null; mode: TerrainMode } | null,
+    ) => {
         const prev = streamTiles.get(id)
         if (prev) {
             destroyChunks(prev.terrain)
@@ -788,6 +700,7 @@ const createTerrainDrawingPassAndUpdaters = (
             streamTiles.delete(id)
         }
         if (!tile) return
+        if (tile.mode === "tin" && tile.terrain.some((c) => !c.normals)) throw new Error(`도엽 ${id}: 매끈한 면 조각에 법선이 없음`)
         const terrain = tile.terrain.map((c) => uploadChunk(`tile ${id}`, c))
         const buildings: GpuChunk[] = []
         if (tile.buildings) {
@@ -796,7 +709,16 @@ const createTerrainDrawingPassAndUpdaters = (
                 buildings.push(uploadChunk(`tile ${id} buildings`, c))
             }
         }
-        streamTiles.set(id, { terrain, buildings })
+        streamTiles.set(id, { terrain, buildings, mode: tile.mode })
+    }
+    /**
+     * 표고 색 범위(uniform offset 64)를 쓴다. 도엽이 하나씩 올라오며 범위가 넓어질 때마다 다시 쓴다
+     *
+     * @param minZ 최저 표고(m)
+     * @param maxZ 최고 표고(m)
+     */
+    const elevationRangeUpdater = (minZ: number, maxZ: number) => {
+        device.queue.writeBuffer(uniformBuffer, 64, new Float32Array([minZ, maxZ]))
     }
     const streamCoverUpdater = (covers: boolean) => {
         streamCovers = covers
@@ -817,7 +739,7 @@ const createTerrainDrawingPassAndUpdaters = (
             if (layerVisible.buildings && layerChunks.buildings.length > 0) draws.push({ chunks: layerChunks.buildings, set: pipelines.buildings })
         }
         for (const t of streamTiles.values()) {
-            if (layerVisible.terrain && t.terrain.length > 0) draws.push({ chunks: t.terrain, set: pipelines.stepped })
+            if (layerVisible.terrain && t.terrain.length > 0) draws.push({ chunks: t.terrain, set: pipelines[t.mode] })
             if (layerVisible.buildings && t.buildings.length > 0) draws.push({ chunks: t.buildings, set: pipelines.buildings })
         }
         return draws
@@ -901,6 +823,7 @@ const createTerrainDrawingPassAndUpdaters = (
         streamTileUpdater,
         streamCoverUpdater,
         streamClearUpdater,
+        elevationRangeUpdater,
         meshUpdater,
         meshStreamStarter,
         streamedMeshUpdater,

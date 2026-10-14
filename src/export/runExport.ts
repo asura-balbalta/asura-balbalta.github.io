@@ -24,7 +24,7 @@ export const EXPORT_KINDS: { kind: ExportKind; label: string; description: strin
 ]
 
 /** "내보내기" 에 체크된 레이어 중 메쉬가 있는 것 */
-export const exportableLayers = (meshes: LayerMeshes, layers: LayerStates): LayerId[] =>
+export const exportableLayers = (meshes: Partial<Record<LayerId, unknown>>, layers: LayerStates): LayerId[] =>
     LAYER_DEFS.map((d) => d.id).filter((id) => layers[id]?.export && meshes[id])
 
 /**

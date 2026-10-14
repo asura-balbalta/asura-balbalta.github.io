@@ -2,33 +2,21 @@ import React, { useEffect, useId, useRef, useState } from "react"
 
 import { INITIAL_LAYER_STATES, LAYER_DEFS, LayerStates } from "../layers"
 import { createPlayer, Player, PlayerMove, WalkPhysics } from "../player"
-import { TinMesh } from "../terrainData"
 import { createHeightSampler, HeightSampler, nearestTriangleCentroid } from "../terrainHeight"
-import { startWalkTiles } from "../walkTilesClient"
-import type { Extent } from "ol/extent"
+import type { TerrainTilesClient } from "../terrainTilesClient"
+import type { TileData } from "../terrainTiles.worker"
 import { TERRAIN_THEMES, Theme } from "../terrainTheme"
-import type { SteppedMeshRequest, SteppedMeshResponse } from "../terrainSteps.worker"
 import { OrbitCamera } from "../webgpu/camera"
 import {
     createTerrainRenderFunctionAndUpdateFunctions,
     DEFAULT_LIGHTING,
     MeshBounds,
-    meshBounds,
     RenderDebug,
     TerrainMode,
     walkLighting,
 } from "../webgpu/terrainRenderer"
 
-/** esbuild 가 src/terrainSteps.worker.ts 를 별도 entry 로 묶어 내는 파일. index.html 의 index.js 와 같은 폴더(dist)에 있다 */
-const STEPS_WORKER_URL = "terrainSteps.worker.js"
-/**
- * 계단형 조각의 버퍼 상한(바이트). GPU 한도(보통 256MB)보다 작게 잡는 이유:
- * Worker 가 조각 하나를 만드는 동안 정점 합치기 Map 과 벽 집합을 들고 있는데, 그 크기가 조각 크기에 비례해서
- * 256MB 조각이면 수 GB 에 이른다. 조각을 작게 하면 Worker 메모리가 줄고, 첫 조각도 빨리 올라온다.
- * 비용은 draw call 수와 조각 경계의 중복 정점(1% 미만)뿐이다
- */
-const STEPPED_CHUNK_BYTES = 64 * 1048576
-/** 걸어 보기 도엽 스트리밍: 로드 반경(m), 도엽 상한, 다시 조회하는 이동 거리(m) */
+/** 걸어 보기 도엽 스트리밍(선택 범위 밖): 로드 반경(m), 도엽 상한, 다시 조회하는 이동 거리(m) */
 const WALK_TILE_RADIUS = 1000
 const WALK_TILE_MAX = 60
 const WALK_TILE_UPDATE_M = 100
@@ -74,52 +62,39 @@ const initialCamera = ({ min, max }: MeshBounds): OrbitCamera => ({
  *
  * - 마운트할 때 렌더러(WebGPU device, 파이프라인)를 한 번 만들고 requestAnimationFrame 루프를 돌린다.
  *   언마운트하면 루프를 멈추고 device 를 해제한다.
- * - mesh 가 바뀌면 GPU 버퍼를 교체하고 카메라를 초기 위치로 되돌린다. mesh 는 같고 mode·stepInterval 만 바뀌면
- *   버퍼만 교체하고 카메라는 그대로 둔다(표현 방식 전환 때 시점이 튀지 않게).
- *   tin 모드는 메쉬를 통째로 넘긴다(meshUpdater, 동기).
- *   stepped 모드는 Worker(terrainSteps.worker.ts)가 buildSteppedMeshChunks 로 만드는 조각을 메시지로 받는 즉시
- *   올린다(meshStreamStarter). 변환 중에도 메인 스레드는 멈추지 않고, 계단형 메쉬 전체를 메모리에 두지 않는다.
- *   Worker 에는 원본의 사본(slice)을 transfer 하므로 원본 mesh 는 부모가 계속 들고 있다가 모드·층 간격을 바꿔 다시 쓸 수 있다.
- *   첫 조각이 올라갈 때 이전 지형을 교체하고 카메라를 맞춘다(onFirstChunk). 그때까지는 이전 지형이 그대로 보인다.
- * - buildings(건물 레이어 메쉬)가 바뀌면 그 레이어의 GPU 버퍼만 교체한다(layerMeshUpdater). 카메라는 그대로.
- * - layers 가 바뀌면 레이어별 보이기만 바꾼다(layerVisibilityUpdater). 버퍼는 그대로.
- * - theme 이 바뀌면 표고 색표·건물색과 배경색 uniform 만 다시 쓴다(셰이더·메쉬 그대로).
+ * - 지형은 도엽 집합(terrainTilesClient)을 구독해 올린다(2026-10-14 L1. 전에는 mesh 하나를 통째로·조각으로 받았다).
+ *   새 선택(selection)이 오면 첫 도엽이 올라올 때 이전 도엽을 모두 내리고 카메라를 선택 범위에 맞춘다. 그때까지는 이전 지형이
+ *   그대로 보인다. 도엽(tile)은 바로 GPU 에 올리고(교체 포함), remove 는 내린다. bounds 는 표고 색 범위.
+ *   표현 방식·층 간격 전환은 부모가 client.setStyle 로 하고, 도엽이 새 조각으로 교체되어 들어온다(카메라는 그대로).
+ * - layers 가 바뀌면 레이어별 보이기만 바꾼다(layerVisibilityUpdater).
+ * - theme 이 바뀌면 표고 색표·건물색과 배경색 uniform 만 다시 쓴다.
  * - 드래그: 회전(좌우 = azimuth, 상하 = elevation), 휠·트랙패드 핀치·두 손가락: 확대·축소(distance)
- * - 1차 구현이라 캔버스 크기는 마운트 시점 창 크기로 고정된다.
  *
- * @param props.mesh 원본 TIN 메쉬
- * @param props.buildings 건물 레이어 메쉬(지형과 같은 원점). null 이면 비운다
+ * @param props.tiles 지형 도엽 집합(앱이 평생 하나 든다)
  * @param props.layers 레이어별 보이기 상태
- * @param props.mode 지형 표현 방식. "tin"(부드러운 음영, 표고 색) 또는 "stepped"(계단형, 단색)
+ * @param props.mode 지형 표현 방식(걸어 보기 발 높이를 층 바닥에 맞출지 정하는 데만 쓴다. 그리기는 도엽이 들고 온 모드)
  * @param props.stepInterval stepped 모드의 층 간격(m)
  * @param props.theme 색 테마(terrainTheme). 기본 "light"
- * @param props.onDone 메쉬를 GPU 에 올리는 작업이 끝났을 때(성공 true, 실패 false). 부모가 레이아웃 전환·잠금 해제에 쓴다
- * @param props.onProgress stepped 모드의 변환 진행률(처리한 원본 삼각형 비율 0 ~ 1). 약 100ms 간격으로 불리고 끝에 1 이 온다
- * @param props.onFirstChunk stepped 모드에서 첫 조각이 화면에 올라갔을 때. 부모가 지도를 미니맵으로 옮기는 데 쓴다
- * @param props.hidden true 면 캔버스를 보이지 않게 한다(지도 화면으로 돌아갔을 때). 렌더러·메쉬는 그대로라 다시 보이면 즉시 그려진다
+ * @param props.hidden true 면 캔버스를 보이지 않게 한다(지도 화면으로 돌아갔을 때). 렌더러·도엽은 그대로라 다시 보이면 즉시 그려진다
  * @param props.walking 걸어 보기(1인칭, player.ts). 켜지면 포인터 잠금을 요청하고 렌더 루프가 프레임마다 플레이어를 진행해
- *   1인칭 카메라를 쓴다. 끌어서 회전·휠 확대는 그동안 막고, 캔버스 클릭은 다시 포커스(잠금)가 된다. 꺼지면 직전 궤도 카메라로 돌아간다
+ *   1인칭 카메라를 쓴다. 끌어서 회전·휠 확대는 그동안 막고, 캔버스 클릭은 다시 포커스(잠금)가 된다. 꺼지면 직전 궤도 카메라로 돌아간다.
+ *   발 높이는 모든 도엽(선택 + 스트리밍)의 TIN 과 건물 지붕에서 찾고, 선택 범위 밖은 client 가 반경 안 도엽을 스트리밍한다
  * @param props.walkFocused 포커스(포인터 잠금) 중인지. 커서를 숨긴다
  * @param props.onWalkMove 플레이어 위치가 바뀔 때(약 10 Hz, 미니맵·상태 표시줄용)
  * @param props.onWalkFocusChange 포커스가 잡히거나 풀렸을 때(Esc 등). 부모가 안내 문구를 바꾼다
  * @param props.walkPhysics 걸어 보기 물리 값(중력·속도·점프·대시). 바뀌면 바로 플레이어에 반영
  * @param props.onWalkFrameTime 걸어 보기 중 프레임 간격(ms, 최근 평균)을 0.5초마다. rAF 간격이라 GPU 가 병목이면 그만큼 늘어난다
- * @param props.walkSelection 선택 범위(3857). 걸어 보기 중 주변 도엽을 스트리밍(walkTiles)하고, 선택 범위를 다 덮으면 선택 메쉬를 숨긴다
- * @param props.onWalkTileCount 스트리밍으로 들고 있는 도엽 수가 바뀔 때
+ * @param props.onWalkTileCount 스트리밍으로 들고 있는 선택 범위 밖 도엽 수가 바뀔 때
  * @param props.renderDebug 렌더 디버그 설정(디버그 페이지). 둘러보기 조명(SSAO·그림자·하늘·외곽선)·태양 고도·AO 디버그 출력·잠금 흉내.
  *   바뀌면 새로고침 없이 반영된다(렌더러 debugUpdater + 걸어 보기 중이면 조명 다시 쓰기). 운영은 undefined
  * @param props.walkStart 걸어 보기 시작점·yaw·pitch(디버그 페이지 프리셋). 들어갈 때 한 번 읽는다
  */
 export const TerrainViewCanvas = ({
-    mesh,
-    buildings = null,
+    tiles,
     layers = INITIAL_LAYER_STATES,
     mode = "tin",
     stepInterval = 1,
     theme = "light",
-    onDone,
-    onProgress,
-    onFirstChunk,
     hidden = false,
     walking = false,
     walkFocused = false,
@@ -127,20 +102,15 @@ export const TerrainViewCanvas = ({
     onWalkFocusChange,
     walkPhysics,
     onWalkFrameTime,
-    walkSelection,
     onWalkTileCount,
     renderDebug,
     walkStart,
 }: {
-    mesh: TinMesh
-    buildings?: TinMesh | null
+    tiles: TerrainTilesClient
     layers?: LayerStates
     mode?: TerrainMode
     stepInterval?: number
     theme?: Theme
-    onDone?: (ok: boolean) => void
-    onProgress?: (ratio: number) => void
-    onFirstChunk?: () => void
     hidden?: boolean
     walking?: boolean
     walkFocused?: boolean
@@ -148,18 +118,11 @@ export const TerrainViewCanvas = ({
     onWalkFocusChange?: (focused: boolean) => void
     walkPhysics?: Partial<WalkPhysics>
     onWalkFrameTime?: (ms: number) => void
-    walkSelection?: Extent
     onWalkTileCount?: (count: number) => void
     renderDebug?: RenderDebug
     walkStart?: WalkStart
 }) => {
-    // 콜백이 렌더마다 새로 만들어져도 메쉬 effect 를 다시 돌리지 않도록 ref 로 받는다
-    const onDoneRef = useRef(onDone)
-    onDoneRef.current = onDone
-    const onProgressRef = useRef(onProgress)
-    onProgressRef.current = onProgress
-    const onFirstChunkRef = useRef(onFirstChunk)
-    onFirstChunkRef.current = onFirstChunk
+    // 콜백이 렌더마다 새로 만들어져도 effect 를 다시 돌리지 않도록 ref 로 받는다
     const onWalkMoveRef = useRef(onWalkMove)
     onWalkMoveRef.current = onWalkMove
     const onWalkFocusChangeRef = useRef(onWalkFocusChange)
@@ -168,29 +131,18 @@ export const TerrainViewCanvas = ({
     onWalkFrameTimeRef.current = onWalkFrameTime
     const onWalkTileCountRef = useRef(onWalkTileCount)
     onWalkTileCountRef.current = onWalkTileCount
-    const walkSelectionRef = useRef(walkSelection)
-    walkSelectionRef.current = walkSelection
     const renderDebugRef = useRef(renderDebug)
     renderDebugRef.current = renderDebug
     const walkStartRef = useRef(walkStart)
     walkStartRef.current = walkStart
     /** 걸어 보기 중인 플레이어. 렌더 루프가 프레임마다 step 해 카메라를 쓴다 */
     const walkRef = useRef<Player | null>(null)
-    /** mesh 별 지형 높이 조회기(걸어 보기에 들어갈 때 만들고 같은 mesh 면 다시 쓴다) */
-    const samplerRef = useRef<{ mesh: TinMesh; sampler: HeightSampler } | null>(null)
-    /** 선택 범위 건물의 지붕 높이 조회기(건물이 바뀌면 다시). 걸어 보기가 지붕 위에 서고 벽을 못 넘게 하는 데 쓴다 */
-    const roofRef = useRef<HeightSampler | null>(null)
-    useEffect(() => {
-        roofRef.current = buildings ? createHeightSampler(buildings, { highest: true }) : null
-    }, [buildings])
     const canvasId = `terrain-canvas-${useId()}`
     const canvasRef = useRef<HTMLCanvasElement | null>(null)
     // canvas 속성은 실제 픽셀 수(× devicePixelRatio), style 은 화면에 보이는 크기. 창 크기가 바뀌면 다시 잰다
     const [size, setSize] = useState(readViewportSize)
     const [renderer, setRenderer] = useState<TRenderer | null>(null)
     const cameraRef = useRef<OrbitCamera | null>(null)
-    /** 직전 effect 가 올린 mesh. 같은 mesh 로 다시 돌면(mode 전환) 카메라를 유지한다 */
-    const lastMeshRef = useRef<TinMesh | null>(null)
     /**
      * 눌려 있는 포인터(마우스 버튼·손가락)의 pointerId → 마지막 위치. 하나면 끌어서 회전, 둘이면 두 점 거리 변화로 확대·축소.
      * 브라우저가 제스처를 가져가며 pointercancel 을 보내면 거기서도 지워 상태가 남지 않게 한다
@@ -273,189 +225,131 @@ export const TerrainViewCanvas = ({
 
     useEffect(() => {
         if (!renderer) return
-        try {
-            renderer.updaters.layerMeshUpdater("buildings", buildings)
-        } catch (err) {
-            console.error(err)
-        }
-    }, [renderer, buildings])
-
-    useEffect(() => {
-        if (!renderer) return
         for (const { id } of LAYER_DEFS) renderer.updaters.layerVisibilityUpdater(id, layers[id].visible)
     }, [renderer, layers])
-
+    // 도엽 집합 구독: 도엽을 GPU 에 올리고 내린다. 새 선택의 첫 도엽에서 이전 도엽을 모두 내리고 카메라를 맞춘다(걸어 보기 중이 아닐 때)
     useEffect(() => {
         if (!renderer) return
-        const resetCamera = lastMeshRef.current !== mesh || !cameraRef.current
-        lastMeshRef.current = mesh
-        /** 새 mesh 면 범위에 맞춰 카메라를 초기화하고, 같은 mesh 면 현재 카메라를 유지한다 */
-        const placeCamera = (bounds: MeshBounds) => {
-            if (resetCamera) cameraRef.current = initialCamera(bounds)
-            renderer.updaters.cameraUpdater(cameraRef.current!)
-        }
-        if (mode !== "stepped") {
-            let ok = true
+        let pendingClear = false
+        const unsubscribe = tiles.subscribe((event) => {
             try {
-                placeCamera(renderer.updaters.meshUpdater(mesh, { mode }))
+                if (event.type === "selection") {
+                    pendingClear = true
+                } else if (event.type === "tile") {
+                    if (pendingClear) {
+                        pendingClear = false
+                        renderer.updaters.streamClearUpdater()
+                        if (!walkRef.current && tiles.bounds) {
+                            cameraRef.current = initialCamera(tiles.bounds)
+                            renderer.updaters.cameraUpdater(cameraRef.current)
+                        }
+                    }
+                    renderer.updaters.streamTileUpdater(event.tile.id, {
+                        terrain: event.tile.terrain,
+                        buildings: event.tile.buildings,
+                        mode: event.tile.mode,
+                    })
+                } else if (event.type === "remove") {
+                    renderer.updaters.streamTileUpdater(event.id, null)
+                } else if (event.type === "bounds") {
+                    renderer.updaters.elevationRangeUpdater(event.bounds.min[2], event.bounds.max[2])
+                }
             } catch (err) {
                 console.error(err)
-                ok = false
             }
-            onDoneRef.current?.(ok)
-            return
-        }
+        })
+        return unsubscribe
+    }, [renderer, tiles])
 
-        // stepped: 변환은 Worker 가 하고, 여기서는 도착하는 조각을 GPU 에 올리기만 한다.
-        // 첫 조각이 올라갈 때 이전 지형이 교체되고 카메라를 맞춘다. 도중에 실패하면 그때까지 올라간 조각은 그대로 둔다
-        let worker: Worker | null = null
-        let first = true
-        /** Worker 를 멈추고 결과를 알린다. 이미 큐에 들어온 메시지도 더 처리하지 않게 핸들러를 뗀다 */
-        const stop = (ok?: boolean) => {
-            if (worker) {
-                worker.onmessage = null
-                worker.onerror = null
-                worker.terminate()
-                worker = null
-            }
-            if (ok !== undefined) onDoneRef.current?.(ok)
-        }
-        try {
-            // 계단형은 x·y·z 범위가 원본 TIN 과 같으므로(층 바닥으로 누르기만 함) 원본 범위를 그대로 쓴다
-            const bounds = meshBounds(mesh)
-            const stream = renderer.updaters.meshStreamStarter({ mode, bounds })
-
-            worker = new Worker(STEPS_WORKER_URL)
-            worker.onmessage = (e: MessageEvent<SteppedMeshResponse>) => {
-                const msg = e.data
-                try {
-                    if (msg.type === "chunk") {
-                        stream.addChunk(msg.chunk)
-                        if (first) {
-                            first = false
-                            placeCamera(bounds)
-                            onFirstChunkRef.current?.()
-                        }
-                    } else if (msg.type === "progress") {
-                        onProgressRef.current?.(msg.ratio)
-                    } else {
-                        stream.finish()
-                        stop(true)
-                    }
-                } catch (err) {
-                    console.error(err)
-                    stop(false)
-                }
-            }
-            worker.onerror = (e) => {
-                console.error("계단형 변환 Worker 오류:", e.message)
-                stop(false)
-            }
-            // 원본 mesh 는 부모가 계속 들고 있어야 하므로(모드·층 간격을 바꿔 같은 mesh 로 다시 변환) 원본을 넘기지 않는다.
-            // slice() 로 사본을 만들고(복사 1회) 그 사본의 버퍼만 transfer 한다. 사본은 이 뒤로 메인에서 쓰지 않는다
-            const copy: TinMesh = {
-                origin: mesh.origin,
-                positions: mesh.positions.slice(),
-                indices: mesh.indices.slice(),
-                segments: mesh.segments?.slice(),
-            }
-            const request: SteppedMeshRequest = {
-                mesh: copy,
-                step: stepInterval,
-                maxBytes: Math.min(stream.maxBytes, STEPPED_CHUNK_BYTES),
-            }
-            const transfer = [copy.positions.buffer, copy.indices.buffer]
-            if (copy.segments) transfer.push(copy.segments.buffer)
-            worker.postMessage(request, transfer as ArrayBuffer[])
-        } catch (err) {
-            console.error(err)
-            stop(false)
-        }
-        // mesh 가 바뀌거나 언마운트되면 진행 중인 변환을 취소한다(결과는 알리지 않는다)
-        return () => stop()
-    }, [renderer, mesh, mode, stepInterval])
-
-    // 걸어 보기: 켜지면 지형 중앙에 플레이어를 세우고 그림자·안개 조명으로 바꾼다. 꺼지면(또는 mesh 가 바뀌면) 떼고
+        // 걸어 보기: 켜지면 지형 중앙에 플레이어를 세우고 그림자·안개 조명으로 바꾼다. 꺼지면(또는 mesh 가 바뀌면) 떼고
     // 궤도 카메라·기본 조명으로 복귀. 물리 값·층 간격은 아래 effect 가 따라 바꾼다
     useEffect(() => {
         const canvas = canvasRef.current
-        if (!walking || !renderer || !canvas) return
-        if (samplerRef.current?.mesh !== mesh) samplerRef.current = { mesh, sampler: createHeightSampler(mesh) }
-        const { sampler } = samplerRef.current
-        // 스트리밍 도엽까지 합친 높이 조회기. 선택 범위 메쉬를 먼저 보고, 없으면 도엽들을 본다.
-        // min·max 는 도엽이 오갈 때마다 다시 재며 플레이어가 매 프레임 읽는다(범위 밖 클램프)
-        const tiles = new Map<string, HeightSampler>()
-        const tileRoofs = new Map<string, HeightSampler>()
+        const origin = tiles.origin
+        const selectionBounds = tiles.bounds
+        if (!walking || !renderer || !canvas || !origin || !selectionBounds) return
+        // 높이 조회: 모든 도엽(선택 + 스트리밍)의 TIN 과 건물 지붕. 도엽마다 조회기를 한 번 만들어 둔다(도엽 객체가 바뀌면 다시)
+        const samplerCache = new WeakMap<TileData, { ground: HeightSampler; roof: HeightSampler | null }>()
+        const samplersOf = (tile: TileData) => {
+            let s = samplerCache.get(tile)
+            if (!s) {
+                s = {
+                    ground: createHeightSampler(tile.tin),
+                    roof: tile.buildings ? createHeightSampler(tile.buildings, { highest: true }) : null,
+                }
+                samplerCache.set(tile, s)
+            }
+            return s
+        }
+        const inTile = (tile: TileData, x: number, y: number) =>
+            x >= tile.bounds.min[0] && x <= tile.bounds.max[0] && y >= tile.bounds.min[1] && y <= tile.bounds.max[1]
         const combined: HeightSampler = {
             heightAt: (x, y) => {
-                const h = sampler.heightAt(x, y)
-                if (h !== null) return h
-                for (const t of tiles.values()) {
-                    if (x < t.min[0] || x > t.max[0] || y < t.min[1] || y > t.max[1]) continue
-                    const th = t.heightAt(x, y)
-                    if (th !== null) return th
+                for (const tile of tiles.tiles.values()) {
+                    if (!inTile(tile, x, y)) continue
+                    const h = samplersOf(tile).ground.heightAt(x, y)
+                    if (h !== null) return h
                 }
                 return null
             },
-            // 지붕: 선택 범위 건물과 도엽 건물 중 가장 높은 것
             roofAt: (x, y) => {
                 let best: number | null = null
-                const take = (s: HeightSampler | null | undefined) => {
-                    if (!s || x < s.min[0] || x > s.max[0] || y < s.min[1] || y > s.max[1]) return
-                    const h = s.heightAt(x, y)
+                for (const tile of tiles.tiles.values()) {
+                    if (!inTile(tile, x, y)) continue
+                    const roof = samplersOf(tile).roof
+                    if (!roof) continue
+                    const h = roof.heightAt(x, y)
                     if (h !== null && (best === null || h > best)) best = h
                 }
-                take(roofRef.current)
-                for (const s of tileRoofs.values()) take(s)
                 return best
             },
-            min: [...sampler.min],
-            max: [...sampler.max],
+            min: [...selectionBounds.min],
+            max: [...selectionBounds.max],
         }
+        /** 도엽이 오갈 때 범위를 다시 잰다(플레이어가 매 프레임 읽어 범위 밖으로 못 나가게) */
         const refit = () => {
-            const mn: [number, number, number] = [...sampler.min]
-            const mx: [number, number, number] = [...sampler.max]
-            for (const t of tiles.values()) {
+            const mn: [number, number, number] = [Infinity, Infinity, Infinity]
+            const mx: [number, number, number] = [-Infinity, -Infinity, -Infinity]
+            for (const tile of tiles.tiles.values()) {
                 for (let k = 0; k < 3; k++) {
-                    mn[k] = Math.min(mn[k], t.min[k])
-                    mx[k] = Math.max(mx[k], t.max[k])
+                    mn[k] = Math.min(mn[k], tile.bounds.min[k])
+                    mx[k] = Math.max(mx[k], tile.bounds.max[k])
                 }
             }
-            combined.min = mn
-            combined.max = mx
-            onWalkTileCountRef.current?.(tiles.size)
+            if (mn[0] !== Infinity) {
+                combined.min = mn
+                combined.max = mx
+            }
         }
-        // 주변 도엽 스트리밍(선택 범위를 알 때만). 100 m 움직일 때마다 새 중심을 알린다
-        const selection = walkSelectionRef.current
-        let lastCenter: [number, number] | null = null
-        const tilesClient = selection
-            ? startWalkTiles({
-                  origin: mesh.origin,
-                  selection,
-                  step: stepInterval,
-                  maxBytes: STEPPED_CHUNK_BYTES,
-                  radius: WALK_TILE_RADIUS,
-                  maxTiles: WALK_TILE_MAX,
-                  onTile: (tile) => {
-                      renderer.updaters.streamTileUpdater(tile.id, { terrain: tile.terrain, buildings: tile.buildings })
-                      tiles.set(tile.id, createHeightSampler(tile.tin))
-                      if (tile.buildings) tileRoofs.set(tile.id, createHeightSampler(tile.buildings, { highest: true }))
-                      refit()
-                  },
-                  onRemove: (id) => {
-                      renderer.updaters.streamTileUpdater(id, null)
-                      tiles.delete(id)
-                      tileRoofs.delete(id)
-                      refit()
-                  },
-                  onCovers: (covers) => renderer.updaters.streamCoverUpdater(covers),
-                  onError: (message) => console.error("도엽 스트리밍:", message),
-              })
-            : null
-        // 시작점: 프리셋(디버그 페이지)이 있으면 그 자리, 아니면 선택 범위 가운데. 거기에 메쉬가 없으면(도엽 없는 바다 등) 가장 가까운 삼각형 위로
+        refit()
+        const unsubscribe = tiles.subscribe((event) => {
+            if (event.type !== "tile" && event.type !== "remove") return
+            refit()
+            onWalkTileCountRef.current?.(tiles.extraCount)
+        })
+        // 시작점: 프리셋(디버그 페이지)이 있으면 그 자리, 아니면 선택 사각형 가운데. 거기에 메쉬가 없으면(도엽 없는 바다 등) 가장 가까운 삼각형 위로
         const start = walkStartRef.current
-        const center: [number, number] = start?.spawn ?? [(sampler.min[0] + sampler.max[0]) / 2, (sampler.min[1] + sampler.max[1]) / 2]
-        const spawn = sampler.heightAt(center[0], center[1]) !== null ? center : (nearestTriangleCentroid(mesh, center[0], center[1]) ?? center)
+        const center: [number, number] = start?.spawn ??
+            tiles.selectionCenter ?? [
+                (selectionBounds.min[0] + selectionBounds.max[0]) / 2,
+                (selectionBounds.min[1] + selectionBounds.max[1]) / 2,
+            ]
+        let spawn = center
+        if (combined.heightAt(center[0], center[1]) === null) {
+            let bestDist = Infinity
+            for (const tile of tiles.tiles.values()) {
+                const c = nearestTriangleCentroid(tile.tin, center[0], center[1])
+                if (!c) continue
+                const d = Math.hypot(c[0] - center[0], c[1] - center[1])
+                if (d < bestDist) {
+                    bestDist = d
+                    spawn = c
+                }
+            }
+        }
+        // 주변 도엽 스트리밍(선택 범위 밖). 100 m 움직일 때마다 새 중심을 알린다
+        let lastCenter: [number, number] = [spawn[0] + origin[0], spawn[1] + origin[1]]
+        tiles.updateWalk(lastCenter, WALK_TILE_RADIUS, WALK_TILE_MAX)
         const player = createPlayer({
             sampler: combined,
             spawn,
@@ -465,11 +359,10 @@ export const TerrainViewCanvas = ({
             onFocusChange: (focused) => onWalkFocusChangeRef.current?.(focused),
             onMove: (move) => {
                 onWalkMoveRef.current?.(move)
-                if (!tilesClient) return
-                const center: [number, number] = [move.x + mesh.origin[0], move.y + mesh.origin[1]]
-                if (!lastCenter || Math.hypot(center[0] - lastCenter[0], center[1] - lastCenter[1]) >= WALK_TILE_UPDATE_M) {
+                const center: [number, number] = [move.x + origin[0], move.y + origin[1]]
+                if (Math.hypot(center[0] - lastCenter[0], center[1] - lastCenter[1]) >= WALK_TILE_UPDATE_M) {
                     lastCenter = center
-                    tilesClient.update(center)
+                    tiles.updateWalk(center, WALK_TILE_RADIUS, WALK_TILE_MAX)
                 }
             },
             physics: walkPhysicsRef.current,
@@ -482,13 +375,13 @@ export const TerrainViewCanvas = ({
         return () => {
             walkRef.current = null
             player.detach()
-            tilesClient?.terminate()
-            renderer.updaters.streamClearUpdater()
+            unsubscribe()
+            tiles.stopWalk()
             onWalkTileCountRef.current?.(0)
             renderer.updaters.lightingUpdater(DEFAULT_LIGHTING)
             if (cameraRef.current) renderer.updaters.cameraUpdater(cameraRef.current)
         }
-    }, [walking, renderer, mesh])
+    }, [walking, renderer, tiles])
     const walkPhysicsRef = useRef(walkPhysics)
     walkPhysicsRef.current = walkPhysics
     useEffect(() => {

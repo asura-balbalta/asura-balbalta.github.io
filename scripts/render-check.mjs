@@ -258,7 +258,8 @@ const launchBrowser = async (preferred) => {
 }
 
 /**
- * 준비 신호를 기다린다: HUD(.ui-walk-hud) → 디버그 페이지의 data-walk-tiles 가 stable ms 동안 변하지 않음(도엽 스트리밍 멈춤).
+ * 준비 신호를 기다린다: HUD(.ui-walk-hud) → 디버그 페이지의 data-busy 가 0(선택 도엽 로딩·표현 방식 재생성 끝)이고
+ * data-walk-tiles(선택 범위 밖 도엽 수)가 stable ms 동안 변하지 않음(스트리밍 멈춤).
  *
  * @returns { tiles, readyMs } 마지막 도엽 수와 걸린 시간. timeout 을 넘기면 그때까지의 값으로 진행하고 timedOut 을 켠다
  */
@@ -269,16 +270,20 @@ const waitReady = async (page, { timeout, stable }) => {
     let last = null
     let since = Date.now()
     while (Date.now() < deadline) {
-        const tiles = await page.getAttribute("[data-debug-page]", "data-walk-tiles")
-        if (tiles !== last) {
-            last = tiles
+        const [busy, tiles] = await page.evaluate(() => {
+            const el = document.querySelector("[data-debug-page]")
+            return [el?.getAttribute("data-busy") ?? "1", el?.getAttribute("data-walk-tiles") ?? null]
+        })
+        const key = `${busy}/${tiles}`
+        if (key !== last) {
+            last = key
             since = Date.now()
-        } else if (Date.now() - since >= stable) {
-            return { tiles: Number(last), readyMs: Date.now() - started, timedOut: false }
+        } else if (busy === "0" && Date.now() - since >= stable) {
+            return { tiles: Number(tiles), readyMs: Date.now() - started, timedOut: false }
         }
         await page.waitForTimeout(250)
     }
-    return { tiles: Number(last), readyMs: Date.now() - started, timedOut: true }
+    return { tiles: Number(last?.split("/")[1]), readyMs: Date.now() - started, timedOut: true }
 }
 
 const capture = async (args) => {

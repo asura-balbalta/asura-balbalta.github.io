@@ -8,17 +8,13 @@ import { getDistance } from "ol/sphere"
 // Firebase 앱 초기화(부수효과). 값은 아직 쓰지 않는다
 import "./fb"
 import { basemapAttribution, BasemapProvider } from "./basemap"
-import { BuildingsMesh, loadBuildingsInWorker } from "./buildingsClient"
-import { BuildingsLoadPhase } from "./buildingsData"
 import { TerrainViewCanvas } from "./components/TerrainViewCanvas"
 import type { ExportKind } from "./export/download"
 import { exportableLayers, runExport } from "./export/runExport"
 import { INITIAL_LAYER_STATES, LAYER_DEFS, LayerId, LayerStates } from "./layers"
 import { applyMapTheme, initOlMap } from "./olmap"
 import { SquarePhase, SquareTool } from "./squareTool"
-import { LoadPhase, TinMesh } from "./terrainData"
-import { TerrainSource } from "./terrainLoad.worker"
-import { loadTerrainInWorker } from "./terrainLoadClient"
+import { createTerrainTiles, TerrainTilesClient, TerrainTilesEvent } from "./terrainTilesClient"
 import { TERRAIN_THEMES, Theme } from "./terrainTheme"
 import { ExportPanel } from "./ui/ExportPanel"
 import { HintPill } from "./ui/HintPill"
@@ -46,7 +42,7 @@ import { VWORLD_KEY } from "./config"
 import { clearSearchPin, showSearchPin } from "./searchPin"
 import { SearchHandle, searchPlaces, SearchResult, trimDanglingJamo } from "./vworld"
 import { Button, Menu, MenuItem, MenuList, MenuPopover, MenuTrigger } from "@fluentui/react-components"
-import { RenderDebug, TerrainMode } from "./webgpu/terrainRenderer"
+import { MeshBounds, RenderDebug, TerrainMode } from "./webgpu/terrainRenderer"
 
 /**
  * 초기 상태 프리셋(디버그 페이지 src/debug/walk.tsx 가 주소 해시에서 만들어 넘긴다. 운영은 undefined).
@@ -102,10 +98,17 @@ const INITIAL_THEME: Theme = "light"
 const INITIAL_BASEMAP: BasemapProvider = "stadia"
 /** 계단형일 때 처음 층 간격(m). 설정 패널에서 0.1 ~ 5 로 바꾼다 */
 const INITIAL_STEP_INTERVAL = 1
-/** 지형 데이터 출처. "ttp": 점·등고선 조각을 받아 프론트가 삼각분할. "ttm"(v1 도엽별 메쉬)은 개발 서버 전용이라 설정에 두지 않는다 */
-const TERRAIN_SOURCE: TerrainSource = "ttp"
-/** ttm 일 때, 합친 뒤 도엽 경계 없이 다시 삼각분할할지(terrainRetri). ttp 는 항상 삼각분할한다 */
-const RETRIANGULATE = true
+/** 올라온 지형(도엽 집합)의 요약. 도엽이 하나씩 올라올 때마다 갱신된다. 원본 도엽은 TerrainTilesClient 가 든다 */
+type TerrainInfo = {
+    origin: [number, number]
+    /** 선택 도엽의 xy 범위와 지금까지의 z 범위 */
+    bounds: MeshBounds
+    /** 올라온 선택 도엽 수 / 선택 도엽 수 */
+    count: number
+    total: number
+    triangles: number
+    buildings: number
+}
 
 /**
  * 마우스·트랙패드처럼 정밀한 포인터가 있는 기기인지. 처음 들어오면 범위 그리기 모드를 바로 켜고, 안내 문구를 클릭 방식으로
@@ -117,31 +120,16 @@ const HAS_FINE_POINTER = typeof matchMedia === "function" && matchMedia("(pointe
 /** 상태 표시줄 왼쪽에 보일 진행 상태. ratio 가 없으면 진행 막대가 불확정으로 움직인다 */
 type Progress = { label: string; ratio?: number }
 
-/** 지형 로딩 단계 → 진행 상태 문구 */
-const loadProgress = (phase: LoadPhase, done: number, total: number): Progress => {
+/** 도엽 로딩 단계 → 진행 상태 문구 */
+const tilesProgress = (phase: "sheets" | "download" | "build", done: number, total: number): Progress => {
     const ratio = total > 0 ? done / total : undefined
     switch (phase) {
         case "sheets":
             return { label: "도엽 목록 확인 중" }
         case "download":
             return { label: `지형 받는 중 ${done} / ${total}`, ratio }
-        case "merge":
-            return { label: `도엽 잇는 중 ${done} / ${total}`, ratio }
-        case "retriangulate":
-            return { label: "지형 다듬는 중" }
-    }
-}
-
-/** 건물 레이어 로딩 단계 → 진행 상태 문구 */
-const buildingsProgress = (phase: BuildingsLoadPhase, done: number, total: number): Progress => {
-    const ratio = total > 0 ? done / total : undefined
-    switch (phase) {
-        case "index":
-            return { label: "건물 목록 확인 중" }
-        case "download":
-            return { label: `건물 받는 중 ${done} / ${total}`, ratio }
         case "build":
-            return { label: `건물 만드는 중 ${done} / ${total}`, ratio }
+            return { label: `도엽 만드는 중 ${done} / ${total}`, ratio }
     }
 }
 
@@ -232,15 +220,13 @@ function App({
     const [selection, setSelection] = useState<Extent | null>(null)
     /** 선택 범위에 걸치는 1K 도엽 수(olmap 이 비동기로 알려 준다) */
     const [sheetCount, setSheetCount] = useState<number | null>(null)
-    const [mesh, setMesh] = useState<TinMesh | null>(null)
-    /** 건물 레이어 메쉬(지형과 같은 원점). 지형이 바뀌면 null 로 비우고 다시 만든다 */
-    const [buildings, setBuildings] = useState<BuildingsMesh | null>(null)
-    /** 세운 건물 수(상태 표시줄 표시용) */
-    const [buildingCount, setBuildingCount] = useState<number | null>(null)
-    /** 건물 레이어 로딩 진행. 지형과 별개로 진행되므로 따로 든다 */
-    const [buildingsLoading, setBuildingsLoading] = useState<Progress | null>(null)
-    /** 진행 중인 건물 로딩. 새 지형이 오면 취소한다 */
-    const buildingsLoadingRef = useRef<{ cancel: () => void } | null>(null)
+    /** 올라온 지형 요약(첫 도엽부터). 없으면 아직 지형이 없다 */
+    const [terrain, setTerrain] = useState<TerrainInfo | null>(null)
+    /** 지형 도엽 집합(워커). 앱이 평생 하나 든다. 범위 선택·표현 방식 전환·걸어 보기 스트리밍이 모두 이것을 거친다 */
+    const tilesRef = useRef<TerrainTilesClient | null>(null)
+    if (!tilesRef.current) tilesRef.current = createTerrainTiles()
+    const tiles = tilesRef.current
+    useEffect(() => () => tiles.terminate(), [tiles])
     /** 레이어별 보기·내보내기 포함 상태 */
     const [layers, setLayers] = useState<LayerStates>(INITIAL_LAYER_STATES)
     /** 현재 지형 표현 방식. 바꾸면 같은 mesh 를 다시 올린다 */
@@ -261,7 +247,7 @@ function App({
         if (view === "map") setMinimapCollapsed(false)
     }, [view])
     // 리퀴드 글래스(?glass=0 으로 끔): 3D 화면에서만
-    useLiquidGlass(LIQUID_GLASS_ENABLED && view === "3d" && !!mesh, rootRef)
+    useLiquidGlass(LIQUID_GLASS_ENABLED && view === "3d" && !!terrain, rootRef)
 
     // ---- 걸어 보기(게임 모드, 계획 문서 6절) ----
     /** 1인칭으로 지형 위를 걷는 중. 3D 화면·데스크톱에서만. 지도로 돌아가거나 지형이 바뀌면 끝난다 */
@@ -273,8 +259,8 @@ function App({
     /** 걸어 보기 중 스트리밍으로 들고 있는 주변 도엽 수 */
     const [walkTileCount, setWalkTileCount] = useState(0)
     useEffect(() => {
-        if (view !== "3d" || !mesh || isMobile) setWalking(false)
-    }, [view, mesh, isMobile])
+        if (view !== "3d" || !terrain || isMobile) setWalking(false)
+    }, [view, !!terrain, isMobile])
     useEffect(() => {
         const map = mapRef.current
         if (walking || !map) return
@@ -300,10 +286,10 @@ function App({
     const presetWalkedRef = useRef(false)
     useEffect(() => {
         if (!preset?.walk || presetWalkedRef.current) return
-        if (view !== "3d" || !terrainReady || busy || !mesh || isMobile) return
+        if (view !== "3d" || !terrainReady || busy || !terrain || isMobile) return
         presetWalkedRef.current = true
         startWalking()
-    }, [preset, view, terrainReady, busy, mesh, isMobile])
+    }, [preset, view, terrainReady, busy, !!terrain, isMobile])
     /** 포커스(포인터 잠금) 중인지. Esc 로 풀리면 커서가 보이고 "클릭하면 다시 조작" 안내 */
     const [walkFocused, setWalkFocused] = useState(false)
     /** 포커스가 처음 잡힌 직후 몇 초 보이는 "Esc 를 누르면 마우스 포인터가 나타납니다" 안내 */
@@ -336,7 +322,7 @@ function App({
     }
     /** 진입 알약의 위치(끌어서 옮긴 것). null 이면 가운데. 새 지형을 만들면 가운데로 돌아간다(저장하지 않는다, 2026-10-13) */
     const [walkPillPos, setWalkPillPos] = useState<PillPosition | null>(null)
-    useEffect(() => setWalkPillPos(null), [mesh])
+    useEffect(() => setWalkPillPos(null), [terrain?.origin])
     const moveWalkPill = (next: PillPosition) => setWalkPillPos(next)
     const stopWalking = () => {
         if (document.pointerLockElement) document.exitPointerLock()
@@ -344,9 +330,9 @@ function App({
     }
     const onWalkMove = (move: PlayerMove) => {
         const map = mapRef.current
-        if (!map || !mesh) return
+        if (!map || !terrain) return
         // 메쉬 좌표는 EPSG:5179(origin 을 뺀 m), 지도는 EPSG:3857. 5179 는 tileOverlay 가 OpenLayers 에 등록해 두었다
-        const coord = transform([move.x + mesh.origin[0], move.y + mesh.origin[1]], "EPSG:5179", "EPSG:3857") as [number, number]
+        const coord = transform([move.x + terrain.origin[0], move.y + terrain.origin[1]], "EPSG:5179", "EPSG:3857") as [number, number]
         showPlayerMarker(map, coord, move.yaw)
         setWalkGround(move.ground)
     }
@@ -460,45 +446,49 @@ function App({
     }
     /** 지형 로딩·생성 진행. busy 인데 단계가 없으면(모드 전환 직후 등) 기본 문구를 쓴다 */
     const [terrainProgress, setTerrainProgress] = useState<Progress | null>(null)
-    /** 진행 중인 지형 로딩. 새 선택이 오면 취소한다 */
-    const loadingRef = useRef<{ cancel: () => void } | null>(null)
     /** 만드는 중인 내보내기 형식과 진행률 */
     const [exporting, setExporting] = useState<{ kind: ExportKind; ratio?: number } | null>(null)
 
     /**
-     * 범위의 지형을 Worker 로 받아 mesh 로 만든다. 사각형 확정이 부른다.
-     * 이전 로딩은 취소하고, 늦게 돌아온 결과는 generation 으로 버린다
+     * 범위의 지형을 도엽 단위로 받아 올린다. 사각형 확정이 부른다. 진행·도엽·완료는 아래 구독이 받는다.
+     * 이전 선택의 작업은 워커가 버린다(generation)
      */
     const startTerrainLoad = (bbox: Extent) => {
-        const generation = ++generationRef.current
         setBusy(true)
         setTerrainProgress(null)
         setSelection(bbox)
         setSheetCount(null)
-        loadingRef.current?.cancel()
-        const loading = loadTerrainInWorker(bbox, {
-            source: TERRAIN_SOURCE,
-            retriangulate: RETRIANGULATE,
-            onProgress: (phase, done, total) => {
-                if (generation === generationRef.current) setTerrainProgress(loadProgress(phase, done, total))
-            },
-        })
-        loadingRef.current = loading
-        loading.promise
-            .then((loaded) => {
-                if (generation !== generationRef.current) return
-                setTerrainProgress(null)
-                setMesh(loaded)
-                loadBuildingsLayer(bbox, loaded, generation)
-            })
-            .catch((err) => {
-                console.error(err)
-                if (generation !== generationRef.current) return
-                setBusy(false)
-                setTerrainProgress(null)
-                toast.error("지형 데이터를 받지 못했습니다", err.message)
-            })
+        tiles.select(bbox, { mode, step: stepInterval })
     }
+    /** 도엽 집합의 일을 상태로 옮긴다. 구독은 한 번만 하고, 처리 함수는 최신 상태를 보도록 ref 로 */
+    const onTilesEventRef = useRef<(event: TerrainTilesEvent) => void>(() => {})
+    onTilesEventRef.current = (event) => {
+        if (event.type === "progress") {
+            setTerrainProgress(tilesProgress(event.phase, event.done, event.total))
+        } else if (event.type === "tile") {
+            const stats = tiles.stats()
+            if (tiles.origin && tiles.bounds) {
+                setTerrain({
+                    origin: tiles.origin,
+                    bounds: tiles.bounds,
+                    count: stats.count,
+                    total: tiles.selectionCount,
+                    triangles: stats.triangles,
+                    buildings: stats.buildings,
+                })
+            }
+            if (event.first) showTerrain()
+        } else if (event.type === "done") {
+            setBusy(false)
+            setTerrainProgress(null)
+        } else if (event.type === "error") {
+            console.error(event.message)
+            setBusy(false)
+            setTerrainProgress(null)
+            toast.error("지형 데이터를 받지 못했습니다", event.message)
+        }
+    }
+    useEffect(() => tiles.subscribe((event) => onTilesEventRef.current(event)), [tiles])
 
     useEffect(() => {
         initOlMap({
@@ -544,69 +534,30 @@ function App({
         }
     }, [view, selection])
 
-    /**
-     * 지형이 올라온 뒤 그 위에 세울 건물 레이어를 Worker 로 만든다. 지형과 별개로 진행되어 지형이 먼저 보이고
-     * 건물은 준비되는 대로 얹힌다. 이전 건물 로딩은 취소하고, 늦게 돌아온 결과는 generation 으로 버린다
-     */
-    const loadBuildingsLayer = (bbox: Extent, terrain: TinMesh, generation: number) => {
-        buildingsLoadingRef.current?.cancel()
-        setBuildings(null)
-        setBuildingCount(null)
-        const started = performance.now()
-        const loading = loadBuildingsInWorker(bbox, terrain, {
-            onProgress: (phase, done, total) => {
-                if (generation === generationRef.current) setBuildingsLoading(buildingsProgress(phase, done, total))
-            },
-        })
-        buildingsLoadingRef.current = loading
-        loading.promise
-            .then((result) => {
-                if (generation !== generationRef.current) return
-                console.log(
-                    `건물 레이어: ${result.built}개 세움(지형 밖 ${result.skipped}), 삼각형 ${(result.mesh.indices.length / 3).toLocaleString()}, ${Math.round(performance.now() - started)}ms`,
-                )
-                setBuildings(result.mesh)
-                setBuildingCount(result.built)
-            })
-            .catch((err) => {
-                console.error("건물 레이어 실패:", err)
-                if (generation === generationRef.current) toast.warning("건물 데이터를 받지 못했습니다", "지형만 보입니다.")
-            })
-            .finally(() => {
-                if (generation === generationRef.current) setBuildingsLoading(null)
-            })
-    }
-
     /** 레이어 하나의 보기 또는 내보내기 포함을 바꾼다 */
     const setLayerFlag = (id: LayerId, key: "visible" | "export", value: boolean) =>
         setLayers((prev) => ({ ...prev, [id]: { ...prev[id], [key]: value } }))
 
-    /** 표현 방식을 바꾼다. 다시 올리는 동안 busy 로 두고, 끝나면 onTerrainDone 이 푼다 */
+    /** 표현 방식을 바꾼다. 지형이 있으면 도엽을 다시 만들어 교체하는 동안 busy 로 두고, 끝나면(done) 구독이 푼다 */
     const changeMode = (next: TerrainMode) => {
         if (next === mode) return
-        if (mesh) {
+        setMode(next)
+        if (terrain) {
             setBusy(true)
             setTerrainProgress(null)
+            tiles.setStyle({ mode: next, step: stepInterval })
         }
-        setMode(next)
     }
 
-    /** 계단 간격을 바꾼다. 계단형이면 TerrainViewCanvas 가 같은 mesh 를 다시 변환한다 */
+    /** 계단 간격을 바꾼다. 계단형이면 도엽을 다시 만든다 */
     const changeStepInterval = (next: number) => {
         if (next === stepInterval) return
-        if (mesh && mode === "stepped") {
+        setStepInterval(next)
+        if (terrain && mode === "stepped") {
             setBusy(true)
             setTerrainProgress(null)
+            tiles.setStyle({ mode, step: next })
         }
-        setStepInterval(next)
-    }
-
-    const onTerrainDone = (ok: boolean) => {
-        setBusy(false)
-        setTerrainProgress(null)
-        // stepped 모드는 첫 조각에서 이미 전환됐고(onFirstChunk), tin 모드는 여기서 전환한다
-        if (ok) showTerrain()
-        else toast.error("3D 지형을 만들지 못했습니다")
     }
 
     /** 3D 가 준비됐을 때: 레이어·내려받기를 열고 3D 화면으로 */
@@ -617,9 +568,10 @@ function App({
 
     /** "내보내기" 에 체크된 레이어를 한 파일로 만들어 내려받는다. 결과는 토스트로 알린다 */
     const startExport = (kind: ExportKind) => {
-        if (exporting || !mesh) return
+        if (exporting || !terrain) return
         const label = kind.toUpperCase()
-        const meshes = { terrain: mesh, buildings }
+        // 도엽을 하나로 합쳐 내보낸다(건물 속성 표는 아직 합치지 않는다. 계획서 L3)
+        const meshes = tiles.mergedMeshes()
         if (exportableLayers(meshes, layers).length === 0) {
             toast.warning(`${label} 에 넣을 레이어가 없습니다`, '레이어 패널에서 "내보내기" 를 하나 이상 체크하세요.')
             return
@@ -633,8 +585,8 @@ function App({
             .then(({ included }) => {
                 const names = LAYER_DEFS.filter((d) => included.includes(d.id)).map((d) => d.label)
                 const note =
-                    !included.includes("buildings") && layers.buildings.export && buildingsLoading
-                        ? "지형만 담았습니다. 건물은 받는 중입니다."
+                    !included.includes("buildings") && layers.buildings.export && busy
+                        ? "지형만 담았습니다. 건물은 아직 올라오는 중입니다."
                         : `${names.join(" · ")} 를 담았습니다.`
                 toast.success(`${label} 파일을 내려받았습니다`, note)
             })
@@ -651,7 +603,7 @@ function App({
         ? (terrainProgress ?? { label: "3D 지형 만드는 중" })
         : exporting
           ? { label: exportLabel! + (exporting.ratio === undefined ? "" : ` ${Math.floor(exporting.ratio * 100)}%`), ratio: exporting.ratio }
-          : buildingsLoading
+          : null
     // 수치는 선택에 관한 것(범위·도엽)만. 삼각형·건물 수는 레이어 패널의 행에 보인다
     const stats: string[] = []
     if (selection) stats.push(extentKmText(selection))
@@ -667,10 +619,10 @@ function App({
 
     /** 레이어 패널 행의 보조 문구 */
     const layerNotes: Partial<Record<LayerId, string>> = {}
-    if (mesh) layerNotes.terrain = `삼각형 ${(mesh.indices.length / 3).toLocaleString()}`
-    if (buildingCount !== null) layerNotes.buildings = `${buildingCount.toLocaleString()} 동`
+    if (terrain) layerNotes.terrain = `삼각형 ${terrain.triangles.toLocaleString()}` + (terrain.count < terrain.total ? ` (도엽 ${terrain.count} / ${terrain.total})` : "")
+    if (terrain) layerNotes.buildings = `${terrain.buildings.toLocaleString()} 동`
 
-    const included = mesh ? exportableLayers({ terrain: mesh, buildings }, layers) : []
+    const included = terrain ? exportableLayers({ terrain: true, buildings: terrain.buildings > 0 }, layers) : []
 
     // 폭에 따라 그릇만 바꾼다. props 는 같다
     const Toolbar = isMobile ? TabBar : Dock
@@ -691,27 +643,20 @@ function App({
 
     return (
         <>
-            {mesh && (
+            {terrain && (
                 <TerrainViewCanvas
-                    mesh={mesh}
-                    buildings={buildings}
+                    tiles={tiles}
                     layers={layers}
                     mode={mode}
                     stepInterval={stepInterval}
                     theme={theme}
                     hidden={view === "map"}
-                    onDone={onTerrainDone}
-                    onProgress={(ratio) =>
-                        setTerrainProgress({ label: `3D 지형 만드는 중 ${Math.floor(ratio * 100)}%`, ratio })
-                    }
-                    onFirstChunk={showTerrain}
                     walking={walking}
                     walkFocused={walkFocused}
                     onWalkMove={onWalkMove}
                     onWalkFocusChange={onWalkFocusChange}
                     walkPhysics={walkPhysics}
                     onWalkFrameTime={setWalkFrameMs}
-                    walkSelection={selection ?? undefined}
                     onWalkTileCount={setWalkTileCount}
                     renderDebug={renderDebug}
                     walkStart={preset && { spawn: preset.spawn, yaw: preset.yaw, pitch: preset.pitch }}
@@ -781,7 +726,7 @@ function App({
                     <LayersPanel
                         layers={layers}
                         onChange={setLayerFlag}
-                        loading={{ buildings: !!buildingsLoading }}
+                        loading={{ buildings: busy && !!terrain && terrain.count < terrain.total }}
                         notes={layerNotes}
                     />
                 </Panel>
