@@ -34,6 +34,7 @@ import { MOBILE_QUERY, useMediaQuery } from "./ui/useMediaQuery"
 import { LIQUID_GLASS_DEFAULT, useLiquidGlass } from "./ui/liquidGlass"
 import { WalkControls } from "./ui/WalkControls"
 import { WalkHud } from "./ui/WalkHud"
+import { OrbitHud } from "./ui/OrbitHud"
 import { PillPosition, WalkPill } from "./ui/WalkPill"
 import { DEFAULT_WALK_PHYSICS, PlayerMove, WalkPhysics } from "./player"
 import { clearPlayerMarker, showPlayerMarker } from "./playerMarker"
@@ -761,6 +762,8 @@ function App({
             {!isMobile && view === "3d" && terrainReady && !busy && !walking && (
                 <WalkPill position={walkPillPos} onMove={moveWalkPill} onClick={startWalking} />
             )}
+            {/* 궤도 보기 중 위 가운데 마우스 조작 안내. 걸어 보기에 들어가면 같은 자리에 WalkHud 가 선다 */}
+            {!isMobile && view === "3d" && terrainReady && !walking && <OrbitHud />}
             {walking && <WalkHud focused={walkFocused} showEscHint={escHint} onExit={stopWalking} />}
             {walking && (
                 <WalkControls
