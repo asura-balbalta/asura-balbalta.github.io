@@ -56,6 +56,7 @@ const GLASS_TARGETS: [selector: string, config: { cornerRadius: number; zRadius:
     [".ui-quick-menu", { cornerRadius: 16, zRadius: 5 }],
     [".ui-walk-pill", { cornerRadius: 22, zRadius: 5 }],
     [".ui-walk-hud", { cornerRadius: 18, zRadius: 5 }],
+    [".ui-minimap-return", { cornerRadius: 16, zRadius: 5 }],
 ]
 
 /**

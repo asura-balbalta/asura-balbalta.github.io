@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react"
 import { FluentProvider } from "@fluentui/react-components"
+import { ArrowMaximizeFilled } from "@fluentui/react-icons"
 import { Map } from "ol"
 import { Extent } from "ol/extent"
 import { fromLonLat, toLonLat } from "ol/proj"
@@ -728,6 +729,13 @@ function App({
             >
                 <div id="map" className="ui-map"></div>
             </MapFrame>
+            {/* 데스크톱 3D 화면: 미니맵 바로 아래 "지도로 돌아가기". 미니맵 틀 밖에 두어야 리퀴드 글래스가 그린다(MapFrame.tsx 머리말) */}
+            {!isMobile && view === "3d" && (
+                <button type="button" className="ui-minimap-return ui-glass" onClick={() => setView("map")} aria-label="지도 화면으로 돌아가기">
+                    <ArrowMaximizeFilled fontSize={16} />
+                    지도로 돌아가기
+                </button>
+            )}
             {/* 모바일 3D 화면의 빠른 메뉴(화면 시안 "모바일 · 3D"): 미니맵 아래에서 보기 모드를 바꾼다 */}
             {isMobile && view === "3d" && terrainReady && (
                 <Menu positioning="below-end">

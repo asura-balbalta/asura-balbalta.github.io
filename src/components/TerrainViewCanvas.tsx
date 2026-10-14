@@ -153,7 +153,8 @@ export const TerrainViewCanvas = ({
      * 눌려 있는 포인터(마우스 버튼·손가락)의 pointerId → 마지막 위치. 하나면 끌어서 회전, 둘이면 두 점 거리 변화로 확대·축소.
      * 브라우저가 제스처를 가져가며 pointercancel 을 보내면 거기서도 지워 상태가 남지 않게 한다
      */
-    const pointersRef = useRef(new Map<number, { x: number; y: number }>())
+    /** 누르고 있는 포인터. 마우스는 button(0 왼쪽 = 이동, 2 오른쪽 = 회전)으로 가르고, 터치·펜은 한 손가락 회전·두 손가락 확대 */
+    const pointersRef = useRef(new Map<number, { x: number; y: number; button: number; pointerType: string }>())
 
     useEffect(() => {
         let cancelled = false
@@ -475,7 +476,7 @@ export const TerrainViewCanvas = ({
                     walkRef.current.focus()
                     return
                 }
-                pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY })
+                pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY, button: e.button, pointerType: e.pointerType })
                 // 캔버스 밖으로 나가도 move/up 을 계속 받기 위해. 포인터가 이미 끝났으면(합성 이벤트, 즉시 취소) 예외가 나므로 무시
                 try {
                     e.currentTarget.setPointerCapture(e.pointerId)
@@ -483,6 +484,8 @@ export const TerrainViewCanvas = ({
                     /* 캡처 없이도 캔버스 안에서는 동작한다 */
                 }
             }}
+            // 오른쪽 끌기가 회전이므로 컨텍스트 메뉴를 막는다(macOS 는 누르는 순간 뜬다)
+            onContextMenu={(e) => e.preventDefault()}
             onPointerUp={(e) => pointersRef.current.delete(e.pointerId)}
             onPointerCancel={(e) => pointersRef.current.delete(e.pointerId)}
             onPointerLeave={(e) => pointersRef.current.delete(e.pointerId)}
@@ -490,16 +493,37 @@ export const TerrainViewCanvas = ({
                 const pointers = pointersRef.current
                 const prev = pointers.get(e.pointerId)
                 if (!prev) return
-                const next = { x: e.clientX, y: e.clientY }
+                const next = { ...prev, x: e.clientX, y: e.clientY }
                 if (pointers.size === 1) {
-                    // 한 손가락(마우스): 끌어서 회전
                     const dx = next.x - prev.x
                     const dy = next.y - prev.y
-                    updateCamera((cam) => ({
-                        ...cam,
-                        azimuth: cam.azimuth - dx * 0.005,
-                        elevation: Math.min(Math.max(cam.elevation + dy * 0.005, 0.05), 1.5),
-                    }))
+                    if (prev.pointerType === "mouse" && prev.button !== 2) {
+                        // 마우스 왼쪽(가운데) 끌기: 이동(pan). 커서가 잡은 지면이 커서를 따라오도록 target 깊이의 지면 m/px 로 환산한다.
+                        // 화면 가로는 카메라 오른쪽, 세로는 카메라 앞(수평 투영) 방향. 세로는 내려다보는 각이 낮을수록 지면이 눌려 보여
+                        // sin(elevation) 으로 나누되, 아주 낮은 각에서 폭주하지 않게 0.3 아래로는 두지 않는다
+                        updateCamera((cam) => {
+                            const metersPerPixel = (2 * cam.distance * Math.tan(cam.fovY / 2)) / Math.max(size.height, 1)
+                            const forward = [-Math.cos(cam.azimuth), -Math.sin(cam.azimuth)]
+                            const right = [-Math.sin(cam.azimuth), Math.cos(cam.azimuth)]
+                            const sx = -dx * metersPerPixel
+                            const sy = (dy * metersPerPixel) / Math.max(Math.sin(cam.elevation), 0.3)
+                            return {
+                                ...cam,
+                                target: [
+                                    cam.target[0] + right[0] * sx + forward[0] * sy,
+                                    cam.target[1] + right[1] * sx + forward[1] * sy,
+                                    cam.target[2],
+                                ],
+                            }
+                        })
+                    } else {
+                        // 마우스 오른쪽 끌기, 터치·펜 한 손가락: 회전(orbit)
+                        updateCamera((cam) => ({
+                            ...cam,
+                            azimuth: cam.azimuth - dx * 0.005,
+                            elevation: Math.min(Math.max(cam.elevation + dy * 0.005, 0.05), 1.5),
+                        }))
+                    }
                 } else if (pointers.size === 2) {
                     // 두 손가락: 두 점 사이 거리가 늘면 가까이(확대), 줄면 멀리(축소)
                     const other = [...pointers].find(([id]) => id !== e.pointerId)![1]

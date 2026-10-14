@@ -38,6 +38,14 @@
     backdrop-filter: none;
     box-shadow: none;
 }
+/* 예외: 모바일 미니맵 틀 안의 아이콘 버튼은 루트 직계 자식이 아니라 WebGL 유리가 못 그린다. 리퀴드 글래스 중에도 CSS 유리를 둔다
+   (상태 표시줄급으로 더 불투명하게. 지도 타일 위라 흐림보다 바탕이 중요) */
+.ui-lg .ui-minimap-icon {
+    background: var(--ui-glass-strong);
+    -webkit-backdrop-filter: blur(var(--ui-glass-blur)) saturate(var(--ui-glass-saturate));
+    backdrop-filter: blur(var(--ui-glass-blur)) saturate(var(--ui-glass-saturate));
+    box-shadow: inset 0 0 1px 1px var(--ui-glass-edge);
+}
 
 /* 단색 패널: 글이 많은 면(사이드 패널, 시트). 메뉴·토스트는 Fluent 가 같은 색으로 그린다 */
 .ui-panel {
@@ -50,7 +58,7 @@
 
 /* 직접 만든 버튼(지도로·접기·상태 알약·탭 막대·빠른 메뉴)의 키보드 포커스 링. Fluent 버튼은 자기 링(2px)을 그린다.
    바깥 2px focus + 안쪽 1px focus-inner(디자인 시스템 focus 토큰) */
-.ui-minimap-button:focus-visible,
+.ui-minimap-return:focus-visible,
 .ui-minimap-collapse:focus-visible,
 button.ui-status-pill:focus-visible,
 .ui-search-clear:focus-visible,
@@ -277,25 +285,31 @@ button.ui-status-pill:focus-visible,
     height: 100%;
 }
 
-/* 미니맵 왼쪽 아래 "지도로" 알약 버튼 */
-.ui-minimap-button {
-    position: absolute;
-    left: 6px;
-    bottom: 6px;
-    height: 24px;
-    padding: 0 8px;
+/* 데스크톱 미니맵 바로 아래 오른쪽의 "지도로 돌아가기" 알약 버튼(App 이 미니맵 틀 밖에 둔다. 리퀴드 글래스 대상이라 루트 직계 자식).
+   미니맵 틀 안에 있던 때는 리퀴드 글래스가 켜지면 투명해져 안 보였다(2026-10-14). 글자는 굵게, 아이콘은 Filled */
+.ui-minimap-return {
+    position: fixed;
+    right: 12px;
+    top: calc(12px + 190px + 8px);
+    z-index: 10;
+    height: 32px;
+    padding: 0 12px 0 10px;
     border: 0;
     border-radius: 999px;
     display: flex;
     align-items: center;
-    gap: 4px;
-    font: 400 11px inherit;
+    gap: 6px;
+    /* font 단축 속성에 inherit 을 섞으면 선언 전체가 무효라(이전 "지도로" 버튼이 그랬다) 낱개로 쓴다 */
     font-family: inherit;
-    color: var(--ui-text-on-glass-secondary);
+    font-weight: 600;
+    font-size: 12px;
+    line-height: 16px;
+    color: var(--ui-text);
+    white-space: nowrap;
     cursor: pointer;
 }
 
-/* 바탕 지도 저작권. 전체 지도에서는 오른쪽 아래(상태 표시줄 28px 위), 미니맵에서는 "지도로" 버튼 오른쪽 영역에 작게 */
+/* 바탕 지도 저작권. 전체 지도에서는 오른쪽 아래(상태 표시줄 28px 위), 미니맵에서는 아래쪽에 작게 */
 .ui-map-attribution {
     position: absolute;
     right: 8px;
@@ -311,7 +325,7 @@ button.ui-status-pill:focus-visible,
     pointer-events: none;
 }
 .ui-minimap .ui-map-attribution {
-    left: 80px;
+    left: 4px;
     right: 4px;
     bottom: 6px;
     padding: 0 4px;
@@ -514,6 +528,8 @@ button.ui-status-pill:focus-visible,
     font-size: 13px;
     line-height: 18px;
     white-space: nowrap;
+    /* 안내만 하고 입력은 받지 않는다. 범위 그리기 중 커서가 알약 위로 올라가도 지도가 pointermove 를 계속 받아 사각형이 따라온다 */
+    pointer-events: none;
 }
 
 .ui-pill-hint {
