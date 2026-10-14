@@ -117,6 +117,14 @@ type TerrainInfo = {
  */
 const HAS_FINE_POINTER = typeof matchMedia === "function" && matchMedia("(pointer: fine)").matches
 
+/**
+ * 이 브라우저가 WebGPU 를 노출하는지(navigator.gpu). 없으면 3D 지형을 만들 수 없으므로 진입 때 알리고 범위 그리기를 막는다.
+ * `?gpu=0` 은 지원 브라우저에서 미지원 경로를 재현하는 스위치(검증용). adapter 까지는 보지 않으므로 adapter 가 없는 환경은
+ * 렌더러 생성 실패(TerrainViewCanvas onError)가 받는다
+ */
+const WEBGPU_SUPPORTED =
+    typeof navigator !== "undefined" && !!navigator.gpu && new URLSearchParams(window.location.search).get("gpu") !== "0"
+
 /** 상태 표시줄 왼쪽에 보일 진행 상태. ratio 가 없으면 진행 막대가 불확정으로 움직인다 */
 type Progress = { label: string; ratio?: number }
 
@@ -206,6 +214,20 @@ function App({
     onDebugState?: (state: AppDebugState) => void
 }) {
     const toast = useAppToast()
+    // WebGPU 가 없으면 들어오자마자 알린다(닫을 때까지 남는 오류 토스트). 알약·범위 버튼 비활성은 아래 JSX 가 WEBGPU_SUPPORTED 로 정한다.
+    // AppToaster 는 App 뒤의 형제라 이 effect 시점엔 아직 등록 전이다(그때 띄우면 버려진다). 한 틱 뒤에 띄운다
+    useEffect(() => {
+        if (WEBGPU_SUPPORTED) return
+        const id = setTimeout(
+            () =>
+                toast.error(
+                    "이 브라우저는 3D 지형을 볼 수 없습니다",
+                    "WebGPU 가 꺼져 있거나 지원되지 않습니다. 최신 Chrome·Edge 또는 Safari 26 이상에서 열어 주세요.",
+                ),
+            0,
+        )
+        return () => clearTimeout(id)
+    }, [toast])
     const mapRef = useRef<Map | null>(null)
     /** 사각형 선택 도구. 레일 맨 위 버튼으로 모드를 켜고 끈다 */
     const squareToolRef = useRef<SquareTool | null>(null)
@@ -502,8 +524,8 @@ function App({
         }).then(({ map, squareTool }) => {
             mapRef.current = map
             squareToolRef.current = squareTool
-            // 데스크톱은 첫 할 일이 범위 그리기이므로 모드를 켜 둔 채 시작한다. 터치 기기는 레일 버튼으로 켠다
-            if (HAS_FINE_POINTER) squareTool.setActive(true)
+            // 데스크톱은 첫 할 일이 범위 그리기이므로 모드를 켜 둔 채 시작한다. 터치 기기는 레일 버튼으로 켠다. WebGPU 가 없으면 켜지 않는다
+            if (HAS_FINE_POINTER && WEBGPU_SUPPORTED) squareTool.setActive(true)
             // #map 의 높이는 CSS(.ui-map 100%)로 정해져 지도 생성 시점에 아직 0 일 수 있다. 다음 프레임에 크기를 다시 잰다
             requestAnimationFrame(() => map.updateSize())
             // 프리셋 범위(디버그 페이지): 사용자가 그린 것과 같은 확정 경로(도엽 외곽선 → startTerrainLoad)를 탄다
@@ -660,6 +682,12 @@ function App({
                     onWalkTileCount={setWalkTileCount}
                     renderDebug={renderDebug}
                     walkStart={preset && { spawn: preset.spawn, yaw: preset.yaw, pitch: preset.pitch }}
+                    onError={(err) => {
+                        // 렌더러를 못 만들면(어댑터 없음 등) 도엽은 받아도 올릴 곳이 없다. 원인을 보이고 잠금을 푼다
+                        setBusy(false)
+                        setTerrainProgress(null)
+                        toast.error("3D 지형을 만들지 못했습니다", err.message)
+                    }}
                 />
             )}
             {/* 독(탭 막대)이 지도 틀보다 앞에 와야 Tab 키가 도구부터 닿는다. 겹침은 z-index 가 정한다. 걸어 보기 중에는 숨긴다 */}
@@ -667,7 +695,7 @@ function App({
                 <Toolbar
                     drawing={selecting}
                     onToggleDraw={() => squareToolRef.current?.setActive(!selecting)}
-                    drawDisabled={busy}
+                    drawDisabled={busy || !WEBGPU_SUPPORTED}
                     openPanel={openPanel}
                     onOpenPanel={setOpenPanel}
                     panelDisabled={{ layers: !terrainReady, export: !terrainReady }}
@@ -764,8 +792,10 @@ function App({
                 />
             )}
 
+            {/* WebGPU 가 없으면 지도 화면에 상시 안내. 범위 버튼이 막혀 있어 아래 안내들은 뜨지 않는다 */}
+            {!WEBGPU_SUPPORTED && view === "map" && <HintPill text="이 브라우저는 3D 지형을 볼 수 없습니다." />}
             {/* 모바일 지도 화면에서 아무것도 안 하고 있을 때: 첫 할 일 안내(화면 시안 "모바일 · 지도") */}
-            {isMobile && !selecting && view === "map" && !busy && (
+            {WEBGPU_SUPPORTED && isMobile && !selecting && view === "map" && !busy && (
                 <HintPill text='아래 "범위"를 누르고 지도를 끌어 그리세요' />
             )}
             {selecting && view === "map" && (

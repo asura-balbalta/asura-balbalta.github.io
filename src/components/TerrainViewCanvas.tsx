@@ -88,6 +88,7 @@ const initialCamera = ({ min, max }: MeshBounds): OrbitCamera => ({
  * @param props.renderDebug 렌더 디버그 설정(디버그 페이지). 둘러보기 조명(SSAO·그림자·하늘·외곽선)·태양 고도·AO 디버그 출력·잠금 흉내.
  *   바뀌면 새로고침 없이 반영된다(렌더러 debugUpdater + 걸어 보기 중이면 조명 다시 쓰기). 운영은 undefined
  * @param props.walkStart 걸어 보기 시작점·yaw·pitch(디버그 페이지 프리셋). 들어갈 때 한 번 읽는다
+ * @param props.onError 렌더러를 만들지 못했을 때(WebGPU 미지원·어댑터 없음 등). 부모가 토스트로 알리고 busy 를 푼다
  */
 export const TerrainViewCanvas = ({
     tiles,
@@ -105,6 +106,7 @@ export const TerrainViewCanvas = ({
     onWalkTileCount,
     renderDebug,
     walkStart,
+    onError,
 }: {
     tiles: TerrainTilesClient
     layers?: LayerStates
@@ -121,6 +123,7 @@ export const TerrainViewCanvas = ({
     onWalkTileCount?: (count: number) => void
     renderDebug?: RenderDebug
     walkStart?: WalkStart
+    onError?: (err: Error) => void
 }) => {
     // 콜백이 렌더마다 새로 만들어져도 effect 를 다시 돌리지 않도록 ref 로 받는다
     const onWalkMoveRef = useRef(onWalkMove)
@@ -133,6 +136,8 @@ export const TerrainViewCanvas = ({
     onWalkTileCountRef.current = onWalkTileCount
     const renderDebugRef = useRef(renderDebug)
     renderDebugRef.current = renderDebug
+    const onErrorRef = useRef(onError)
+    onErrorRef.current = onError
     const walkStartRef = useRef(walkStart)
     walkStartRef.current = walkStart
     /** 걸어 보기 중인 플레이어. 렌더 루프가 프레임마다 step 해 카메라를 쓴다 */
@@ -190,7 +195,10 @@ export const TerrainViewCanvas = ({
                 animationFrameId = window.requestAnimationFrame(renderLoop)
                 setRenderer(r)
             })
-            .catch((err) => console.error(err))
+            .catch((err) => {
+                console.error(err)
+                if (!cancelled) onErrorRef.current?.(err instanceof Error ? err : new Error(String(err)))
+            })
 
         return () => {
             cancelled = true
