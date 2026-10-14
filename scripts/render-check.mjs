@@ -19,7 +19,7 @@
  *     [--params "…&aodebug=1"] [--sizes 878x946,1024x768] [--heights 940-950] [--base http://localhost:3000] \
  *     [--out docs/render-checks/<오늘>] [--stable 2000] [--settle 1000] [--region 0,0.45,1,0.5] [--dpr 2] [--timeout 120000] [--browser chrome|chromium]
  *   node scripts/render-check.mjs --compare <beforeDir> <afterDir> [--threshold 0.1] [--max-diff-ratio 0.001] [--mask x,y,w,h …] [--no-default-masks]
- *   --params   해시 쿼리(여러 번 줄 수 있다. 조합마다 한 장). bbox 가 없으면 둘러보기에 못 들어간다
+ *   --params   해시 쿼리(여러 번 줄 수 있다. 조합마다 한 장). bbox 가 없으면 둘러보기에 못 들어간다. walk=0 이면 궤도 보기를 찍는다(로딩 끝난 뒤)
  *   --sizes    창 크기 목록(CSS px). 기본 878x946
  *   --heights  너비는 sizes 의 첫 값, 높이를 a-b 로 훑는다(크기 의존 증상용). sizes 에 더해진다
  *   --stable   도엽 수가 이만큼(ms) 변하지 않으면 준비된 것으로 본다. 기본 2000
@@ -29,6 +29,7 @@
  *   --browser  chrome(기본. 설치된 Chrome, 실패하면 chromium 으로) 또는 chromium(받아 둔 Chromium 만)
  *   --threshold        pixelmatch 픽셀당 색 차 임계값(0 ~ 1). 기본 0.1. 안티앨리어싱 픽셀은 세지 않는다
  *   --max-diff-ratio   "같다" 고 볼 다른 픽셀 비율 상한. 기본 0.001(0.1 %)
+ *   --log              캡처마다 페이지 콘솔 전체를 <out>/<name>.log 로 저장(도엽별 시간 등 수치 확인용)
  *   --mask             비교에서 뺄 영역(CSS px "x,y,w,h". x·y 는 숫자·음수(오른쪽·아래에서)·c(가운데), w·h 는 숫자·full. 여러 번).
  *                      기본 마스크(HUD·표·미니맵·조절 패널·상태 표시줄·가운데 안내)에 더한다
  * 결과: <out>/<WxH>_<파라미터 요약>.png 와 <out>/index.json. 비교는 <afterDir>/compare.json 과 <afterDir>/diff/*.png.
@@ -53,6 +54,7 @@ const DEFAULT_MASKS = [
     [-300, 0, 300, 470],
     [0, -44, Infinity, 44],
     ["c", "c", 560, 160],
+    ["c", -110, 220, 70], // 궤도 보기의 독(아래 가운데)
 ]
 /** --mask 의 문자열 "x,y,w,h" 를 마스크로. x·y 는 숫자·음수·c, w·h 는 숫자 또는 full */
 const parseMask = (text) => {
@@ -100,6 +102,7 @@ const parseArgs = (argv) => {
         maxDiffRatio: 0.001,
         masks: [],
         defaultMasks: true,
+        log: false,
     }
     for (let i = 0; i < argv.length; i++) {
         const key = argv[i]
@@ -125,6 +128,7 @@ const parseArgs = (argv) => {
             case "--max-diff-ratio": args.maxDiffRatio = Number(take()); break
             case "--mask": args.masks.push(parseMask(take())); break
             case "--no-default-masks": args.defaultMasks = false; break
+            case "--log": args.log = true; break
             case "--help": case "-h": printHelp(); process.exit(0)
             default: throw new Error(`모르는 옵션 ${key}`)
         }
@@ -263,8 +267,13 @@ const launchBrowser = async (preferred) => {
  *
  * @returns { tiles, readyMs } 마지막 도엽 수와 걸린 시간. timeout 을 넘기면 그때까지의 값으로 진행하고 timedOut 을 켠다
  */
-const waitReady = async (page, { timeout, stable }) => {
+const waitReady = async (page, { timeout, stable }, orbit) => {
     const started = Date.now()
+    if (orbit) {
+        // 궤도 보기(walk=0): 둘러보기에 들어가지 않으므로 선택 도엽 로딩이 끝난 상태(ready, busy 0)를 기다린다
+        await page.waitForSelector('[data-debug-page][data-debug-state="ready"][data-busy="0"]', { timeout })
+        return { tiles: 0, readyMs: Date.now() - started, timedOut: false }
+    }
     await page.waitForSelector(".ui-walk-hud", { timeout })
     const deadline = started + timeout
     let last = null
@@ -304,13 +313,15 @@ const capture = async (args) => {
                 const context = await browser.newContext({ viewport: size, deviceScaleFactor: args.dpr })
                 const page = await context.newPage()
                 const errors = []
+                const log = []
                 page.on("pageerror", (err) => errors.push(String(err)))
                 page.on("console", (msg) => {
                     if (msg.type() === "error") errors.push(msg.text())
+                    if (args.log) log.push(`[${msg.type()}] ${msg.text()}`)
                 })
                 try {
                     await page.goto(url)
-                    const ready = await waitReady(page, args)
+                    const ready = await waitReady(page, args, new URLSearchParams(query).get("walk") === "0")
                     await page.waitForTimeout(args.settle)
                     const status = await page.evaluate(() => document.querySelector(".ui-statusbar")?.textContent ?? "")
                     const png = await page.screenshot({ path: file, type: "png" })
@@ -331,6 +342,7 @@ const capture = async (args) => {
                 } finally {
                     entry.errors = errors
                     entry.ms = Date.now() - started
+                    if (args.log) await writeFile(path.join(args.out, `${name}.log`), log.join("\n"))
                     await context.close()
                 }
                 results.push(entry)

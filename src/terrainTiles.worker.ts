@@ -5,7 +5,7 @@ import { Building, loadBuildingCodes, loadBuildings } from "./buildingsData"
 import { buildBuildingsMesh } from "./buildingsMesh"
 import { BuildingTable, buildingTableBuffers, cloneBuildingTable } from "./buildingTable"
 import { computeVertexNormals, NORMAL_SMOOTH_ITERATIONS, positionsBounds, smoothVertexNormals } from "./meshNormals"
-import { clipMeshToConvexPolygon } from "./terrainClip"
+import { ClippedMesh, clipMeshToConvexPolygon } from "./terrainClip"
 import { fetchGunzip, MeshChunk, TinMesh } from "./terrainData"
 import { getTtpSheetsInBbox, TTP_BASE } from "./terrainIndex"
 import { mergeTtpTiles, parseTtp, TtpTile } from "./terrainPslg"
@@ -21,7 +21,10 @@ import type { TerrainMode } from "./webgpu/terrainRenderer"
  * (clipMeshToConvexPolygon). 혼자 삼각분할하면 도엽 변에 바늘 삼각형이 생겨서(terrainClip 참고) 이웃을 같이 넣는다.
  * 이웃까지 넣은 합친 메쉬를 건물 바닥 높이에도 쓰고, 건물은 무게중심이 이 도엽 안인 것만 세워 경계에 걸친 건물이 한 번만
  * 나오게 한다. 지형은 스타일에 따라 계단형 조각(step) 또는 법선을 붙인 매끈한 면(tin) 으로 보낸다. 원본 TIN 도 함께 보내
- * 메인이 발 높이 조회에 쓴다. 매끈한 면의 도엽 경계 법선은 자른 뒤 계산해 경계에서 음영이 살짝 다를 수 있다(L2 에서 이웃 포함으로).
+ * 메인이 발 높이 조회에 쓴다. 매끈한 면의 법선은 이웃을 합친 메쉬에서 계산한 뒤 자를 때 같이 실어(terrainClip) 도엽 경계
+ * 정점도 이웃 삼각형을 본 법선을 갖는다(L2, 2026-10-14).
+ * 자른 TIN(과 법선)은 도엽별로 캐시해(TIN_CACHE_BYTES 안에서 오래된 것부터 버림) 표현 방식·층 간격 전환 때 이웃 합침·삼각분할을
+ * 다시 하지 않는다. 건물도 도엽별 캐시. 둘 다 select 때 비운다.
  *
  * 메시지:
  * - select: 범위(3857)의 도엽 목록·원점을 찾아 알리고(selection), 5K 파일을 모두 받은 뒤(progress download), 중심에서 가까운
@@ -180,6 +183,41 @@ let pending: { tile: QueryTile; extra: boolean }[] = []
 let pendingTotal = 0
 let pendingDone = 0
 let walk: { center: [number, number]; radius: number; maxTiles: number } | null = null
+/** 자른 TIN 캐시의 상한(바이트). 넘으면 오래 안 쓴 도엽부터 버린다(그 도엽은 전환 때 다시 삼각분할) */
+const TIN_CACHE_BYTES = 256 * 1048576
+type CachedTin = { positions: Float32Array; indices: Uint32Array; normals?: Float32Array; bytes: number }
+/** 도엽별 자른 TIN(+ 매끈한 면 법선) 캐시: id → 사본. 메인으로 transfer 하는 버퍼와 별개 */
+const tinCache = new Map<string, CachedTin>()
+let tinCacheBytes = 0
+const tinCacheGet = (id: string) => {
+    const hit = tinCache.get(id)
+    if (hit) {
+        // 최근 사용을 뒤로 보내 오래된 것부터 빠지게
+        tinCache.delete(id)
+        tinCache.set(id, hit)
+    }
+    return hit
+}
+const tinCacheSet = (id: string, tin: ClippedMesh) => {
+    const prev = tinCache.get(id)
+    if (prev) {
+        tinCache.delete(id)
+        tinCacheBytes -= prev.bytes
+    }
+    const entry: CachedTin = {
+        positions: tin.positions.slice(),
+        indices: tin.indices.slice(),
+        normals: tin.normals?.slice(),
+        bytes: tin.positions.byteLength + tin.indices.byteLength + (tin.normals?.byteLength ?? 0),
+    }
+    tinCache.set(id, entry)
+    tinCacheBytes += entry.bytes
+    for (const [oldId, old] of tinCache) {
+        if (tinCacheBytes <= TIN_CACHE_BYTES || oldId === id) break
+        tinCache.delete(oldId)
+        tinCacheBytes -= old.bytes
+    }
+}
 /**
  * 도엽별 건물 결과 캐시(스타일 재생성 때 건물은 지형 표현 방식과 무관하므로 다시 만들지 않는다). 메인으로 transfer 하기 전에
  * 복사해 둔다. select 때 비운다
@@ -210,17 +248,32 @@ const buildTile = async (t: QueryTile, q: Query, extra: boolean): Promise<{ data
     if (!ttpById.has(t.map_id)) throw new Error(`도엽 ${t.map_id} 이 5K 파일에 없음`)
 
     const t0 = performance.now()
-    const merged = mergeTtpTiles(ttpTiles, c.origin)
     const poly = t.corners.map(([x, y]) => [x - ox, y - oy] as [number, number])
-    const tin = clipMeshToConvexPolygon(merged, poly)
+    const needNormals = c.style.mode === "tin"
+    /** 이웃을 합친 메쉬. 캐시가 맞으면 만들지 않는다(건물 바닥 높이에 필요하면 그때 만든다) */
+    let merged: TinMesh | null = null
+    const mergedMesh = () => (merged ??= mergeTtpTiles(ttpTiles, c.origin))
+    const cachedTin = tinCacheGet(t.map_id)
+    let tin: ClippedMesh
+    let fromCache = false
+    if (cachedTin && (!needNormals || cachedTin.normals)) {
+        tin = { origin: c.origin, positions: cachedTin.positions.slice(), indices: cachedTin.indices.slice(), normals: cachedTin.normals?.slice() }
+        fromCache = true
+    } else {
+        // 매끈한 면: 법선은 이웃을 합친 메쉬에서 계산한 뒤 자를 때 같이 실어 경계 정점도 이웃 삼각형을 본 법선을 갖는다
+        const m = mergedMesh()
+        const normals = needNormals
+            ? smoothVertexNormals(computeVertexNormals(m.positions, m.indices), m.indices, NORMAL_SMOOTH_ITERATIONS)
+            : undefined
+        tin = clipMeshToConvexPolygon(m, poly, normals)
+        tinCacheSet(t.map_id, tin)
+    }
     const t1 = performance.now()
     let terrain: MeshChunk[]
     if (c.style.mode === "stepped" && c.style.step > 0) {
         terrain = [...buildSteppedMeshChunks(tin, c.style.step, c.maxBytes)]
     } else {
-        // 매끈한 면: 자른 도엽에서 법선 계산(경계 정점은 이웃 삼각형이 빠져 살짝 다를 수 있다)
-        const normals = smoothVertexNormals(computeVertexNormals(tin.positions, tin.indices), tin.indices, NORMAL_SMOOTH_ITERATIONS)
-        terrain = [{ positions: tin.positions, indices: tin.indices, normals }]
+        terrain = [{ positions: tin.positions, indices: tin.indices, normals: tin.normals! }]
     }
     const t2 = performance.now()
 
@@ -245,7 +298,7 @@ const buildTile = async (t: QueryTile, q: Query, extra: boolean): Promise<{ data
             return pointInPolygon(sx / n / 1000, sy / n / 1000, poly)
         })
         if (inside.length > 0) {
-            const result = buildBuildingsMesh(inside, merged, codes)
+            const result = buildBuildingsMesh(inside, mergedMesh(), codes)
             buildings = result.mesh
             buildingTable = result.table
             built = result.built
@@ -259,7 +312,7 @@ const buildTile = async (t: QueryTile, q: Query, extra: boolean): Promise<{ data
         console.warn(`도엽 ${t.name} 건물 실패:`, err)
     }
     console.log(
-        `도엽 ${t.name}${extra ? "(밖)" : ""}: 이웃 ${ttpTiles.length}개 합침 ${Math.round(t1 - t0)}ms, ${c.style.mode} ${Math.round(t2 - t1)}ms, 삼각형 ${tin.indices.length / 3}, 건물 ${built}, ${Math.round(performance.now() - t2)}ms`,
+        `도엽 ${t.name}${extra ? "(밖)" : ""}: ${fromCache ? "캐시" : `이웃 ${ttpTiles.length}개 합침`} ${Math.round(t1 - t0)}ms, ${c.style.mode} ${Math.round(t2 - t1)}ms, 삼각형 ${tin.indices.length / 3}, 건물 ${built}${cached ? "(캐시)" : ""}, ${Math.round(performance.now() - t2)}ms`,
     )
 
     const xy = positionsBounds(tin.positions)
@@ -271,6 +324,7 @@ const buildTile = async (t: QueryTile, q: Query, extra: boolean): Promise<{ data
         if (y > maxY) maxY = y
     }
     const transfer = new Set<Transferable>([tin.positions.buffer as ArrayBuffer, tin.indices.buffer as ArrayBuffer])
+    if (tin.normals) transfer.add(tin.normals.buffer as ArrayBuffer)
     for (const ch of terrain) {
         transfer.add(ch.positions.buffer as ArrayBuffer)
         transfer.add(ch.indices.buffer as ArrayBuffer)
@@ -364,6 +418,8 @@ const select = async (msg: Extract<TerrainTilesRequest, { type: "select" }>) => 
     const gen = ++generation
     loaded.clear()
     buildingsCache.clear()
+    tinCache.clear()
+    tinCacheBytes = 0
     pending = []
     walk = null
     post({ type: "progress", phase: "sheets", done: 0, total: 0 })
