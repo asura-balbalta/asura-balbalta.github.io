@@ -159,6 +159,7 @@ export const createSmoothTerrainShader = () => ({
  *
  * - 정점 입력: 위치(@location(0))만. 법선 버퍼가 없으므로 좌표가 같은 정점을 마음껏 공유할 수 있다.
  * - fragmentMain: 화면 미분(dpdx·dpdy)으로 그 픽셀이 속한 면의 법선을 구한다. 판·벽이 모두 평면이라 정확하다.
+ *   미분은 카메라 기준 상대 위치(rel)로 한다(절대 위치는 원점에서 멀면 f32 양자화 잡음. VertexOutput 참고).
  *   미분으로 구한 법선은 앞뒤 부호가 정해지지 않으므로 카메라를 향하게 뒤집는다(양면 조명).
  *   바탕색은 절대 표고 색표(terrainColor. 판은 층 높이라 판마다 한 색)이고, 수직면(단)은 25% 어둡게 해서 어느 방향에서든
  *   판과 구분되게 한다.
@@ -173,6 +174,10 @@ export const createSteppedTerrainShader = () => ({
     struct VertexOutput {
         @builtin(position) p: vec4f,
         @location(0) world: vec3f,
+        // 카메라 기준 상대 위치. 면 법선의 화면 미분은 이것으로 구한다: 원점 기준 절대 위치는 원점에서 10 km 떨어지면 f32 간격이
+        // 약 1 mm 라 멀리 비스듬한 면의 픽셀당 위치 차(수 mm)가 양자화 잡음이 되어 법선이 흔들렸다(검은 점 무늬, 2026-10-14 충주
+        // 1300개 범위). 상대 위치는 값이 작아 미분이 정확하다(SSAO 의 카메라 기준 복원과 같은 원리)
+        @location(1) rel: vec3f,
     };
 
     @vertex
@@ -180,13 +185,14 @@ export const createSteppedTerrainShader = () => ({
         var output: VertexOutput;
         output.p = u.viewProj * vec4f(pos, 1);
         output.world = pos;
+        output.rel = pos - u.eye;
         return output;
     }
 
     @fragment
     fn fragmentMain(input: VertexOutput) -> @location(0) vec4f {
         let v = normalize(u.eye - input.world);
-        let faceNormal = normalize(cross(dpdx(input.world), dpdy(input.world)));
+        let faceNormal = normalize(cross(dpdx(input.rel), dpdy(input.rel)));
         let n = select(-faceNormal, faceNormal, dot(faceNormal, v) >= 0.0);
         let riserShade = 1.0 - 0.25 * (1.0 - abs(n.z));
         let base = terrainColor(input.world.z) * riserShade;
@@ -210,6 +216,10 @@ export const createBuildingShader = () => ({
     struct VertexOutput {
         @builtin(position) p: vec4f,
         @location(0) world: vec3f,
+        // 카메라 기준 상대 위치. 면 법선의 화면 미분은 이것으로 구한다: 원점 기준 절대 위치는 원점에서 10 km 떨어지면 f32 간격이
+        // 약 1 mm 라 멀리 비스듬한 면의 픽셀당 위치 차(수 mm)가 양자화 잡음이 되어 법선이 흔들렸다(검은 점 무늬, 2026-10-14 충주
+        // 1300개 범위). 상대 위치는 값이 작아 미분이 정확하다(SSAO 의 카메라 기준 복원과 같은 원리)
+        @location(1) rel: vec3f,
     };
 
     @vertex
@@ -217,13 +227,14 @@ export const createBuildingShader = () => ({
         var output: VertexOutput;
         output.p = u.viewProj * vec4f(pos, 1);
         output.world = pos;
+        output.rel = pos - u.eye;
         return output;
     }
 
     @fragment
     fn fragmentMain(input: VertexOutput) -> @location(0) vec4f {
         let v = normalize(u.eye - input.world);
-        let faceNormal = normalize(cross(dpdx(input.world), dpdy(input.world)));
+        let faceNormal = normalize(cross(dpdx(input.rel), dpdy(input.rel)));
         let n = select(-faceNormal, faceNormal, dot(faceNormal, v) >= 0.0);
         let wallShade = 1.0 - 0.25 * (1.0 - abs(n.z));
         let base = u.buildingColor.rgb * wallShade;
