@@ -18,7 +18,7 @@ export const SHADOW_MAP_SIZE = 2048
  * - binding 1·2: 섀도 맵(depth)과 비교 샘플러. 셰이더가 쓰지 않으면(섀도 pass 의 정점 셰이더) layout "auto" 가 뺀다
  * - terrainColor(): 절대 표고 → 바탕색. 색표는 uniform 이라 테마 전환은 셰이더를 바꾸지 않고 uniform 만 다시 쓴다
  * - shadowFactor(): 빛 기준 좌표로 섀도 맵과 비교(3×3 PCF, 비교 샘플러의 선형 보간까지 합쳐 부드럽게). 상자 밖은 1(밝음).
- *   자기 그림자(acne)는 법선 방향 띄우기 + 깊이 바이어스로 줄인다
+ *   자기 그림자(acne)는 법선 방향 띄우기(기울기 비례, 빛에 평행한 면일수록 더) + 깊이 바이어스로 줄인다
  * - shade(): 남동쪽 위의 빛으로 난반사 조명. 지도 톤의 기본은 주변광 60% + 난반사 40%(걸어 보기는 45/55 로 대비를 올린다),
  *   정반사 없음. 끝에 거리 안개(1 − e^(−d·밀도))로 배경색에 섞는다
  */
@@ -85,7 +85,10 @@ const commonWgsl = /* wgsl */ `
     // 그림자가 꺼져 있거나 두 상자 밖이면 1. 빛을 향한 면만 법선 방향으로 조금 띄운다(자기 그림자 줄임. 텍셀 크기에 맞춰 8 cm / 40 cm)
     fn shadowFactor(world: vec3f, n: vec3f, l: vec3f) -> f32 {
         if (u.lighting.z < 0.5) { return 1.0; }
-        let facing = step(0.0, dot(n, l));
+        // 띄우기는 기울기에 비례: 빛에 거의 평행한 면(ndl ≈ 0)은 텍셀 하나 안에서 깊이가 크게 변해 PCF 가 밝음·그림자를
+        // 번갈아 받으므로(가까운 벽의 세로 줄무늬, 2026-10-13) 법선 방향으로 더 띄운다. 최대 5배(가까운 맵 0.4 m, 먼 맵 2 m)
+        let ndl = dot(n, l);
+        let facing = step(0.0, ndl) * (1.0 + min(sqrt(max(1.0 - ndl * ndl, 0.0)) / max(ndl, 0.05), 4.0));
         let near = lightCoord(u.lightViewProjNear, world + n * 0.08 * facing);
         let edge = min(min(near.x, 1.0 - near.x), min(near.y, 1.0 - near.y));
         let w = select(0.0, smoothstep(0.0, 0.15, edge), near.w > 0.5);

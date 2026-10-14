@@ -3,7 +3,19 @@ import { MeshChunk, TinMesh } from "../terrainData"
 import { hexToRgb, STOP_COUNT, stopsToUniform, TerrainTheme } from "../terrainTheme"
 import { createAoPasses } from "./ao"
 import { createSkyPass, sunDirection } from "./sky"
-import { Camera, cameraEye, cameraViewProj, fpsForward, invert, isFpsCamera, lookAt, multiply, ortho, Vec3 } from "./camera"
+import {
+    Camera,
+    cameraEye,
+    cameraViewProj,
+    cameraViewProjRelative,
+    fpsForward,
+    invert,
+    isFpsCamera,
+    lookAt,
+    multiply,
+    ortho,
+    Vec3,
+} from "./camera"
 import { initWebGPU } from "./device"
 import {
     createBuildingShader,
@@ -627,9 +639,13 @@ const createTerrainDrawingPassAndUpdaters = (
             device.queue.writeBuffer(uniformBuffer, LIGHT_VP_OFFSET, lightViewProj(camera, lighting.shadowRadius, 0.6))
             device.queue.writeBuffer(uniformBuffer, LIGHT_VP_NEAR_OFFSET, lightViewProj(camera, SHADOW_NEAR_RADIUS, 0.5))
         }
-        if (lighting.ao || lighting.sky || lighting.edge > 0) onCamera?.(viewProj, invert(viewProj), eye)
+        if (lighting.ao || lighting.sky || lighting.edge > 0) {
+            // 후처리는 카메라 기준 행렬을 받는다(복원 위치 = 카메라에서 본 상대 위치. f32 정밀도 때문, camera.ts 참고)
+            const rel = cameraViewProjRelative(camera, aspect)
+            onCamera?.(rel, invert(rel), eye)
+        }
     }
-    /** 카메라가 바뀔 때 다른 pass(SSAO·하늘)에도 알린다 */
+    /** 카메라가 바뀔 때 다른 pass(SSAO·외곽선·하늘)에도 알린다. 행렬은 카메라 기준(cameraViewProjRelative) */
     let onCamera: ((viewProj: Float32Array, invViewProj: Float32Array, eye: Vec3) => void) | null = null
     const setCameraListener = (fn: typeof onCamera) => {
         onCamera = fn

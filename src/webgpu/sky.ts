@@ -62,8 +62,8 @@ const skyShader = (): GPUShaderModuleDescriptor => ({
     label: "sky shader",
     code: /* wgsl */ `
     struct SkyUniforms {
-        invViewProj: mat4x4f,
-        eye: vec3f,
+        invViewProj: mat4x4f, // 카메라를 원점에 둔 viewProj 의 역행렬(ndc → 카메라 기준 방향)
+        eye: vec3f, // 안 쓴다(카메라 기준 좌표계)
         _pad: f32,
         sun: vec4f, // xyz 태양 방향
         size: vec2f, // 타깃 크기(px)
@@ -85,7 +85,7 @@ const skyShader = (): GPUShaderModuleDescriptor => ({
         let uv = fragPos.xy / s.size;
         let ndc = vec4f(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, 0.5, 1.0);
         let p = s.invViewProj * ndc;
-        let dir = normalize(p.xyz / p.w - s.eye);
+        let dir = normalize(p.xyz / p.w);
         return vec4f(skyColor(dir, s.sun.xyz), 1.0);
     }
     `,

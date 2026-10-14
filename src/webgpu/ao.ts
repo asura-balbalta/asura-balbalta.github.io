@@ -4,7 +4,8 @@ import { Mat4, Vec3 } from "./camera"
  * 화면 공간 주변광 차폐(SSAO)와 합성. 걸어 보기에서 단 밑동·건물 모서리에 하늘빛이 가려지는 그늘을 넣어 입체감을 낸다.
  *
  * 흐름(렌더러의 render 가 호출): 장면을 오프스크린 색 텍스처 + 깊이에 그린 뒤
- * 1. aoPass: 깊이만 읽어 픽셀의 월드 위치(invViewProj)와 법선(이웃 깊이의 위치 차, 작은 쪽 선택)을 복원하고, 법선 반구 안의
+ * 1. aoPass: 깊이만 읽어 픽셀의 위치(invViewProj. 카메라 기준 상대 위치 — 월드 좌표를 f32 로 복원하면 가까운 면에서
+ *    0.1 ~ 0.5 mm 오차가 띠로 보였다, 2026-10-13)와 법선(이웃 깊이의 위치 차, 작은 쪽 선택)을 복원하고, 법선 반구 안의
  *    표본 12개를 viewProj 로 화면에 투영해 그 자리의 깊이가 더 가까우면 "가려짐" 으로 센다(거리 차가 반지름보다 크면 무시).
  *    표본 방향은 4×4 타일 안에서 16개 각도가 한 번씩 나오는 고정 패턴으로 돌린다(어느 4×4 창이든 모든 각도를 포함하므로
  *    2 의 흐림이 정확히 평균한다. 무작위 해시였을 때는 흐림 뒤에도 점이 남았다, 2026-10-13).
@@ -49,12 +50,12 @@ const fullscreenVertex = /* wgsl */ `
     }
 `
 
-/** AO·합성 셰이더 공통부: uniform, 깊이 텍스처, 깊이 → 월드 위치, 이웃 깊이로 법선 복원 */
+/** AO·합성 셰이더 공통부: uniform, 깊이 텍스처, 깊이 → 위치(카메라 기준 상대 좌표), 이웃 깊이로 법선 복원 */
 const aoCommon = /* wgsl */ `
     struct AoUniforms {
-        viewProj: mat4x4f,
-        invViewProj: mat4x4f,
-        eye: vec3f,
+        viewProj: mat4x4f, // 카메라를 원점에 둔 viewProj(상대 위치를 투영한다)
+        invViewProj: mat4x4f, // 그 역행렬: ndc → 카메라 기준 상대 위치
+        eye: vec3f, // 카메라 월드 위치(상대 좌표계에서는 안 쓴다)
         radius: f32,
         params: vec4f, // bias, strength, maxDist, biasPerMeter
         size: vec2f, // AO 텍스처 크기(px)
@@ -64,11 +65,25 @@ const aoCommon = /* wgsl */ `
     @group(0) @binding(0) var<uniform> a: AoUniforms;
     @group(0) @binding(1) var depthTex: texture_depth_2d;
 
-    // uv(픽셀 중심) → 픽셀 번호. uv × 크기를 내린다. (크기 − 1)을 곱하면 오른쪽·아래 절반이 한 픽셀 어긋나
-    // 화면 가운데 열·행에서 이웃 위치가 틀어져 외곽선에 십자선이 생겼다(2026-10-13)
+    // uv → 깊이 픽셀 번호(내림, 범위 안으로). 픽셀 중심 uv 를 넣으면 0.5 의 여유가 있어 f32 오차에 안전하다.
+    // (크기 − 1)을 곱하던 때는 오른쪽·아래 절반이 한 픽셀 어긋나 가운데 열·행에 십자선이 생겼다(2026-10-13)
+    fn depthPixel(uv: vec2f) -> vec2i {
+        return vec2i(clamp(floor(uv * a.depthSize), vec2f(0.0), a.depthSize - 1.0));
+    }
+    /** 깊이 픽셀 번호 → 그 픽셀 중심의 uv */
+    fn pixelUv(c: vec2i) -> vec2f {
+        return (vec2f(c) + 0.5) / a.depthSize;
+    }
+    fn depthAtPixel(c: vec2i) -> f32 {
+        let cc = clamp(c, vec2i(0), vec2i(a.depthSize) - 1);
+        return textureLoad(depthTex, cc, 0);
+    }
     fn depthAt(uv: vec2f) -> f32 {
-        let c = vec2i(clamp(floor(uv * a.depthSize), vec2f(0.0), a.depthSize - 1.0));
-        return textureLoad(depthTex, c, 0);
+        return textureLoad(depthTex, depthPixel(uv), 0);
+    }
+    // 픽셀 번호로 위치 복원: 그 픽셀의 중심 uv 와 깊이를 같이 쓴다(uv 와 깊이가 다른 픽셀의 것이면 비스듬한 면에서 어긋난다)
+    fn worldAtPixel(c: vec2i) -> vec3f {
+        return worldAt(pixelUv(c), depthAtPixel(c));
     }
     fn worldAt(uv: vec2f, d: f32) -> vec3f {
         let ndc = vec4f(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, d, 1.0);
@@ -80,7 +95,7 @@ const aoCommon = /* wgsl */ `
         let dx = select(Pr - P, P - Pl, length(Pl - P) < length(Pr - P));
         let dy = select(Pd - P, P - Pu, length(Pu - P) < length(Pd - P));
         var n = normalize(cross(dx, dy));
-        if (dot(n, a.eye - P) < 0.0) { n = -n; }
+        if (dot(n, -P) < 0.0) { n = -n; }
         return n;
     }
 `
@@ -104,20 +119,24 @@ const aoShader = (): GPUShaderModuleDescriptor => ({
 
     @fragment
     fn fragmentMain(@builtin(position) fragPos: vec4f) -> @location(0) vec4f {
-        let uv = fragPos.xy / a.size;
-        let d = depthAt(uv);
+        // 이 AO 픽셀이 덮는 깊이 픽셀을 정수로 고르고(절반 해상도면 2i+1) 그 픽셀 중심으로 복원한다.
+        // uv = fragPos / size 로 하면 절반 해상도 픽셀 중심이 깊이 픽셀의 경계에 정확히 걸려, floor(uv × 크기)가 f32 오차로
+        // 행마다 2j 와 2j+1 로 갈리고 복원 위치가 반 픽셀씩 지그재그했다. 수평선 가까운 바닥은 한 행이 5 ~ 10 cm 라 bias 를
+        // 넘어 거짓 차폐가 가로 줄무늬로 보였고, 어느 행이 갈리는지가 캔버스 높이에 따라 달랐다(946 은 줄무늬, 945 는 없음. 2026-10-14)
+        let c0 = vec2i(floor(fragPos.xy * (a.depthSize / a.size)));
+        let uv = pixelUv(c0);
+        let d = depthAtPixel(c0);
         if (d <= 0.0) { return vec4f(1.0); } // 배경(역순 깊이: 0 이 가장 멀다)
         let P = worldAt(uv, d);
-        let dist = distance(P, a.eye);
+        let dist = length(P);
         let maxDist = a.params.z;
         if (dist > maxDist) { return vec4f(1.0); }
 
         // 법선: 좌우·상하 이웃 중 깊이 차가 작은 쪽으로 위치 차를 잡아 모서리에서 번지지 않게
-        let px = 1.0 / a.depthSize;
-        let Pr = worldAt(uv + vec2f(px.x, 0.0), depthAt(uv + vec2f(px.x, 0.0)));
-        let Pl = worldAt(uv - vec2f(px.x, 0.0), depthAt(uv - vec2f(px.x, 0.0)));
-        let Pd = worldAt(uv + vec2f(0.0, px.y), depthAt(uv + vec2f(0.0, px.y)));
-        let Pu = worldAt(uv - vec2f(0.0, px.y), depthAt(uv - vec2f(0.0, px.y)));
+        let Pr = worldAtPixel(c0 + vec2i(1, 0));
+        let Pl = worldAtPixel(c0 - vec2i(1, 0));
+        let Pd = worldAtPixel(c0 + vec2i(0, 1));
+        let Pu = worldAtPixel(c0 - vec2i(0, 1));
         let n = normalAt(P, Pr, Pl, Pd, Pu);
 
         // 4×4 타일 안의 자리로 정해지는 회전(16개 각도가 한 번씩)으로 돌린 접선 틀
@@ -137,9 +156,9 @@ const aoShader = (): GPUShaderModuleDescriptor => ({
             if (clip.w <= 0.0) { continue; }
             let suv = vec2f(clip.x / clip.w * 0.5 + 0.5, 0.5 - clip.y / clip.w * 0.5);
             if (suv.x < 0.0 || suv.x > 1.0 || suv.y < 0.0 || suv.y > 1.0) { continue; }
-            let S = worldAt(suv, depthAt(suv));
-            let sceneDist = distance(S, a.eye);
-            let sampleDist = distance(s, a.eye);
+            let S = worldAtPixel(depthPixel(suv));
+            let sceneDist = length(S);
+            let sampleDist = length(s);
             // 표본보다 앞에 뭔가 있으면 가려진 것. 너무 멀리 떨어진 것(다른 물체)은 반지름 비율로 약하게
             let range = smoothstep(0.0, 1.0, a.radius / max(abs(dist - sceneDist), 1e-3));
             occlusion = occlusion + select(0.0, 1.0, sceneDist < sampleDist - bias) * range;
@@ -193,9 +212,9 @@ const compositeShader = (): GPUShaderModuleDescriptor => ({
         let m = min(la, lb) + 1e-4;
         // 꺾임: 이웃이 이 픽셀의 접평면에서 벗어난 거리 / 픽셀 간격(평면 0, 직각 모서리 1).
         // 이웃이 이 픽셀보다 가까운 쪽은 빼서 선이 모서리의 가까운 쪽 한 픽셀에만 생긴다(거리가 같으면 양쪽. 1/4 픽셀 간격 여유)
-        let d0 = distance(P, a.eye);
-        let ga = step(-0.25 * m, distance(Pa, a.eye) - d0);
-        let gb = step(-0.25 * m, distance(Pb, a.eye) - d0);
+        let d0 = length(P);
+        let ga = step(-0.25 * m, length(Pa) - d0);
+        let gb = step(-0.25 * m, length(Pb) - d0);
         let crease = max(abs(dot(va, n)) * ga, abs(dot(vb, n)) * gb) / m;
         // 끊김: 2차 차분 / 픽셀 간격. 평면이면 거의 0. 더 멀리 떨어진 이웃이 이 픽셀보다 멀 때만(실루엣 선이 가까운 쪽 한 픽셀에만)
         let gate = select(gb, ga, la > lb);
@@ -221,7 +240,7 @@ const compositeShader = (): GPUShaderModuleDescriptor => ({
             let n = normalAt(P, Pr, Pl, Pd, Pu);
             edge = max(edgeAlong(P, n, Pr, Pl), edgeAlong(P, n, Pd, Pu));
             // 안개와 같은 비율로 사라진다(멀리서 선만 남지 않게)
-            let fog = 1.0 - exp(-distance(P, a.eye) * a.offset.z);
+            let fog = 1.0 - exp(-length(P) * a.offset.z);
             edge = edge * (1.0 - fog) * a.offset.y;
         }
         return vec4f(c.rgb * ao * (1.0 - edge), 1.0);
@@ -341,11 +360,11 @@ export const createAoPasses = (device: GPUDevice, format: GPUTextureFormat) => {
     }
 
     /**
-     * 카메라 행렬을 쓴다(장면 카메라와 같은 값). cameraUpdater 가 부른다
+     * 카메라 행렬을 쓴다. cameraUpdater 가 부른다
      *
-     * @param viewProj 장면 viewProj
+     * @param viewProj 카메라를 원점에 둔 viewProj(cameraViewProjRelative)
      * @param invViewProj 그 역행렬
-     * @param eye 카메라 위치
+     * @param eye 카메라 월드 위치(참고용)
      */
     const setCamera = (viewProj: Mat4, invViewProj: Mat4, eye: Vec3) => {
         device.queue.writeBuffer(uniformBuffer, 0, viewProj)

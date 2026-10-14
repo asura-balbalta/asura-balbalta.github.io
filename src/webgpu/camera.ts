@@ -231,3 +231,23 @@ export const invert = (m: Mat4): Mat4 => {
         (a20 * b03 - a21 * b01 + a22 * b00) * det,
     ])
 }
+
+/**
+ * 카메라를 원점에 둔 viewProj(카메라 기준 좌표계). 깊이에서 위치를 복원하는 후처리(SSAO·외곽선·하늘)가 쓴다.
+ * 월드 좌표(원점에서 수백 m ~ km)를 f32 역행렬로 복원하면 0.1 ~ 0.5 mm 오차가 남아, 가까운 면(픽셀 간격 1 ~ 2 mm)에서
+ * 외곽선 판정이 띠 모양으로 흔들렸다(2026-10-13). 카메라 기준이면 오차가 거리 × 1e-7 로 준다
+ *
+ * @param camera 궤도 또는 1인칭 카메라
+ * @param aspect 화면 가로/세로 비율
+ * @returns 복원한 위치가 "카메라에서 본 상대 위치(m)" 가 되는 viewProj
+ */
+export const cameraViewProjRelative = (camera: Camera, aspect: number): Mat4 => {
+    if (isFpsCamera(camera)) {
+        return multiply(perspective(camera.fovY, aspect, FPS_NEAR, FPS_FAR), lookAt([0, 0, 0], fpsForward(camera), [0, 0, 1]))
+    }
+    const eye = orbitEye(camera)
+    const t = camera.target
+    const toTarget: Vec3 = [t[0] - eye[0], t[1] - eye[1], t[2] - eye[2]]
+    const proj = perspective(camera.fovY, aspect, camera.distance * 0.01, camera.distance * 10)
+    return multiply(proj, lookAt([0, 0, 0], toTarget, [0, 0, 1]))
+}
