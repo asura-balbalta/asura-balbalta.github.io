@@ -163,10 +163,14 @@ const paramsSlug = (params) => {
     return parts.join("_") || "default"
 }
 
-/** lock=0 이 없으면 붙인다(자동화에서는 포인터 잠금을 못 쓴다) */
+/**
+ * lock=0·look=0 이 없으면 붙인다: 자동화에서는 포인터 잠금을 못 쓰고, 보이는 창 위를 지나는 실제 마우스가 시점을 돌리면 안 된다
+ * (2026-10-14 1300개 캡처에서 두 장의 시점이 달라져 발견)
+ */
 const withLockOff = (params) => {
     const q = new URLSearchParams(params)
     if (!q.has("lock")) q.set("lock", "0")
+    if (!q.has("look")) q.set("look", "0")
     return q.toString()
 }
 
@@ -271,7 +275,8 @@ const waitReady = async (page, { timeout, stable }, orbit) => {
     const started = Date.now()
     if (orbit) {
         // 궤도 보기(walk=0): 둘러보기에 들어가지 않으므로 선택 도엽 로딩이 끝난 상태(ready, busy 0)를 기다린다
-        await page.waitForSelector('[data-debug-page][data-debug-state="ready"][data-busy="0"]', { timeout })
+        // data-busy 는 L1(2026-10-14) 부터 있다. 없는 옛 빌드도 잴 수 있게 "1 이 아니면" 으로 본다
+        await page.waitForSelector('[data-debug-page][data-debug-state="ready"]:not([data-busy="1"])', { timeout })
         return { tiles: 0, readyMs: Date.now() - started, timedOut: false }
     }
     await page.waitForSelector(".ui-walk-hud", { timeout })
@@ -281,7 +286,7 @@ const waitReady = async (page, { timeout, stable }, orbit) => {
     while (Date.now() < deadline) {
         const [busy, tiles] = await page.evaluate(() => {
             const el = document.querySelector("[data-debug-page]")
-            return [el?.getAttribute("data-busy") ?? "1", el?.getAttribute("data-walk-tiles") ?? null]
+            return [el?.getAttribute("data-busy") ?? "0", el?.getAttribute("data-walk-tiles") ?? null]
         })
         const key = `${busy}/${tiles}`
         if (key !== last) {

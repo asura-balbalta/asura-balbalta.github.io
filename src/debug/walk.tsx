@@ -15,7 +15,9 @@ import type { RenderDebug } from "../webgpu/terrainRenderer"
  * - spawn: 시작 xy(메쉬 로컬, m. 메쉬 origin 을 뺀 EPSG:5179). 없으면 범위 가운데
  * - yaw·pitch: 시작 방향(°, yaw 0 = 동쪽·반시계, 90 = 북쪽)·위아래(°, 위로 +). 없으면 북쪽·수평
  * - ao·shadow·sky: 0 이면 끔. edge: 외곽선 세기(0 ~ 1). sun: 태양 고도(°). aodebug: SSAO 디버그 출력 모드(ao.ts AoDebugMode 0 ~ 6)
+ * - walkradius: 둘러보기 중 장면에 그릴 반경(m, 기본 5000). 0 이면 모두 그림
  * - lock=0: 포인터 잠금 없이 흉내(내장 브라우저·Playwright. 마우스는 어디서 움직여도 시점, Esc 가 포커스 끔)
+ * - look=0: 마우스로 시점을 돌리지 않음(자동 캡처. 보이는 창 위를 실제 마우스가 지나가도 시점이 그대로)
  * 해시를 고치면(새로고침 없이) 렌더 디버그 설정은 바로 반영되고, 프리셋(bbox·spawn·yaw·pitch)은 처음 한 번만 적용된다.
  * 받은 파라미터를 왼쪽 위(둘러보기 중 비어 있는 자리. 오른쪽 위는 미니맵)에 작게 보여 무엇이 적용됐는지 확인할 수 있다(클릭은 통과).
  * 그 요소의 data-debug-state(loading | ready | walking)·data-busy(로딩·재생성 중 1)·data-walk-tiles(선택 범위 밖 도엽 수)는
@@ -56,7 +58,9 @@ export const parseWalkParams = (params: URLSearchParams): { preset: AppPreset; r
         yaw: toRadians(number(params, "yaw")),
         pitch: toRadians(number(params, "pitch")),
     }
+    const walkRadiusRaw = number(params, "walkradius")
     const renderDebug: RenderDebug = {
+        walkRadius: walkRadiusRaw === undefined ? undefined : walkRadiusRaw <= 0 ? Infinity : walkRadiusRaw,
         ao: flag(params, "ao"),
         shadow: flag(params, "shadow"),
         sky: flag(params, "sky"),
@@ -64,6 +68,7 @@ export const parseWalkParams = (params: URLSearchParams): { preset: AppPreset; r
         sun: number(params, "sun"),
         aodebug,
         pointerLock: flag(params, "lock"),
+        mouseLook: flag(params, "look"),
     }
     return { preset, renderDebug, notes }
 }

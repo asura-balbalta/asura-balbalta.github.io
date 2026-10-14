@@ -13,6 +13,7 @@ import {
     MeshBounds,
     RenderDebug,
     TerrainMode,
+    WALK_CULL_RADIUS,
     walkLighting,
 } from "../webgpu/terrainRenderer"
 
@@ -260,6 +261,7 @@ export const TerrainViewCanvas = ({
                         terrain: event.tile.terrain,
                         buildings: event.tile.buildings,
                         mode: event.tile.mode,
+                        bounds: { min: [event.tile.bounds.min[0], event.tile.bounds.min[1]], max: [event.tile.bounds.max[0], event.tile.bounds.max[1]] },
                     })
                 } else if (event.type === "remove") {
                     renderer.updaters.streamTileUpdater(event.id, null)
@@ -368,6 +370,7 @@ export const TerrainViewCanvas = ({
             yaw: start?.yaw,
             pitch: start?.pitch,
             pointerLock: renderDebugRef.current?.pointerLock !== false,
+            mouseLook: renderDebugRef.current?.mouseLook !== false,
             onFocusChange: (focused) => onWalkFocusChangeRef.current?.(focused),
             onMove: (move) => {
                 onWalkMoveRef.current?.(move)
@@ -383,6 +386,8 @@ export const TerrainViewCanvas = ({
         walkRef.current = player
         pointersRef.current.clear()
         renderer.updaters.lightingUpdater(walkLighting(renderDebugRef.current))
+        // 거리 거르기(L4): 반경 밖 도엽은 그리지 않는다. 궤도 보기로 돌아가면 끈다
+        renderer.updaters.cullRadiusUpdater(renderDebugRef.current?.walkRadius ?? WALK_CULL_RADIUS)
         player.attach(canvas)
         return () => {
             walkRef.current = null
@@ -390,6 +395,7 @@ export const TerrainViewCanvas = ({
             unsubscribe()
             tiles.stopWalk()
             onWalkTileCountRef.current?.(0)
+            renderer.updaters.cullRadiusUpdater(null)
             renderer.updaters.lightingUpdater(DEFAULT_LIGHTING)
             if (cameraRef.current) renderer.updaters.cameraUpdater(cameraRef.current)
         }
@@ -403,7 +409,10 @@ export const TerrainViewCanvas = ({
     useEffect(() => {
         if (!renderer) return
         renderer.updaters.debugUpdater(renderDebug ?? {})
-        if (walkRef.current) renderer.updaters.lightingUpdater(walkLighting(renderDebug))
+        if (walkRef.current) {
+            renderer.updaters.lightingUpdater(walkLighting(renderDebug))
+            renderer.updaters.cullRadiusUpdater(renderDebug?.walkRadius ?? WALK_CULL_RADIUS)
+        }
     }, [renderer, renderDebug])
     /** 계단형이면 층 간격, 아니면 null. 플레이어 발 높이를 계단 바닥에 맞추는 데 쓴다 */
     const groundStep = mode === "stepped" ? stepInterval : null

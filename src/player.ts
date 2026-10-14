@@ -94,6 +94,7 @@ const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v
  * @param options.yaw 시작 방향(라디안. 기본 북쪽)
  * @param options.pitch 시작 위아래 시점(라디안, 수평선 위로 +. 기본 0)
  * @param options.pointerLock 포인터 잠금 API 를 쓸지(기본 true). false 면 잠금 없이 흉내 낸다
+ * @param options.mouseLook 마우스로 시점을 돌릴지(기본 true). false 면 mousemove 를 무시한다(자동 캡처: 보이는 창 위를 지나는 실제 마우스가 시점을 바꾸지 않게)
  * @param options.onFocusChange 포커스(포인터 잠금)가 잡히거나 풀렸을 때(Esc, 창 전환, 요청 실패). 부모가 커서·안내를 바꾼다
  * @param options.onMove 위치가 바뀔 때 약 10 Hz 로(미니맵·상태 표시줄용)
  * @param options.physics 처음 물리 값(없는 항목은 기본값)
@@ -105,6 +106,7 @@ export const createPlayer = ({
     yaw: initialYaw = Math.PI / 2,
     pitch: initialPitch = 0,
     pointerLock: usePointerLock = true,
+    mouseLook = true,
     onFocusChange,
     onMove,
     physics: initialPhysics,
@@ -115,6 +117,7 @@ export const createPlayer = ({
     yaw?: number
     pitch?: number
     pointerLock?: boolean
+    mouseLook?: boolean
     onFocusChange?: (focused: boolean) => void
     onMove?: (move: PlayerMove) => void
     physics?: Partial<WalkPhysics>
@@ -202,7 +205,7 @@ export const createPlayer = ({
     }
     const onKeyUp = (e: KeyboardEvent) => keys.delete(e.code)
     const onMouseMove = (e: MouseEvent) => {
-        if (!locked) return
+        if (!locked || !mouseLook) return
         yaw -= e.movementX * LOOK_RATE
         pitch = clamp(pitch - e.movementY * LOOK_RATE, -PITCH_LIMIT, PITCH_LIMIT)
     }

@@ -105,9 +105,18 @@ export type RenderDebug = {
     sun?: number
     /** SSAO 합성 pass 의 디버그 출력 모드(ao.ts AoDebugMode). 없으면 0 */
     aodebug?: AoDebugMode
+    /** 둘러보기 중 장면에 그릴 반경(m, 카메라에서 도엽 범위까지). 없으면 WALK_CULL_RADIUS */
+    walkRadius?: number
     /** false 면 포인터 잠금 API 없이 흉내(내장 브라우저·자동 캡처용. player.ts) */
     pointerLock?: boolean
+    /** false 면 마우스로 시점을 돌리지 않는다(자동 캡처의 결정론: 보이는 창 위를 지나는 실제 마우스가 시점을 바꾸지 않게) */
+    mouseLook?: boolean
 }
+/**
+ * 둘러보기 중 장면에 그릴 반경(m). 이보다 먼 도엽은 그리지 않는다(L4, 2026-10-14). 안개 1/1200 에서 5 km 의 가시도는 약 1.5 % 라
+ * 사라지는 것이 보이지 않는다. 디버그 페이지 walkradius= 로 바꿔 비교한다
+ */
+export const WALK_CULL_RADIUS = 5000
 /** 외곽선 기본 세기(0.18 = 18% 어둡게. 0.25 는 진했다, 2026-10-13). Chrome 에서 edge= 로 비교해 정하면 바꾼다 by @nanangqq */
 const EDGE_STRENGTH = 0.18
 /**
@@ -563,6 +572,7 @@ const createTerrainDrawingPassAndUpdaters = (
         lastCamera = camera
         const viewProj = cameraViewProj(camera, aspect)
         const eye = cameraEye(camera)
+        lastEye = eye
         device.queue.writeBuffer(uniformBuffer, 0, viewProj)
         device.queue.writeBuffer(uniformBuffer, 80, new Float32Array(eye))
         if (lighting.shadows) {
@@ -575,6 +585,8 @@ const createTerrainDrawingPassAndUpdaters = (
             onCamera?.(rel, invert(rel), eye)
         }
     }
+    /** 마지막 카메라 위치(거리 거르기용) */
+    let lastEye: Vec3 | null = null
     /** 카메라가 바뀔 때 다른 pass(SSAO·외곽선·하늘)에도 알린다. 행렬은 카메라 기준(cameraViewProjRelative) */
     let onCamera: ((viewProj: Float32Array, invViewProj: Float32Array, eye: Vec3) => void) | null = null
     const setCameraListener = (fn: typeof onCamera) => {
@@ -679,7 +691,23 @@ const createTerrainDrawingPassAndUpdaters = (
      * 걸어 보기 스트리밍 도엽(walkTiles): 도엽 id → GPU 조각. 지형 조각은 계단형 파이프라인(면 법선, 법선 버퍼 없음)으로,
      * 건물은 건물 파이프라인으로 그린다. 선택 범위 메쉬(layerChunks)와는 별개로 들고, 나가면 streamClearUpdater 로 모두 비운다
      */
-    const streamTiles = new Map<string, { terrain: GpuChunk[]; buildings: GpuChunk[]; mode: TerrainMode }>()
+    type TileBounds = { min: [number, number]; max: [number, number] }
+    const streamTiles = new Map<string, { terrain: GpuChunk[]; buildings: GpuChunk[]; mode: TerrainMode; bounds: TileBounds | null }>()
+    /**
+     * 거리 거르기 반경(m). 둘러보기 중에만 켜진다(cullRadiusUpdater). 카메라 xy 에서 도엽 xy 범위까지의 거리가 이보다 멀면
+     * 장면 pass 에서 빼고, 그림자 pass 는 캐스케이드 반경의 2배 밖을 뺀다(빛 상자가 카메라 앞쪽으로 치우쳐 있어 여유를 둔다).
+     * 도엽 범위가 없는 조각(옛 경로)은 거르지 않는다
+     */
+    let cullRadius: number | null = null
+    const cullRadiusUpdater = (radius: number | null) => {
+        cullRadius = radius
+    }
+    /** 점(xy)에서 도엽 xy 범위까지의 거리(안이면 0) */
+    const distanceToBounds = (eye: Vec3, b: TileBounds) => {
+        const dx = Math.max(b.min[0] - eye[0], 0, eye[0] - b.max[0])
+        const dy = Math.max(b.min[1] - eye[1], 0, eye[1] - b.max[1])
+        return Math.hypot(dx, dy)
+    }
     /** 스트리밍 도엽이 선택 범위를 다 덮었으면 선택 메쉬(지형·건물)는 그리지 않는다(겹치면 z-fighting) */
     let streamCovers = false
 
@@ -687,11 +715,11 @@ const createTerrainDrawingPassAndUpdaters = (
      * 도엽 하나를 올리거나(이전 것은 교체) 뺀다(null).
      *
      * @param id 도엽 id
-     * @param tile 지형 조각(계단형, 또는 법선이 있는 매끈한 면)과 건물 메쉬, 지형 표현 방식. null 이면 뺀다
+     * @param tile 지형 조각(계단형, 또는 법선이 있는 매끈한 면)과 건물 메쉬, 지형 표현 방식, 도엽 xy 범위(거리 거르기용). null 이면 뺀다
      */
     const streamTileUpdater = (
         id: string,
-        tile: { terrain: MeshChunk[]; buildings: TinMesh | null; mode: TerrainMode } | null,
+        tile: { terrain: MeshChunk[]; buildings: TinMesh | null; mode: TerrainMode; bounds?: TileBounds } | null,
     ) => {
         const prev = streamTiles.get(id)
         if (prev) {
@@ -709,7 +737,7 @@ const createTerrainDrawingPassAndUpdaters = (
                 buildings.push(uploadChunk(`tile ${id} buildings`, c))
             }
         }
-        streamTiles.set(id, { terrain, buildings, mode: tile.mode })
+        streamTiles.set(id, { terrain, buildings, mode: tile.mode, bounds: tile.bounds ?? null })
     }
     /**
      * 표고 색 범위(uniform offset 64)를 쓴다. 도엽이 하나씩 올라오며 범위가 넓어질 때마다 다시 쓴다
@@ -731,14 +759,20 @@ const createTerrainDrawingPassAndUpdaters = (
         streamTiles.clear()
         streamCovers = false
     }
-    /** 이번 프레임에 그릴 (조각, 파이프라인) 목록: 선택 메쉬(스트리밍이 덮지 않았을 때) + 스트리밍 도엽 */
-    const collectDraws = () => {
+    /**
+     * 이번 프레임에 그릴 (조각, 파이프라인) 목록: 선택 메쉬(스트리밍이 덮지 않았을 때) + 스트리밍 도엽.
+     *
+     * @param radius 거리 거르기 반경(m). null 이면 모두 그린다
+     */
+    const collectDraws = (radius: number | null) => {
         const draws: { chunks: GpuChunk[]; set: ReturnType<typeof createPipelineSet> }[] = []
         if (!streamCovers) {
             if (layerVisible.terrain && layerChunks.terrain.length > 0) draws.push({ chunks: layerChunks.terrain, set: pipelines[mode] })
             if (layerVisible.buildings && layerChunks.buildings.length > 0) draws.push({ chunks: layerChunks.buildings, set: pipelines.buildings })
         }
+        const eye = radius !== null ? lastEye : null
         for (const t of streamTiles.values()) {
+            if (eye && t.bounds && distanceToBounds(eye, t.bounds) > radius!) continue
             if (layerVisible.terrain && t.terrain.length > 0) draws.push({ chunks: t.terrain, set: pipelines[t.mode] })
             if (layerVisible.buildings && t.buildings.length > 0) draws.push({ chunks: t.buildings, set: pipelines.buildings })
         }
@@ -754,7 +788,7 @@ const createTerrainDrawingPassAndUpdaters = (
      */
     const shadowPass = (encoder: GPUCommandEncoder) => {
         if (!lighting.shadows) return
-        const draws = collectDraws()
+        const draws = collectDraws(cullRadius === null ? null : Math.min(cullRadius, lighting.shadowRadius * 2))
         for (const cascade of shadowCascades) {
             const pass = encoder.beginRenderPass({
                 colorAttachments: [],
@@ -782,7 +816,7 @@ const createTerrainDrawingPassAndUpdaters = (
      * @param target 그릴 색 텍스처 view(캔버스 또는 오프스크린 장면 텍스처)
      */
     const scenePass = (encoder: GPUCommandEncoder, target: GPUTextureView) => {
-        const draws = collectDraws()
+        const draws = collectDraws(cullRadius)
         if (draws.length === 0) return
 
         const pass = encoder.beginRenderPass({
@@ -824,6 +858,7 @@ const createTerrainDrawingPassAndUpdaters = (
         streamCoverUpdater,
         streamClearUpdater,
         elevationRangeUpdater,
+        cullRadiusUpdater,
         meshUpdater,
         meshStreamStarter,
         streamedMeshUpdater,
