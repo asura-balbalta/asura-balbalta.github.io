@@ -28,13 +28,11 @@ const isChromium = () => {
 /** 이 브라우저의 기본값(Chromium 이면 켬). App 은 env.glass 가 있으면 그것을 우선한다 */
 export const LIQUID_GLASS_DEFAULT = isChromium()
 
-const searchParams = new URLSearchParams(window.location.search)
-
 /**
  * 유리 틴트. 셰이더가 색에 GLASS_TINT_COLOR 를 strength 만큼 섞어 곱한다(1 을 넘으면 선형으로 더 강하게).
  * 무색이면 라이트 3D 화면에서 회색 건물 위에 올라간 독이 잘 안 보여 넣었다(2026-10-10 요청 by @nanangqq). 1 은 거의 티가 안 나고
  * 2.5 는 뚜렷한 파랑. accent 색상으로 바꾼 뒤에는 1 도 세서 0.5 로 골랐다 by @nanangqq. 런타임 비교는 콘솔에서 __lg.defaults.tintStrength·tintColor 를 바꾸면 바로 반영.
- * URL ?tint=숫자 로 세기 덮어쓰기. CSS 유리(terrainTheme.ts 의 glass)도 같은 톤으로 맞춘다
+ * 세기 비교는 디버그 페이지 `#/debug/app?tint=숫자`(useLiquidGlass 의 options.tint). CSS 유리(terrainTheme.ts 의 glass)도 같은 톤으로 맞춘다
  *
  * 틴트 색: 라이브러리 원본 (0.92, 0.95, 1.05) 는 R 과 G 를 비슷하게 깎아 보라·군청 쪽(색상 약 225°)으로 보였다.
  * 라이트 accent #0f6cbd(색상 약 208°)에 맞추려고 R 을 더 깎고 G 는 거의 둔다: 0.5 배로 섞으면 (0.935, 0.985, 1.025),
@@ -42,8 +40,6 @@ const searchParams = new URLSearchParams(window.location.search)
  */
 const GLASS_TINT_STRENGTH = 0.5
 const GLASS_TINT_COLOR: [number, number, number] = [0.87, 0.97, 1.05]
-const tintParam = Number(searchParams.get("tint"))
-const glassTint = searchParams.has("tint") && Number.isFinite(tintParam) ? tintParam : GLASS_TINT_STRENGTH
 
 /**
  * 유리 요소 선택자 → 모서리 반지름(ui.css 의 border-radius 와 같게)과 베벨 깊이 zRadius(px).
@@ -65,8 +61,10 @@ const GLASS_TARGETS: [selector: string, config: { cornerRadius: number; zRadius:
 /**
  * @param active 3D 화면에서 true. 바뀔 때마다 만들고 부순다
  * @param root 루트 요소(FluentProvider 의 div). 유리 요소와 WebGPU 캔버스가 그 직계 자식이어야 한다
+ * @param options.tint 틴트 세기(디버그 페이지 `#/debug/app?tint=`). 없으면 GLASS_TINT_STRENGTH. 바뀌면 다시 만든다
  */
-export const useLiquidGlass = (active: boolean, root: RefObject<HTMLElement | null>) => {
+export const useLiquidGlass = (active: boolean, root: RefObject<HTMLElement | null>, options: { tint?: number } = {}) => {
+    const tint = options.tint ?? GLASS_TINT_STRENGTH
     useEffect(() => {
         const rootEl = root.current
         if (!active || !rootEl) return
@@ -106,7 +104,7 @@ export const useLiquidGlass = (active: boolean, root: RefObject<HTMLElement | nu
                     edgeHighlight: 0.02,
                     fresnel: 0.3,
                     specular: 0.08,
-                    tintStrength: glassTint,
+                    tintStrength: tint,
                     tintColor: GLASS_TINT_COLOR,
                     shadowOpacity: 0.2,
                     shadowSpread: 8,
@@ -142,5 +140,5 @@ export const useLiquidGlass = (active: boolean, root: RefObject<HTMLElement | nu
             rootEl.classList.remove("ui-lg")
             delete w.__lg
         }
-    }, [active, root])
+    }, [active, root, tint])
 }

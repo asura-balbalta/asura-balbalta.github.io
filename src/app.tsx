@@ -128,8 +128,9 @@ const WEBGPU_AVAILABLE = typeof navigator !== "undefined" && !!navigator.gpu
  * 브라우저 환경 흉내(디버그 페이지 `#/debug/app`, src/debug/app.tsx). 없는 항목은 실제 브라우저 판별을 따른다. 운영은 undefined.
  * - webgpu: false 면 WebGPU 미지원 브라우저처럼(안내 토스트·알약, 범위 그리기 막음)
  * - glass: 리퀴드 글래스를 판별과 무관하게 켜거나 끔
+ * - glassTint: 리퀴드 글래스 틴트 세기(기본 0.5. liquidGlass.ts)
  */
-export type AppEnv = { webgpu?: boolean; glass?: boolean }
+export type AppEnv = { webgpu?: boolean; glass?: boolean; glassTint?: number }
 
 /** 상태 표시줄 왼쪽에 보일 진행 상태. ratio 가 없으면 진행 막대가 불확정으로 움직인다 */
 type Progress = { label: string; ratio?: number }
@@ -284,7 +285,7 @@ function App({
         if (view === "map") setMinimapCollapsed(false)
     }, [view])
     // 리퀴드 글래스(?glass=0 으로 끔): 3D 화면에서만
-    useLiquidGlass(glassEnabled && view === "3d" && !!terrain, rootRef)
+    useLiquidGlass(glassEnabled && view === "3d" && !!terrain, rootRef, { tint: env?.glassTint })
 
     // ---- 걸어 보기(게임 모드, 계획 문서 6절) ----
     /** 1인칭으로 지형 위를 걷는 중. 3D 화면·데스크톱에서만. 지도로 돌아가거나 지형이 바뀌면 끝난다 */
