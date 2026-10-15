@@ -217,6 +217,15 @@ const buildTile = (t: QueryTile, q: Query, extra: boolean): Promise<TileData> =>
     })
 }
 
+/** 큐를 한 점(5179 m)에서 가까운 순으로 다시 늘어놓는다(보조 워커 배정은 그대로. 각 워커는 자기 몫을 앞에서부터 처리한다) */
+const sortPendingByDistance = (center: [number, number]) => {
+    if (pending.length < 2) return
+    const keyed = pending.map((p) => ({ p, d: dist(center, centroid(p.tile.corners)) }))
+    keyed.sort((a, b) => a.d - b.d)
+    pending = keyed.map((x) => x.p)
+    console.log(`재생성 큐 ${pending.length}개를 플레이어 가까운 순으로: 첫 도엽 ${keyed[0].p.tile.name}(${Math.round(keyed[0].d)} m), 마지막 ${keyed[keyed.length - 1].p.tile.name}(${Math.round(keyed[keyed.length - 1].d)} m)`)
+}
+
 /** 도엽 데이터를 메인으로 보낸다(버퍼 transfer) */
 const postTile = (data: TileData) => {
     const set = new Set<Transferable>([data.tin.positions.buffer as ArrayBuffer, data.tin.indices.buffer as ArrayBuffer])
@@ -372,6 +381,7 @@ self.onmessage = async (e: MessageEvent<TerrainTilesRequest>) => {
             // 들고 있는 도엽을 같은 순서(선택 도엽 → 밖 도엽)로 다시 만든다. 이미 큐에 있는 것은 새 스타일로 만들어지므로 그대로
             const queued = new Set(pending.map((p) => p.tile.map_id))
             for (const [id, info] of loaded) if (!queued.has(id)) pending.push({ tile: info.tile, extra: info.extra, helper: helperIndexOf(info.tile.id5k) })
+            if (walk) sortPendingByDistance(walk.center)
             pendingTotal = pending.length
             pendingDone = 0
             post({ type: "progress", phase: "build", done: 0, total: pendingTotal })
@@ -379,6 +389,8 @@ self.onmessage = async (e: MessageEvent<TerrainTilesRequest>) => {
         } else {
             if (msg.center) {
                 walk = { center: msg.center, radius: msg.radius, maxTiles: msg.maxTiles }
+                // 둘러보기 진입 때 계단형 재생성이 큐에 있으면 플레이어 가까운 도엽부터(L5-D, 2026-10-15). style 메시지가 walk 보다 먼저 온다
+                sortPendingByDistance(msg.center)
             } else {
                 walk = null
                 for (const [id, info] of loaded) {
