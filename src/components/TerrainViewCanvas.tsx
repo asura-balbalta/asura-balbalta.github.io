@@ -96,6 +96,8 @@ const initialCamera = ({ min, max }: MeshBounds): OrbitCamera => ({
  * @param props.onError 렌더러를 만들지 못했을 때(WebGPU 미지원·어댑터 없음 등). 부모가 토스트로 알리고 busy 를 푼다
  * @param props.onBuildingLook 걸어 보기 중 조준점이 가리키는 건물이 바뀔 때(buildingPick.ts, 10 Hz. 없으면 null). 강조는 렌더러가 직접
  * @param props.onBuildingPin 포커스 중 클릭했을 때 그 건물(없는 곳을 클릭하면 null). 걸어 보기에서 나가면 null
+ * @param props.onBuildingLock 포커스 중 더블클릭(350 ms 안 두 번)했을 때. 부모가 펼친 정보의 고정을 켠다
+ * @param props.lockedBuilding 더블클릭으로 고정한 건물(부모 상태). 조준점이 어디를 봐도 이 건물은 계속 강조한다
  */
 export const TerrainViewCanvas = ({
     tiles,
@@ -116,6 +118,8 @@ export const TerrainViewCanvas = ({
     onError,
     onBuildingLook,
     onBuildingPin,
+    onBuildingLock,
+    lockedBuilding = null,
 }: {
     tiles: TerrainTilesClient
     layers?: LayerStates
@@ -135,6 +139,8 @@ export const TerrainViewCanvas = ({
     onError?: (err: Error) => void
     onBuildingLook?: (hit: BuildingHit | null) => void
     onBuildingPin?: (hit: BuildingHit | null) => void
+    onBuildingLock?: () => void
+    lockedBuilding?: BuildingHit | null
 }) => {
     // 콜백이 렌더마다 새로 만들어져도 effect 를 다시 돌리지 않도록 ref 로 받는다
     const onWalkMoveRef = useRef(onWalkMove)
@@ -153,6 +159,10 @@ export const TerrainViewCanvas = ({
     onBuildingLookRef.current = onBuildingLook
     const onBuildingPinRef = useRef(onBuildingPin)
     onBuildingPinRef.current = onBuildingPin
+    const onBuildingLockRef = useRef(onBuildingLock)
+    onBuildingLockRef.current = onBuildingLock
+    /** 걸어 보기 중 마지막 클릭 시각(더블클릭 판정용). 포인터 잠금 중엔 dblclick 이벤트에 기대지 않고 pointerdown 간격으로 본다 */
+    const lastWalkClickRef = useRef(0)
     /** 걸어 보기 중 마지막 프레임의 1인칭 카메라(조준점 건물 찾기가 눈·시선으로 쓴다) */
     const walkCameraRef = useRef<FpsCamera | null>(null)
     /** 지금 조준점이 가리키는 건물(클릭하면 이것을 고정한다) */
@@ -166,6 +176,24 @@ export const TerrainViewCanvas = ({
     // canvas 속성은 실제 픽셀 수(× devicePixelRatio), style 은 화면에 보이는 크기. 창 크기가 바뀌면 다시 잰다
     const [size, setSize] = useState(readViewportSize)
     const [renderer, setRenderer] = useState<TRenderer | null>(null)
+    const lockedRef = useRef<BuildingHit | null>(lockedBuilding)
+    lockedRef.current = lockedBuilding
+    /** 렌더러 강조 목록을 다시 쓴다: 고정한 건물 + 조준점 건물(같은 건물이면 하나) */
+    const pushHighlight = () => {
+        const list: { tileId: string; faceStart: number; faceEnd: number }[] = []
+        const locked = lockedRef.current
+        const looked = lookedRef.current
+        if (locked) list.push({ tileId: locked.tileId, faceStart: locked.faceStart, faceEnd: locked.faceEnd })
+        if (looked && !(locked && looked.tileId === locked.tileId && looked.index === locked.index))
+            list.push({ tileId: looked.tileId, faceStart: looked.faceStart, faceEnd: looked.faceEnd })
+        renderer?.updaters.highlightUpdater(list)
+    }
+    const pushHighlightRef = useRef(pushHighlight)
+    pushHighlightRef.current = pushHighlight
+    // 고정이 바뀌면(걸거나 풀면) 강조 목록을 바로 다시 쓴다
+    useEffect(() => {
+        pushHighlightRef.current()
+    }, [lockedBuilding, renderer])
     const cameraRef = useRef<OrbitCamera | null>(null)
     /**
      * 눌려 있는 포인터(마우스 버튼·손가락)의 pointerId → 마지막 위치. 하나면 끌어서 회전, 둘이면 두 점 거리 변화로 확대·축소.
@@ -429,14 +457,14 @@ export const TerrainViewCanvas = ({
                       const prev = lookedRef.current
                       if (hit?.tileId === prev?.tileId && hit?.index === prev?.index) return
                       lookedRef.current = hit
-                      renderer.updaters.highlightUpdater(hit && { tileId: hit.tileId, faceStart: hit.faceStart, faceEnd: hit.faceEnd })
+                      pushHighlightRef.current()
                       onBuildingLookRef.current?.(hit)
                   }, 100)
         return () => {
             window.clearInterval(pickTimer)
             lookedRef.current = null
             walkCameraRef.current = null
-            renderer.updaters.highlightUpdater(null)
+            renderer.updaters.highlightUpdater([])
             onBuildingLookRef.current?.(null)
             onBuildingPinRef.current?.(null)
             walkRef.current = null
@@ -520,9 +548,14 @@ export const TerrainViewCanvas = ({
             }}
             onPointerDown={(e) => {
                 if (walkRef.current) {
-                    // 걸어 보기 중 클릭: 포커스가 풀려 있으면 다시 잠금, 포커스 중이면 조준점의 건물을 고정(없으면 고정 해제)
-                    if (walkFocused) onBuildingPinRef.current?.(lookedRef.current)
-                    else walkRef.current.focus()
+                    // 걸어 보기 중 클릭: 포커스가 풀려 있으면 다시 잠금. 포커스 중이면 조준점의 건물을 펼치고(없으면 접음),
+                    // 350 ms 안에 다시 누르면 더블클릭으로 보고 고정을 켜고 끈다
+                    if (walkFocused) {
+                        const now = performance.now()
+                        if (now - lastWalkClickRef.current < 350) onBuildingLockRef.current?.()
+                        else onBuildingPinRef.current?.(lookedRef.current)
+                        lastWalkClickRef.current = now
+                    } else walkRef.current.focus()
                     return
                 }
                 pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY, button: e.button, pointerType: e.pointerType })

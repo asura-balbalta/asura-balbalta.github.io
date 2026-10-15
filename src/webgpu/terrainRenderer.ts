@@ -713,35 +713,37 @@ const createTerrainDrawingPassAndUpdaters = (
             }
         }
         // 건물 강조: 장면을 다 그린 뒤 그 건물의 삼각형 범위만 반투명으로 한 번 더(조각이 여럿이면 범위가 걸치는 조각마다 그 부분)
-        const h = highlight
-        const tile = h && layerVisible.buildings ? streamTiles.get(h.tileId) : undefined
-        if (h && tile) {
-            const first = h.faceStart * 3
-            const end = h.faceEnd * 3
+        if (highlights.length > 0 && layerVisible.buildings) {
             const set = pipelines.buildingHighlight
             pass.setPipeline(set.pipeline)
             pass.setBindGroup(0, set.bindGroup)
-            for (const c of tile.buildings) {
-                const from = Math.max(first, c.indexStart)
-                const to = Math.min(end, c.indexStart + c.indexCount)
-                if (from >= to) continue
-                pass.setVertexBuffer(0, c.vertexBuffer)
-                pass.setIndexBuffer(c.indexBuffer, "uint32")
-                pass.drawIndexed(to - from, 1, from - c.indexStart)
+            for (const h of highlights) {
+                const tile = streamTiles.get(h.tileId)
+                if (!tile) continue
+                const first = h.faceStart * 3
+                const end = h.faceEnd * 3
+                for (const c of tile.buildings) {
+                    const from = Math.max(first, c.indexStart)
+                    const to = Math.min(end, c.indexStart + c.indexCount)
+                    if (from >= to) continue
+                    pass.setVertexBuffer(0, c.vertexBuffer)
+                    pass.setIndexBuffer(c.indexBuffer, "uint32")
+                    pass.drawIndexed(to - from, 1, from - c.indexStart)
+                }
             }
         }
         pass.end()
     }
 
-    /** 강조할 건물: 도엽 id 와 그 도엽 건물 메쉬 안 삼각형 범위 [faceStart, faceEnd). null 이면 없음 */
-    let highlight: { tileId: string; faceStart: number; faceEnd: number } | null = null
+    /** 강조할 건물들(고정한 건물 + 조준점 건물): 도엽 id 와 그 도엽 건물 메쉬 안 삼각형 범위 [faceStart, faceEnd) */
+    let highlights: { tileId: string; faceStart: number; faceEnd: number }[] = []
     /**
-     * 둘러보기 중 조준점이 가리키는 건물을 바꾼다(TerrainViewCanvas 가 buildingPick 결과로 10 Hz 쯤 부른다). 다음 프레임부터 반영
+     * 둘러보기 중 강조할 건물 목록을 바꾼다(TerrainViewCanvas 가 buildingPick 결과·고정 상태로 부른다). 다음 프레임부터 반영
      *
-     * @param next 도엽 id 와 삼각형 범위(BuildingTable 의 faceBase[k] ~ 다음 세운 건물). null 이면 강조 없음
+     * @param next 도엽 id 와 삼각형 범위(BuildingTable 의 faceBase[k] ~ 다음 세운 건물)들. 빈 배열이면 강조 없음
      */
-    const highlightUpdater = (next: { tileId: string; faceStart: number; faceEnd: number } | null) => {
-        highlight = next
+    const highlightUpdater = (next: { tileId: string; faceStart: number; faceEnd: number }[]) => {
+        highlights = next
     }
 
     return {

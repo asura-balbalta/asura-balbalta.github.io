@@ -493,11 +493,22 @@ function App({
     /** 걸어 보기 중 조준점이 가리키는 건물(TargetHud 요약·조준경 반응)과 클릭으로 고정한 건물(TargetHud 8행). 강조는 렌더러가 직접 */
     const [lookedBuilding, setLookedBuilding] = useState<BuildingHit | null>(null)
     const [pinnedBuilding, setPinnedBuilding] = useState<BuildingHit | null>(null)
-    // 고정 중 조준점이 다른 건물에 걸리면 고정을 풀고 그 건물 요약을 보인다(2026-10-15, by @nanangqq). 아무것도 안 보면 고정 유지
+    /** 펼친 정보를 더블클릭으로 고정했는지. 고정 중엔 조준점이 어디를 봐도 그대로이고 클릭도 무시한다(빈 곳 클릭·나가기는 해제) */
+    const [buildingLocked, setBuildingLocked] = useState(false)
+    // 펼친 상태(고정 아님)에서 조준점이 다른 건물에 걸리면 접고 그 건물 요약을 보인다(2026-10-15, by @nanangqq). 아무것도 안 보면 유지
     useEffect(() => {
-        if (!pinnedBuilding || !lookedBuilding) return
+        if (buildingLocked || !pinnedBuilding || !lookedBuilding) return
         if (lookedBuilding.tileId !== pinnedBuilding.tileId || lookedBuilding.index !== pinnedBuilding.index) setPinnedBuilding(null)
     }, [lookedBuilding])
+    /** 클릭: 건물을 펼친다. 빈 곳(null)이면 접는다. 고정 중이면 그 건물이든 다른 건물이든 클릭으로 고정이 풀리고 그 건물의 펼침이 된다 */
+    const pinBuilding = (hit: BuildingHit | null) => {
+        setBuildingLocked(false)
+        setPinnedBuilding(hit)
+    }
+    /** 더블클릭(클릭 뒤 350 ms 안 클릭): 펼친 정보가 있으면 고정한다. 고정 중이면 첫 클릭이 이미 풀었으므로 다시 건다 */
+    const toggleBuildingLock = () => {
+        if (pinnedBuilding) setBuildingLocked(true)
+    }
 
     /**
      * 범위의 지형을 도엽 단위로 받아 올린다. 사각형 확정이 부른다. 진행·도엽·완료는 아래 구독이 받는다.
@@ -711,7 +722,9 @@ function App({
                     renderDebug={renderDebug}
                     walkStart={preset && { spawn: preset.spawn, yaw: preset.yaw, pitch: preset.pitch }}
                     onBuildingLook={setLookedBuilding}
-                    onBuildingPin={setPinnedBuilding}
+                    onBuildingPin={pinBuilding}
+                    onBuildingLock={toggleBuildingLock}
+                    lockedBuilding={buildingLocked ? pinnedBuilding : null}
                     onError={(err) => {
                         // 렌더러를 못 만들면(어댑터 없음 등) 도엽은 받아도 올릴 곳이 없다. 원인을 보이고 잠금을 푼다
                         setBusy(false)
@@ -785,7 +798,7 @@ function App({
                 />
             )}
             {/* 둘러보기 중 조준점 오른쪽의 건물 정보(바라보면 요약, 클릭으로 고정하면 8행). 캔버스가 걸어 보기에서 나가면 둘 다 null */}
-            {walking && walkFocused && <TargetHud looked={lookedBuilding} pinned={pinnedBuilding} />}
+            {walking && walkFocused && <TargetHud looked={lookedBuilding} pinned={pinnedBuilding} locked={buildingLocked} />}
             {walking && (
                 <WalkControls
                     physics={walkPhysics}
