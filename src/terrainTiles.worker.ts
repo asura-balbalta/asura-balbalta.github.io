@@ -3,7 +3,7 @@ import proj4 from "proj4"
 
 import type { BuildingTable } from "./buildingTable"
 import type { MeshChunk, TinMesh } from "./terrainData"
-import { getTtpSheetsInBbox, neighborReach } from "./terrainIndex"
+import { getTtpSheetsInBbox, MB_PER_TILE, neighborReach, SELECTION_TILE_LIMITS } from "./terrainIndex"
 import type { BuildRequest, BuildResponse } from "./terrainTileBuild.worker"
 import type { TerrainMode } from "./webgpu/terrainRenderer"
 
@@ -93,7 +93,8 @@ export type TerrainTilesResponse =
     | { type: "tile"; tile: TileData }
     | { type: "remove"; id: string }
     | { type: "done" }
-    | { type: "error"; message: string }
+    /** kind "too-large" 는 선택 범위의 도엽 수가 상한을 넘어 만들지 않은 것(앱이 제목을 다르게 보인다) */
+    | { type: "error"; message: string; kind?: "too-large" }
 
 type Query = Awaited<ReturnType<typeof getTtpSheetsInBbox>>
 export type QueryTile = Query["tiles"][number]
@@ -350,6 +351,15 @@ const select = async (msg: Extract<TerrainTilesRequest, { type: "select" }>) => 
     ])
     if (gen !== generation) return
     if (qSel.tiles.length === 0) throw new Error("선택 범위에 도엽이 없습니다")
+    if (qSel.tiles.length > SELECTION_TILE_LIMITS.max) {
+        // 메모리 M-C: 파일을 받기 전에 거부한다. 1K 도엽 하나에 약 0.3 MB(원본 TIN·GPU)와 0.1초가 들어, 상한을 넘으면 탭이 죽을 수 있다
+        post({
+            type: "error",
+            kind: "too-large",
+            message: `1K 도엽 ${qSel.tiles.length.toLocaleString()}개로 상한 ${SELECTION_TILE_LIMITS.max.toLocaleString()}개를 넘습니다(약 ${((qSel.tiles.length * MB_PER_TILE) / 1024).toFixed(1)} GB). 범위를 줄여 주세요.`,
+        })
+        return
+    }
     cfg = { origin: qSel.origin, style: msg.style, maxBytes: msg.maxBytes }
     selection = { ids: new Set(qSel.tiles.map((t) => t.map_id)), query: qAll }
     const [ox, oy] = qSel.origin

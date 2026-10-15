@@ -45,6 +45,15 @@ export type TtpSheetsInBbox = {
     sheets: { id5k: string; path: string; gzBytes: number }[]
 }
 
+/**
+ * 선택 범위의 1K 도엽 수 한도(메모리 M-C, 2026-10-15). 측정(충주 1364개, Chrome 155): 도엽당 메인 사본 0.14 MB(원본 TIN·건물·표) +
+ * 궤도 보기 GPU 0.18 MB ≈ 0.32 MB. 둘러보기의 계단형 GPU 는 상주 반경 5 km 안 약 0.9 GB 로 범위와 무관. 생성 시간은 1364개에 약 2.5분.
+ * warn 이면 토스트로 알리고 진행, max 를 넘으면 만들지 않는다(조정자 select 에서 인덱스 조회 직후, 파일을 받기 전에 거부)
+ */
+export const SELECTION_TILE_LIMITS = { warn: 2000, max: 4000 }
+/** 도엽당 메모리 추정(MB. 위 측정값). 안내 문구용 */
+export const MB_PER_TILE = 0.32
+
 /** 같은 인덱스 JSON 을 한 번만 받는다(모듈 수명 동안. Worker 는 요청마다 새로 만들어지므로 그 안에서만 유효) */
 const jsonCache = new Map<string, Promise<unknown>>()
 const fetchJsonCached = <T>(url: string): Promise<T> => {

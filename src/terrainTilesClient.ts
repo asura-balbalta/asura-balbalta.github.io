@@ -21,7 +21,7 @@ export type TerrainTilesEvent =
     /** 표고 범위가 넓어졌을 때(도엽이 올라오며) */
     | { type: "bounds"; bounds: MeshBounds }
     | { type: "done" }
-    | { type: "error"; message: string }
+    | { type: "error"; message: string; kind?: "too-large" }
 
 export type TerrainTilesClient = ReturnType<typeof createTerrainTiles>
 
@@ -133,9 +133,10 @@ export const createTerrainTiles = () => {
         } else if (msg.type === "progress") {
             dispatch(msg)
         } else if (msg.type === "done") {
+            logMemory()
             dispatch({ type: "done" })
         } else {
-            dispatch({ type: "error", message: msg.message })
+            dispatch({ type: "error", message: msg.message, kind: msg.kind })
         }
     }
     worker.onerror = (e) => dispatch({ type: "error", message: `지형 도엽 Worker 오류: ${e.message}` })

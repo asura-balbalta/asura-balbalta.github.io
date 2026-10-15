@@ -46,6 +46,7 @@ import { VWORLD_KEY } from "./config"
 import { clearSearchPin, showSearchPin } from "./searchPin"
 import { SearchHandle, searchPlaces, SearchResult, trimDanglingJamo } from "./vworld"
 import { Button, Menu, MenuItem, MenuList, MenuPopover, MenuTrigger } from "@fluentui/react-components"
+import { MB_PER_TILE, SELECTION_TILE_LIMITS } from "./terrainIndex"
 import { MeshBounds, RenderDebug, TerrainMode } from "./webgpu/terrainRenderer"
 
 /**
@@ -542,11 +543,20 @@ function App({
         } else if (event.type === "done") {
             setBusy(false)
             setTerrainProgress(null)
+        } else if (event.type === "selection") {
+            // 메모리 M-C: 넓은 범위는 알리고 진행한다(상한 초과는 워커가 error kind "too-large" 로 거부)
+            if (event.tiles.length >= SELECTION_TILE_LIMITS.warn) {
+                toast.warning(
+                    "넓은 범위입니다",
+                    `1K 도엽 ${event.tiles.length.toLocaleString()}개. 만드는 데 몇 분이 걸리고 메모리를 약 ${((event.tiles.length * MB_PER_TILE) / 1024).toFixed(1)} GB 씁니다(상한 ${SELECTION_TILE_LIMITS.max.toLocaleString()}개).`,
+                )
+            }
         } else if (event.type === "error") {
             console.error(event.message)
             setBusy(false)
             setTerrainProgress(null)
-            toast.error("지형 데이터를 받지 못했습니다", event.message)
+            if (event.kind === "too-large") toast.error("범위가 너무 넓습니다", event.message)
+            else toast.error("지형 데이터를 받지 못했습니다", event.message)
         }
     }
     useEffect(() => tiles.subscribe((event) => onTilesEventRef.current(event)), [tiles])
