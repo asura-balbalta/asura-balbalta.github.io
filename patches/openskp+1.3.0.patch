@@ -1,8 +1,43 @@
 diff --git a/node_modules/openskp/dist/index.js b/node_modules/openskp/dist/index.js
-index 0cfe5b5..9814224 100644
+index 0cfe5b5..2161565 100644
 --- a/node_modules/openskp/dist/index.js
 +++ b/node_modules/openskp/dist/index.js
-@@ -12074,7 +12074,7 @@ var ArchiveWriter = class {
+@@ -11318,7 +11318,11 @@ function edgeKey(a, b) {
+   return a < b ? `${a}_${b}` : `${b}_${a}`;
+ }
+ var ArchiveWriter = class {
+-  constructor(nextSlot, classSlot, nextPid = 1) {
++  constructor(nextSlot, classSlot, pidState) {
++    // asrbbt patch: persistent id 는 writer 마다 1 부터가 아니라 공유 카운터(pidState, 스캐폴드 헤더 값 + 1 부터)로 한 시퀀스.
++    // 구간마다 다시 매기면 SketchUp 이 열 때 중복을 다시 매기고 저장(SUModelSaveToFile)에서 SU_ERROR_SERIALIZATION 으로 실패한다
++    // (openskp CHANGELOG 1.3.0 의 Python writer 수정과 같은 내용. TypeScript 에는 빠져 있었다)
++    this.pidState = pidState ?? { next: 1 };
+     this.bytes = new GrowableBytes();
+     // One CSkFont per file, serialized inline at the first dimension/text's
+     // font field (exactly as SketchUp writes it) and re-used by back-ref
+@@ -11326,7 +11330,9 @@ var ArchiveWriter = class {
+     this.dimFontSlot = null;
+     this.nextSlot = nextSlot;
+     this.classSlot = { ...classSlot };
+-    this.nextPid = nextPid;
++  }
++  get nextPid() {
++    return this.pidState.next;
+   }
+   get length() {
+     return this.bytes.length;
+@@ -11337,8 +11343,8 @@ var ArchiveWriter = class {
+     return s;
+   }
+   allocPid() {
+-    const p = this.nextPid;
+-    this.nextPid += 1;
++    const p = this.pidState.next;
++    this.pidState.next += 1;
+     return p;
+   }
+   pushU8(v) {
+@@ -12074,7 +12080,7 @@ var ArchiveWriter = class {
      this.pushF64(nx);
      this.pushF64(ny);
      this.pushF64(nz);
@@ -11,11 +46,102 @@ index 0cfe5b5..9814224 100644
      this.pushU32(1 + holes.length);
      const loopSlot = this.newOfKnownClass("CLoop", 1);
      this.preamble(0);
+@@ -12442,7 +12448,10 @@ var SkpBuilder = class {
+     this.newEntityCount = 0;
+     this.faceCount = 0;
+     this.data = loadScaffold();
+-    this.materialWriter = new ArchiveWriter(this.base, {});
++    // asrbbt patch: 스캐폴드 헤더의 persistent id 카운터(32비트) 다음부터 모든 writer 가 이어 매긴다
++    const d = this.data;
++    this.pidState = { next: (d[PID_COUNTER_POS] | d[PID_COUNTER_POS + 1] << 8 | d[PID_COUNTER_POS + 2] << 16 | d[PID_COUNTER_POS + 3] << 24) + 1 };
++    this.materialWriter = new ArchiveWriter(this.base, {}, this.pidState);
+   }
+   addMaterial(name, rgba, opacity) {
+     if (this.geometryWriter !== null) throw new SkpWriteError("addMaterial must be called before any addFace calls");
+@@ -12523,7 +12532,7 @@ var SkpBuilder = class {
+     if (this.layerWriter === null) {
+       const materialShift = this.materialWriter.nextSlot - this.base;
+       this.layerWriterStart = this.layerWriterBase + materialShift;
+-      this.layerWriter = new ArchiveWriter(this.layerWriterStart, this.materialShiftedClassSlot());
++      this.layerWriter = new ArchiveWriter(this.layerWriterStart, this.materialShiftedClassSlot(), this.pidState);
+     }
+     const slot = this.layerWriter.writeLayer(name, true, options.hidden ?? false, rgba);
+     this.layersByName.set(name, slot);
+@@ -12579,7 +12588,7 @@ var SkpBuilder = class {
+     }
+     if (this.definitionWriterInstance === null) {
+       this.definitionWriterStart = this.scaffoldNextSlot + (this.materialWriter.nextSlot - this.base) + this.layerShift();
+-      this.definitionWriterInstance = new ArchiveWriter(this.definitionWriterStart, this.postLayerClassSlot());
++      this.definitionWriterInstance = new ArchiveWriter(this.definitionWriterStart, this.postLayerClassSlot(), this.pidState);
+     }
+     const [slot, countPatchPos] = this.definitionWriterInstance.writeDefinitionHeader(attributeDicts);
+     this.definitionCount += 1;
+@@ -12746,7 +12755,8 @@ var SkpBuilder = class {
+     const materialShift = this.materialWriter.nextSlot - this.base;
+     this.geometryWriter = new ArchiveWriter(
+       this.scaffoldNextSlot + materialShift + this.layerShift() + this.definitionShift(),
+-      this.postDefinitionClassSlot()
++      this.postDefinitionClassSlot(),
++      this.pidState
+     );
+     for (const [comp, [translation, matrix3x3, mat, layer, attributeDicts, hidden]] of this.pendingGroups) {
+       this.newEntityCount += this.geometryWriter.writeGroup(comp.slot, comp.name, translation, matrix3x3, mat, layer, attributeDicts, hidden);
+@@ -12942,13 +12952,9 @@ var SkpBuilder = class {
+         parts.push(part instanceof Uint8Array ? part : Uint8Array.from(part));
+       }
+     };
+-    const layerPids = this.layerWriter ? this.layerWriter.nextPid - 1 : 0;
+-    const pidDelta = this.materialCount + layerPids;
+     const prefix = Array.from(this.data.subarray(0, this.materialInsertPos - 4));
+-    if (pidDelta) {
+-      const u16 = readU16(prefix, PID_COUNTER_POS);
+-      writeU16At(prefix, PID_COUNTER_POS, u16 + pidDelta);
+-    }
++    // asrbbt patch: 헤더 카운터 = 마지막으로 매긴 persistent id(32비트)
++    writeU32At(prefix, PID_COUNTER_POS, this.pidState.next - 1);
+     for (let i = 0; i < ISO_CAMERA_PREFIX_PATCH.length; i++) {
+       prefix[ISO_CAMERA_PREFIX_OFFSET + i] = ISO_CAMERA_PREFIX_PATCH[i];
+     }
 diff --git a/node_modules/openskp/dist/index.mjs b/node_modules/openskp/dist/index.mjs
-index 072a58c..7d96f3e 100644
+index 072a58c..dc81dc2 100644
 --- a/node_modules/openskp/dist/index.mjs
 +++ b/node_modules/openskp/dist/index.mjs
-@@ -12004,7 +12004,7 @@ var ArchiveWriter = class {
+@@ -11248,7 +11248,11 @@ function edgeKey(a, b) {
+   return a < b ? `${a}_${b}` : `${b}_${a}`;
+ }
+ var ArchiveWriter = class {
+-  constructor(nextSlot, classSlot, nextPid = 1) {
++  constructor(nextSlot, classSlot, pidState) {
++    // asrbbt patch: persistent id 는 writer 마다 1 부터가 아니라 공유 카운터(pidState, 스캐폴드 헤더 값 + 1 부터)로 한 시퀀스.
++    // 구간마다 다시 매기면 SketchUp 이 열 때 중복을 다시 매기고 저장(SUModelSaveToFile)에서 SU_ERROR_SERIALIZATION 으로 실패한다
++    // (openskp CHANGELOG 1.3.0 의 Python writer 수정과 같은 내용. TypeScript 에는 빠져 있었다)
++    this.pidState = pidState ?? { next: 1 };
+     this.bytes = new GrowableBytes();
+     // One CSkFont per file, serialized inline at the first dimension/text's
+     // font field (exactly as SketchUp writes it) and re-used by back-ref
+@@ -11256,7 +11260,9 @@ var ArchiveWriter = class {
+     this.dimFontSlot = null;
+     this.nextSlot = nextSlot;
+     this.classSlot = { ...classSlot };
+-    this.nextPid = nextPid;
++  }
++  get nextPid() {
++    return this.pidState.next;
+   }
+   get length() {
+     return this.bytes.length;
+@@ -11267,8 +11273,8 @@ var ArchiveWriter = class {
+     return s;
+   }
+   allocPid() {
+-    const p = this.nextPid;
+-    this.nextPid += 1;
++    const p = this.pidState.next;
++    this.pidState.next += 1;
+     return p;
+   }
+   pushU8(v) {
+@@ -12004,7 +12010,7 @@ var ArchiveWriter = class {
      this.pushF64(nx);
      this.pushF64(ny);
      this.pushF64(nz);
@@ -24,3 +150,59 @@ index 072a58c..7d96f3e 100644
      this.pushU32(1 + holes.length);
      const loopSlot = this.newOfKnownClass("CLoop", 1);
      this.preamble(0);
+@@ -12372,7 +12378,10 @@ var SkpBuilder = class {
+     this.newEntityCount = 0;
+     this.faceCount = 0;
+     this.data = loadScaffold();
+-    this.materialWriter = new ArchiveWriter(this.base, {});
++    // asrbbt patch: 스캐폴드 헤더의 persistent id 카운터(32비트) 다음부터 모든 writer 가 이어 매긴다
++    const d = this.data;
++    this.pidState = { next: (d[PID_COUNTER_POS] | d[PID_COUNTER_POS + 1] << 8 | d[PID_COUNTER_POS + 2] << 16 | d[PID_COUNTER_POS + 3] << 24) + 1 };
++    this.materialWriter = new ArchiveWriter(this.base, {}, this.pidState);
+   }
+   addMaterial(name, rgba, opacity) {
+     if (this.geometryWriter !== null) throw new SkpWriteError("addMaterial must be called before any addFace calls");
+@@ -12453,7 +12462,7 @@ var SkpBuilder = class {
+     if (this.layerWriter === null) {
+       const materialShift = this.materialWriter.nextSlot - this.base;
+       this.layerWriterStart = this.layerWriterBase + materialShift;
+-      this.layerWriter = new ArchiveWriter(this.layerWriterStart, this.materialShiftedClassSlot());
++      this.layerWriter = new ArchiveWriter(this.layerWriterStart, this.materialShiftedClassSlot(), this.pidState);
+     }
+     const slot = this.layerWriter.writeLayer(name, true, options.hidden ?? false, rgba);
+     this.layersByName.set(name, slot);
+@@ -12509,7 +12518,7 @@ var SkpBuilder = class {
+     }
+     if (this.definitionWriterInstance === null) {
+       this.definitionWriterStart = this.scaffoldNextSlot + (this.materialWriter.nextSlot - this.base) + this.layerShift();
+-      this.definitionWriterInstance = new ArchiveWriter(this.definitionWriterStart, this.postLayerClassSlot());
++      this.definitionWriterInstance = new ArchiveWriter(this.definitionWriterStart, this.postLayerClassSlot(), this.pidState);
+     }
+     const [slot, countPatchPos] = this.definitionWriterInstance.writeDefinitionHeader(attributeDicts);
+     this.definitionCount += 1;
+@@ -12676,7 +12685,8 @@ var SkpBuilder = class {
+     const materialShift = this.materialWriter.nextSlot - this.base;
+     this.geometryWriter = new ArchiveWriter(
+       this.scaffoldNextSlot + materialShift + this.layerShift() + this.definitionShift(),
+-      this.postDefinitionClassSlot()
++      this.postDefinitionClassSlot(),
++      this.pidState
+     );
+     for (const [comp, [translation, matrix3x3, mat, layer, attributeDicts, hidden]] of this.pendingGroups) {
+       this.newEntityCount += this.geometryWriter.writeGroup(comp.slot, comp.name, translation, matrix3x3, mat, layer, attributeDicts, hidden);
+@@ -12872,13 +12882,9 @@ var SkpBuilder = class {
+         parts.push(part instanceof Uint8Array ? part : Uint8Array.from(part));
+       }
+     };
+-    const layerPids = this.layerWriter ? this.layerWriter.nextPid - 1 : 0;
+-    const pidDelta = this.materialCount + layerPids;
+     const prefix = Array.from(this.data.subarray(0, this.materialInsertPos - 4));
+-    if (pidDelta) {
+-      const u16 = readU16(prefix, PID_COUNTER_POS);
+-      writeU16At(prefix, PID_COUNTER_POS, u16 + pidDelta);
+-    }
++    // asrbbt patch: 헤더 카운터 = 마지막으로 매긴 persistent id(32비트)
++    writeU32At(prefix, PID_COUNTER_POS, this.pidState.next - 1);
+     for (let i = 0; i < ISO_CAMERA_PREFIX_PATCH.length; i++) {
+       prefix[ISO_CAMERA_PREFIX_OFFSET + i] = ISO_CAMERA_PREFIX_PATCH[i];
+     }
