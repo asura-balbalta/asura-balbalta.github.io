@@ -136,6 +136,9 @@ const tinCacheSet = (id: string, tin: ClippedMesh) => {
 
 /** 도엽별 세운 건물 결과 캐시(표현 방식과 무관하므로 재생성 때 다시 만들지 않는다). transfer 전에 복사해 둔다 */
 const builtBuildingsCache = new Map<string, { buildings: TinMesh | null; buildingTable: BuildingTable | null; built: number }>()
+/** 메모리 측정(2026-10-15): 이 워커가 만든 도엽 수와 건물 결과 캐시 바이트 */
+let builtCount = 0
+let builtBuildingsBytes = 0
 
 /** 5K 단위 건물 목록(무게중심 m 미리 계산): `${id5k}@${ox},${oy}` → 목록 */
 type BuildingWithCenter = { b: Building; cx: number; cy: number }
@@ -254,6 +257,7 @@ const buildTile = async (job: BuildJob): Promise<{ data: TileData; transfer: Tra
                 buildingTable: buildingTable && cloneBuildingTable(buildingTable),
                 built,
             })
+            if (buildings) builtBuildingsBytes += buildings.positions.byteLength + buildings.indices.byteLength
         } catch (err) {
             console.warn(`도엽 ${t.name} 건물 실패:`, err)
         }
@@ -262,6 +266,10 @@ const buildTile = async (job: BuildJob): Promise<{ data: TileData; transfer: Tra
         `도엽 ${t.name}${extra ? "(밖)" : ""}: ${fromCache ? "캐시" : `이웃 ${ttpTiles.length}개 ${mergeNote} 합침`} ${Math.round(t1 - t0)}ms, ${style.mode} ${Math.round(t2 - t1)}ms, 삼각형 ${tin.indices.length / 3}, 건물 ${built}${cached ? "(캐시)" : ""}, ${Math.round(performance.now() - t2)}ms`,
     )
 
+    builtCount++
+    if (builtCount % 50 === 0) {
+        console.log(`메모리(보조 워커 캐시): 만든 도엽 ${builtCount}, 자른 TIN ${(tinCacheBytes / 1048576).toFixed(1)} MB(${tinCache.size}개), 건물 결과 ${(builtBuildingsBytes / 1048576).toFixed(1)} MB(${builtBuildingsCache.size}개), 5K 파일 ${ttpCache.size}개, 5K 건물 목록 ${buildings5kCache.size}개`)
+    }
     const xy = positionsBounds(tin.positions)
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
     for (const [x, y] of poly) {

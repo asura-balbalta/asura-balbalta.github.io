@@ -16,6 +16,7 @@ import type { RenderDebug } from "../webgpu/terrainRenderer"
  * - yaw·pitch: 시작 방향(°, yaw 0 = 동쪽·반시계, 90 = 북쪽)·위아래(°, 위로 +). 없으면 북쪽·수평
  * - ao·shadow·sky: 0 이면 끔. edge: 외곽선 세기(0 ~ 1). sun: 태양 고도(°). aodebug: SSAO 디버그 출력 모드(ao.ts AoDebugMode 0 ~ 6)
  * - walkradius: 둘러보기 중 장면에 그릴 반경(m, 기본 5000). 0 이면 모두 그림
+ * - resident: 둘러보기 중 GPU 에 올려 둘 반경(m, 기본 walkradius 와 같음). 0 이면 내리지 않음(옛 동작)
  * - band: 도엽 생성 때 이웃을 합치는 경계 띠 폭(m). 0 이면 이웃 3×3 전체(옛 동작). 없으면 기본값. 범위 확정 때만 적용된다
  * - lock=0: 포인터 잠금 없이 흉내(내장 브라우저·Playwright. 마우스는 어디서 움직여도 시점, Esc 가 포커스 끔)
  * - look=0: 마우스로 시점을 돌리지 않음(자동 캡처. 보이는 창 위를 실제 마우스가 지나가도 시점이 그대로)
@@ -60,8 +61,10 @@ export const parseWalkParams = (params: URLSearchParams): { preset: AppPreset; r
         pitch: toRadians(number(params, "pitch")),
     }
     const walkRadiusRaw = number(params, "walkradius")
+    const residentRaw = number(params, "resident")
     const renderDebug: RenderDebug = {
         walkRadius: walkRadiusRaw === undefined ? undefined : walkRadiusRaw <= 0 ? Infinity : walkRadiusRaw,
+        residentRadius: residentRaw === undefined ? undefined : residentRaw <= 0 ? Infinity : residentRaw,
         ao: flag(params, "ao"),
         shadow: flag(params, "shadow"),
         sky: flag(params, "sky"),

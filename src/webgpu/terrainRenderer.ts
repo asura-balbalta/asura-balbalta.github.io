@@ -108,6 +108,8 @@ export type RenderDebug = {
     aodebug?: AoDebugMode
     /** 둘러보기 중 장면에 그릴 반경(m, 카메라에서 도엽 범위까지). 없으면 WALK_CULL_RADIUS */
     walkRadius?: number
+    /** 둘러보기 중 GPU 에 올려 둘 반경(m). 밖의 선택 도엽은 GPU 에서 내리고 들어오면 다시 만든다(M-B). Infinity 면 내리지 않음. 없으면 walkRadius 와 같음 */
+    residentRadius?: number
     /** false 면 포인터 잠금 API 없이 흉내(내장 브라우저·자동 캡처용. player.ts) */
     pointerLock?: boolean
     /** false 면 마우스로 시점을 돌리지 않는다(자동 캡처의 결정론: 보이는 창 위를 지나는 실제 마우스가 시점을 바꾸지 않게) */
@@ -403,8 +405,11 @@ const createTerrainDrawingPassAndUpdaters = (
     }
     const layerVisible: Record<LayerId, boolean> = { terrain: true, buildings: true }
 
+    /** GPU 에 상주하는 도엽 버퍼 바이트 합(메모리 측정, 2026-10-15) */
+    let residentBytes = 0
     const destroyChunks = (chunks: GpuChunk[]) => {
         for (const c of chunks) {
+            residentBytes -= c.vertexBuffer.size + (c.normalBuffer?.size ?? 0) + c.indexBuffer.size
             c.vertexBuffer.destroy()
             c.normalBuffer?.destroy()
             c.indexBuffer.destroy()
@@ -419,13 +424,18 @@ const createTerrainDrawingPassAndUpdaters = (
     }
 
     /** 조각을 GPU 버퍼로 올린 GpuChunk 를 만든다 */
-    const uploadChunk = (label: string, chunk: MeshChunk, indexStart = 0): GpuChunk => ({
-        vertexBuffer: uploadBuffer(`${label} vertices`, GPUBufferUsage.VERTEX, chunk.positions),
-        normalBuffer: chunk.normals ? uploadBuffer(`${label} normals`, GPUBufferUsage.VERTEX, chunk.normals) : null,
-        indexBuffer: uploadBuffer(`${label} indices`, GPUBufferUsage.INDEX, chunk.indices),
-        indexCount: chunk.indices.length,
-        indexStart,
-    })
+    const uploadChunk = (label: string, chunk: MeshChunk, indexStart = 0): GpuChunk => {
+        residentBytes += chunk.positions.byteLength + (chunk.normals?.byteLength ?? 0) + chunk.indices.byteLength
+        return {
+            vertexBuffer: uploadBuffer(`${label} vertices`, GPUBufferUsage.VERTEX, chunk.positions),
+            normalBuffer: chunk.normals ? uploadBuffer(`${label} normals`, GPUBufferUsage.VERTEX, chunk.normals) : null,
+            indexBuffer: uploadBuffer(`${label} indices`, GPUBufferUsage.INDEX, chunk.indices),
+            indexCount: chunk.indices.length,
+            indexStart,
+        }
+    }
+    /** GPU 상주 도엽 수와 버퍼 바이트 합 */
+    const residentStats = () => ({ tiles: streamTiles.size, bytes: residentBytes })
 
     /**
      * 레이어를 그릴지 정한다(다음 프레임부터). 메쉬·버퍼는 그대로 두므로 바로 켜고 끌 수 있다.
@@ -759,6 +769,7 @@ const createTerrainDrawingPassAndUpdaters = (
         elevationRangeUpdater,
         cullRadiusUpdater,
         highlightUpdater,
+        residentStats,
         layerVisibilityUpdater,
         cameraUpdater,
         aspectUpdater,

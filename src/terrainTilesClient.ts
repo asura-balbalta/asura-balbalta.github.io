@@ -1,6 +1,6 @@
 import type { Extent } from "ol/extent"
 
-import { BuildingTable, mergeBuildingTables } from "./buildingTable"
+import { BuildingTable, buildingTableBuffers, mergeBuildingTables } from "./buildingTable"
 import type { TinMesh } from "./terrainData"
 import type { TerrainTilesRequest, TerrainTilesResponse, TileData, TileStyle, TileSummary } from "./terrainTiles.worker"
 import type { MeshBounds } from "./webgpu/terrainRenderer"
@@ -30,6 +30,17 @@ export type TerrainTilesClient = ReturnType<typeof createTerrainTiles>
  * setStyle, 걸어 보기는 startWalk / updateWalk / stopWalk. 받은 도엽은 tiles 에 들고 있고(높이 조회·내보내기·통계),
  * 구독자에게 일어난 일을 알린다. 구독하면 이미 있는 선택·도엽·범위를 먼저 되풀이해 준다(늦게 붙은 캔버스도 같은 상태가 되게)
  */
+/** 도엽 하나가 메인 스레드에 차지하는 바이트(지형 조각·원본 TIN·건물 메쉬·건물 표). 메모리 측정(2026-10-15) */
+const tileBytes = (t: TileData) => {
+    let chunks = 0
+    for (const c of t.terrain) chunks += c.positions.byteLength + c.indices.byteLength + (c.normals?.byteLength ?? 0)
+    const tin = t.tin.positions.byteLength + t.tin.indices.byteLength
+    const buildings = t.buildings ? t.buildings.positions.byteLength + t.buildings.indices.byteLength : 0
+    let table = 0
+    if (t.buildingTable) for (const b of buildingTableBuffers(t.buildingTable)) table += b.byteLength
+    return { chunks, tin, buildings, table }
+}
+
 export const createTerrainTiles = () => {
     const worker = new Worker(TERRAIN_TILES_WORKER_URL)
     const listeners = new Set<(event: TerrainTilesEvent) => void>()
@@ -49,6 +60,27 @@ export const createTerrainTiles = () => {
         for (const l of listeners) l(event)
     }
     const send = (msg: TerrainTilesRequest) => worker.postMessage(msg)
+    /** 마지막 표현 방식(select·setStyle). 늦게 붙은 구독자에게 조각이 없는 도엽을 다시 만들어 줄 때 쓴다 */
+    let currentStyle: TileStyle | null = null
+    /** 들고 있는 도엽 사본의 바이트 합(선택 도엽·밖 도엽 수 포함) */
+    const memoryStats = () => {
+        const sum = { tiles: 0, extra: 0, chunks: 0, tin: 0, buildings: 0, table: 0 }
+        for (const t of tiles.values()) {
+            const b = tileBytes(t)
+            sum.tiles++
+            if (t.extra) sum.extra++
+            sum.chunks += b.chunks
+            sum.tin += b.tin
+            sum.buildings += b.buildings
+            sum.table += b.table
+        }
+        return { ...sum, total: sum.chunks + sum.tin + sum.buildings + sum.table }
+    }
+    const mb = (n: number) => (n / 1048576).toFixed(1)
+    const logMemory = () => {
+        const m = memoryStats()
+        console.log(`메모리(메인 도엽 사본): 도엽 ${m.tiles}(밖 ${m.extra}), ${mb(m.total)} MB = 조각 ${mb(m.chunks)} + TIN ${mb(m.tin)} + 건물 ${mb(m.buildings)} + 표 ${mb(m.table)}`)
+    }
 
     worker.onmessage = (e: MessageEvent<TerrainTilesResponse>) => {
         const msg = e.data
@@ -75,6 +107,8 @@ export const createTerrainTiles = () => {
             if (prev?.extra) extraCount--
             tiles.set(msg.tile.id, msg.tile)
             if (msg.tile.extra) extraCount++
+            // 메모리 측정(2026-10-15): 50개마다 메인 스레드가 든 도엽 사본의 바이트
+            if (tiles.size % 50 === 0) logMemory()
             const first = !receivedFirst
             receivedFirst = true
             // z 범위는 도엽이 올라오며 넓어진다. 첫 도엽이면 z 가 비어 있으므로 반드시 알린다
@@ -142,10 +176,14 @@ export const createTerrainTiles = () => {
                 listener({ type: "selection", origin, tiles: summaries, sheets, center })
                 if (receivedFirst) listener({ type: "bounds", bounds: { min: [...bounds.min], max: [...bounds.max] } })
                 let first = true
+                let released = false
                 for (const tile of tiles.values()) {
                     listener({ type: "tile", tile, first })
                     first = false
+                    if (tile.terrain.length === 0) released = true
                 }
+                // 지형 조각을 이미 버린 도엽(releaseTerrain)은 되풀이로 올릴 수 없으므로 워커에 다시 만들어 달라고 한다(캐시라 빠르다)
+                if (released && currentStyle) send({ type: "style", style: currentStyle })
             }
             return () => {
                 listeners.delete(listener)
@@ -155,10 +193,26 @@ export const createTerrainTiles = () => {
         select: (bbox: Extent, style: TileStyle) => {
             const text = bbox.map((v) => Math.round(v)).join(",")
             console.log(`선택 범위 bbox(3857): ${text}\n디버그 주소: ${location.origin}${location.pathname}#/debug/walk?bbox=${text}`)
+            currentStyle = style
             send({ type: "select", bbox, style, maxBytes: CHUNK_BYTES })
         },
         /** 표현 방식·층 간격을 바꾼다. 들고 있는 도엽을 다시 만들어 교체한다(끝나면 done) */
-        setStyle: (style: TileStyle) => send({ type: "style", style }),
+        setStyle: (style: TileStyle) => {
+            currentStyle = style
+            send({ type: "style", style })
+        },
+        /**
+         * 도엽의 지형 조각 사본을 버린다(메모리 M-A, 2026-10-15). 캔버스가 GPU 에 올린 뒤 부른다. 높이 조회·내보내기는 원본 TIN 만 쓰므로
+         * 조각은 메인 스레드에 둘 이유가 없다(계단형 조각은 TIN 의 약 13배라 1364개 둘러보기에서 2.3 GB 였다). 다시 필요하면 워커가 캐시로 만든다
+         */
+        releaseTerrain: (id: string) => {
+            const t = tiles.get(id)
+            if (t) t.terrain = []
+        },
+        /** 도엽 id 목록을 워커가 다시 만들어 보내게 한다(GPU 에서 내렸던 도엽을 다시 올릴 때. 캐시라 빠르다) */
+        rebuild: (ids: string[]) => {
+            if (ids.length > 0) send({ type: "rebuild", ids })
+        },
         /** 걸어 보기 시작·위치 갱신(5179 m). 선택 범위 밖 도엽을 반경 안에서 더한다 */
         updateWalk: (center: [number, number], radius: number, maxTiles: number) => send({ type: "walk", center, radius, maxTiles }),
         /** 걸어 보기 끝. 밖 도엽을 모두 뺀다 */
@@ -176,6 +230,7 @@ export const createTerrainTiles = () => {
             }
             return { count, triangles, buildings }
         },
+        memory: memoryStats,
         /**
          * 선택 도엽(밖 도엽 제외)의 TIN·건물을 각각 한 메쉬로 합친다(내보내기용). 도엽 경계의 정점은 중복되지만 파일에는 무해하다.
          * 건물 메쉬에는 도엽별 건물 표를 정점·삼각형 오프셋에 맞춰 합친 표(table)를 붙여 SKP·3DM 이 건물마다 그룹·속성을 만들 수 있게 한다(L3)

@@ -40,6 +40,8 @@ export type TerrainTilesRequest =
           maxBytes: number
       }
     | { type: "style"; style: TileStyle }
+    /** 들고 있는 도엽 중 id 목록만 다시 만들어 보낸다(둘러보기 중 GPU 에서 내렸던 도엽이 상주 반경에 들어올 때. 메모리 M-B, 2026-10-15) */
+    | { type: "rebuild"; ids: string[] }
     | {
           type: "walk"
           /** 플레이어 위치(5179 m). null 이면 걸어 보기 끝 */
@@ -377,6 +379,17 @@ self.onmessage = async (e: MessageEvent<TerrainTilesRequest>) => {
     try {
         if (msg.type === "select") {
             await select(msg)
+        } else if (msg.type === "rebuild") {
+            if (!cfg) return
+            const queued = new Set(pending.map((p) => p.tile.map_id))
+            for (const id of msg.ids) {
+                const info = loaded.get(id)
+                if (info && !queued.has(id)) pending.push({ tile: info.tile, extra: info.extra, helper: helperIndexOf(info.tile.id5k) })
+            }
+            if (walk) sortPendingByDistance(walk.center)
+            pendingTotal = pending.length
+            pendingDone = 0
+            void run()
         } else if (msg.type === "style") {
             if (!cfg) return
             cfg.style = msg.style

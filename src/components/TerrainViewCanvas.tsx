@@ -25,6 +25,8 @@ import {
 const WALK_TILE_RADIUS = 1000
 const WALK_TILE_MAX = 60
 const WALK_TILE_UPDATE_M = 100
+/** 상주 반경의 히스테리시스: 이 배수 밖으로 나가야 GPU 에서 내린다(경계에서 들락날락 방지) */
+const RESIDENT_HYSTERESIS = 1.2
 
 /** 창 크기와 devicePixelRatio. canvas 속성은 width·height × dpr, style 은 width·height */
 const readViewportSize = () => ({
@@ -285,6 +287,56 @@ export const TerrainViewCanvas = ({
         if (!renderer) return
         for (const { id } of LAYER_DEFS) renderer.updaters.layerVisibilityUpdater(id, layers[id].visible)
     }, [renderer, layers])
+    /** GPU 에 올라가 있는 도엽 id(메모리 M-B: 둘러보기 중 상주 반경 밖은 내린다) */
+    const residentRef = useRef(new Set<string>())
+    /**
+     * 둘러보기 중 상주 반경에 맞춰 선택 도엽을 GPU 에서 내리고(반경 × RESIDENT_HYSTERESIS 밖) 들어온 도엽은 워커에 다시 요청한다.
+     * 밖 도엽(extra)은 조정자가 반경으로 관리하므로 건드리지 않는다. 반경이 Infinity 면 아무것도 하지 않는다
+     *
+     * @param center 플레이어 위치(메쉬 로컬 m)
+     */
+    /** 상주 반경(m). 둘러보기 중이 아니거나 반경이 무한이면 Infinity */
+    const residentRadius = () => {
+        if (!walkRef.current) return Infinity
+        return renderDebugRef.current?.residentRadius ?? renderDebugRef.current?.walkRadius ?? WALK_CULL_RADIUS
+    }
+    /** 점(로컬 m)에서 도엽 xy 범위까지의 거리(안이면 0) */
+    const distanceToTile = (center: [number, number], tile: TileData) => {
+        const b = tile.bounds
+        return Math.hypot(Math.max(b.min[0] - center[0], 0, center[0] - b.max[0]), Math.max(b.min[1] - center[1], 0, center[1] - b.max[1]))
+    }
+    /** 둘러보기 중 선택 도엽이 상주 반경(× 히스테리시스) 밖인지. 밖 도엽(extra)은 조정자가 관리하므로 false */
+    const outsideResident = (tile: TileData) => {
+        const cam = walkCameraRef.current
+        const radius = residentRadius()
+        if (tile.extra || !cam || !Number.isFinite(radius)) return false
+        return distanceToTile([cam.eye[0], cam.eye[1]], tile) > radius * RESIDENT_HYSTERESIS
+    }
+    const updateResidency = (center: [number, number]) => {
+        const r = renderer
+        if (!r) return
+        const radius = renderDebugRef.current?.residentRadius ?? renderDebugRef.current?.walkRadius ?? WALK_CULL_RADIUS
+        if (!Number.isFinite(radius)) return
+        const resident = residentRef.current
+        const wanted: string[] = []
+        let dropped = 0
+        for (const tile of tiles.tiles.values()) {
+            if (tile.extra) continue
+            const d = distanceToTile(center, tile)
+            if (resident.has(tile.id)) {
+                if (d > radius * RESIDENT_HYSTERESIS) {
+                    r.updaters.streamTileUpdater(tile.id, null)
+                    resident.delete(tile.id)
+                    dropped++
+                }
+            } else if (d <= radius) {
+                wanted.push(tile.id)
+            }
+        }
+        tiles.rebuild(wanted)
+        const stats = r.updaters.residentStats()
+        console.log(`GPU 상주: 도엽 ${stats.tiles}, ${(stats.bytes / 1048576).toFixed(1)} MB (내림 ${dropped}, 다시 요청 ${wanted.length}, 반경 ${radius} m)`)
+    }
     // 도엽 집합 구독: 도엽을 GPU 에 올리고 내린다. 새 선택의 첫 도엽에서 이전 도엽을 모두 내리고 카메라를 맞춘다(걸어 보기 중이 아닐 때)
     useEffect(() => {
         if (!renderer) return
@@ -294,9 +346,15 @@ export const TerrainViewCanvas = ({
                 if (event.type === "selection") {
                     pendingClear = true
                 } else if (event.type === "tile") {
+                    // 메모리 측정(2026-10-15): 50개마다 GPU 상주 바이트
+                    if (tiles.stats().count % 50 === 0 || event.first) {
+                        const r = renderer.updaters.residentStats()
+                        console.log(`메모리(GPU 상주): 도엽 ${r.tiles}, ${(r.bytes / 1048576).toFixed(1)} MB`)
+                    }
                     if (pendingClear) {
                         pendingClear = false
                         renderer.updaters.streamClearUpdater()
+                        residentRef.current.clear()
                         if (!walkRef.current && tiles.bounds) {
                             // 카메라는 선택 도엽의 xy 범위와 **첫 도엽**의 z 범위로. 누적 z 범위를 쓰면 캔버스가 붙는 순간까지 도착한 도엽 수에
                             // 따라 높이가 달라져 같은 주소라도 캡처가 미세하게 달랐다(2026-10-14 L2 비교에서 발견)
@@ -306,14 +364,23 @@ export const TerrainViewCanvas = ({
                             renderer.updaters.cameraUpdater(cameraRef.current)
                         }
                     }
-                    renderer.updaters.streamTileUpdater(event.tile.id, {
-                        terrain: event.tile.terrain,
-                        buildings: event.tile.buildings,
-                        mode: event.tile.mode,
-                        bounds: { min: [event.tile.bounds.min[0], event.tile.bounds.min[1]], max: [event.tile.bounds.max[0], event.tile.bounds.max[1]] },
-                    })
+                    if (event.tile.terrain.length > 0 && outsideResident(event.tile)) {
+                        // 둘러보기 중 상주 반경 밖 선택 도엽(표현 방식 전환으로 다시 온 것)은 올리지 않는다. 반경에 들어오면 rebuild 로 다시 온다
+                        tiles.releaseTerrain(event.tile.id)
+                    } else if (event.tile.terrain.length > 0) {
+                        renderer.updaters.streamTileUpdater(event.tile.id, {
+                            terrain: event.tile.terrain,
+                            buildings: event.tile.buildings,
+                            mode: event.tile.mode,
+                            bounds: { min: [event.tile.bounds.min[0], event.tile.bounds.min[1]], max: [event.tile.bounds.max[0], event.tile.bounds.max[1]] },
+                        })
+                        residentRef.current.add(event.tile.id)
+                        // GPU 에 올렸으면 메인 사본의 조각은 버린다(메모리 M-A). 조각이 없는 도엽(되풀이)은 워커가 다시 만들어 보낸다
+                        tiles.releaseTerrain(event.tile.id)
+                    }
                 } else if (event.type === "remove") {
                     renderer.updaters.streamTileUpdater(event.id, null)
+                    residentRef.current.delete(event.id)
                 } else if (event.type === "bounds") {
                     renderer.updaters.elevationRangeUpdater(event.bounds.min[2], event.bounds.max[2])
                 }
@@ -413,6 +480,7 @@ export const TerrainViewCanvas = ({
         // 주변 도엽 스트리밍(선택 범위 밖). 100 m 움직일 때마다 새 중심을 알린다
         let lastCenter: [number, number] = [spawn[0] + origin[0], spawn[1] + origin[1]]
         tiles.updateWalk(lastCenter, WALK_TILE_RADIUS, WALK_TILE_MAX)
+        updateResidency(spawn)
         const player = createPlayer({
             sampler: combined,
             spawn,
@@ -427,6 +495,7 @@ export const TerrainViewCanvas = ({
                 if (Math.hypot(center[0] - lastCenter[0], center[1] - lastCenter[1]) >= WALK_TILE_UPDATE_M) {
                     lastCenter = center
                     tiles.updateWalk(center, WALK_TILE_RADIUS, WALK_TILE_MAX)
+                    updateResidency([move.x, move.y])
                 }
             },
             physics: walkPhysicsRef.current,
@@ -471,6 +540,9 @@ export const TerrainViewCanvas = ({
             player.detach()
             unsubscribe()
             tiles.stopWalk()
+            // 반경 밖이라 내렸던 선택 도엽을 다시 올린다(M-B). 앱이 표현 방식을 바꿔 전체를 다시 만들면 큐에서 한 번만 만들어진다
+            const missing = [...tiles.tiles.values()].filter((t) => !t.extra && !residentRef.current.has(t.id)).map((t) => t.id)
+            tiles.rebuild(missing)
             onWalkTileCountRef.current?.(0)
             renderer.updaters.cullRadiusUpdater(null)
             renderer.updaters.lightingUpdater(DEFAULT_LIGHTING)
