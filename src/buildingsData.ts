@@ -218,9 +218,6 @@ const loadBuildingNames = async (ids5k: string[]) => {
     return byId
 }
 
-export type BuildingsLoadPhase = "index" | "download" | "build"
-export type BuildingsProgress = (phase: BuildingsLoadPhase, done: number, total: number) => void
-
 /**
  * 선택 범위의 건물을 받아 공통 원점 기준으로 합친다(전달 문서 3절 1~5).
  *
@@ -232,15 +229,12 @@ export type BuildingsProgress = (phase: BuildingsLoadPhase, done: number, total:
  *
  * @param bbox3857 지도에서 고른 범위 (EPSG:3857)
  * @param commonOrigin 지형 메쉬의 원점(정수 m, 5179)
- * @param onProgress 단계별 진행률
  * @returns 건물 목록(xy 는 공통 원점 mm 의 새 배열)과 받은 파일 수
  */
 export const loadBuildings = async (
     bbox3857: Extent,
     commonOrigin: [number, number],
-    onProgress?: BuildingsProgress,
 ): Promise<{ buildings: Building[]; files: number }> => {
-    onProgress?.("index", 0, 1)
     const q = await getTtpSheetsInBbox(bbox3857)
     const ids50k = [...new Set(q.sheets.map((s) => s.id5k.slice(0, 5)))]
     const indexes = await Promise.all(
@@ -252,12 +246,10 @@ export const loadBuildings = async (
         .filter((e): e is NonNullable<typeof e> => !!e && e.n_buildings > 0)
 
     let downloaded = 0
-    onProgress?.("download", 0, targets.length)
     const [files, names] = await Promise.all([
         Promise.all(
             targets.map(async (t) => {
                 const file = await fetchBfpCached(t.path)
-                onProgress?.("download", ++downloaded, targets.length)
                 return file
             }),
         ),

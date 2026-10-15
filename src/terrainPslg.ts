@@ -1,8 +1,6 @@
 import { Extent } from "ol/extent"
 
-import { clipMeshToConvexPolygon } from "./terrainClip"
-import { fetchGunzip, LoadProgress, TinMesh } from "./terrainData"
-import { bboxToPolygon5179, getTtpSheetsInBbox, TTP_BASE } from "./terrainIndex"
+import type { TinMesh } from "./terrainData"
 import { retriangulate } from "./terrainRetri"
 
 /** 등고선 조각: 한 1K 안에 들어온 한 선(line)의 연속 순번 구간 */
@@ -100,31 +98,9 @@ export const parseTtp = (buf: ArrayBuffer) => {
 const KEY_X_SPAN = 2 ** 27
 const KEY_Y_SPAN = 2 ** 26
 
-/** 범위 초과 오류 문구(km). 받기 전 검사와 합치기 검사가 같은 문구를 쓴다 */
+/** 범위 초과 오류 문구(km) */
 const extentError = (wMm: number, hMm: number) =>
     new Error(`범위 초과: 가로 ${(wMm / 1e6).toFixed(1)}km × 세로 ${(hMm / 1e6).toFixed(1)}km (한도 134km × 67km)`)
-
-/**
- * 인덱스의 1K 꼭짓점(5179 m)만으로 범위를 미리 재서 한도를 넘으면 파일을 받기 전에 막는다. 꼭짓점은 점 좌표를 감싸므로
- * 여기서 통과하면 mergeTtpTiles 의 검사도 통과한다(그쪽은 안전망으로 남긴다)
- *
- * @param tiles 선택 범위에 걸친 1K(corners 는 EPSG:5179 m)
- */
-const assertExtentWithinLimit = (tiles: { corners: [number, number][] }[]) => {
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
-    for (const t of tiles) {
-        for (const [x, y] of t.corners) {
-            if (x < minX) minX = x
-            if (x > maxX) maxX = x
-            if (y < minY) minY = y
-            if (y > maxY) maxY = y
-        }
-    }
-    if (tiles.length === 0) return
-    const wMm = (maxX - minX) * 1000
-    const hMm = (maxY - minY) * 1000
-    if (wMm >= KEY_X_SPAN || hMm >= KEY_Y_SPAN) throw extentError(wMm, hMm)
-}
 
 /**
  * 도엽 폴리곤의 범위를 경계 띠 폭만큼 넓힌 범위(mergeTtpTiles 의 keep, L5-C). 보조 워커와 측정 스크립트(scripts/tileBandCheck.ts)가
@@ -215,14 +191,12 @@ export const circumcircleOverflow = (mesh: TinMesh, poly: [number, number][], ke
  *
  * @param tiles 선택 범위에 걸린 1K 들
  * @param commonOrigin 공통 원점(정수 m)
- * @param onProgress 단계별 진행률. "merge" 는 도엽 하나를 합칠 때마다(합친 수, 전체), 재삼각분할 직전에 "retriangulate"
  * @param keep 이 범위(공통 원점 기준 m, [minX, minY, maxX, maxY]) 안의 점만 넣는다(선택). 없으면 모두
  * @returns 삼각분할된 메쉬(원점 기준 m)
  */
 export const mergeTtpTiles = (
     tiles: TtpTile[],
     commonOrigin: [number, number],
-    onProgress?: LoadProgress,
     keep?: Extent,
 ): TinMesh => {
     const t0 = performance.now()
@@ -335,7 +309,7 @@ export const mergeTtpTiles = (
     /** 조각 잇기용: 선 ID 별 조각의 양 끝 정점(남은 것 기준). wholeFirst·wholeLast 는 조각의 진짜 첫·끝점이 남았는지(keep 때문에 빠졌으면 false) */
     const pieceEnds: { lineId: number; startSeq: number; nPts: number; first: number; last: number; wholeFirst: boolean; wholeLast: boolean }[] = []
     let cornersUsed = 0
-    for (const [tileIndex, tile] of tiles.entries()) {
+    for (const tile of tiles) {
         const [dx, dy] = shift(tile)
         const xy = tile.lineXY
         let c = 0
@@ -386,8 +360,6 @@ export const mergeTtpTiles = (
         for (const pts of [tile.inserted, tile.alpt]) {
             for (let k = 0; k < pts.n; k++) vertexOf(pts.xy[3 * k] + dx, pts.xy[3 * k + 1] + dy, pts.z[3 * k + 2])
         }
-        // 처리가 끝난 뒤에 보고해야 마지막이 (전체, 전체)가 된다(앞에서 보고하면 전체−1 에서 멈춘 것처럼 보인다)
-        onProgress?.("merge", tileIndex + 1, tiles.length)
     }
 
     // 3) 같은 선의 조각 잇기. startSeq 가 같은 조각(도엽 모서리에 걸친 한 점짜리 조각 등)은 짧은 것을 앞에 둬 순서를 고정한다
@@ -466,7 +438,7 @@ export const mergeTtpTilesForTile = (
     let attempts = 0
     for (;;) {
         attempts++
-        const mesh = mergeTtpTiles(tiles, commonOrigin, undefined, band > 0 ? keepOf() : undefined)
+        const mesh = mergeTtpTiles(tiles, commonOrigin, band > 0 ? keepOf() : undefined)
         if (band <= 0) return { mesh, sides, attempts }
         const overflow = circumcircleOverflow(mesh, poly, keepOf(), boundaryOnly)
         if (overflow.every((v) => v <= 0)) return { mesh, sides, attempts }
@@ -477,54 +449,4 @@ export const mergeTtpTilesForTile = (
             if (sides[s] >= BAND_MAX) sides[s] = Infinity
         }
     }
-}
-
-/**
- * 지도에서 고른 범위의 지형 메쉬를 ttp(terrain_tile_pslg) 파일로 만든다. loadTerrainTtm 의 ttp 판.
- *
- * 1. 정적 인덱스(R2, terrainIndex)로 범위에 걸친 1K 와 5K 파일(path) 조회. 1K 꼭짓점으로 범위 한도를 먼저 검사
- * 2. 5K 파일들을 병렬로 받아 풀기
- * 3. 범위에 걸친 1K 만 골라 공통 원점으로 합치고 재삼각분할(mergeTtpTiles)
- * 4. 선택 사각형(5179 로 바꾼 네 모서리)으로 잘라 그린 범위만 남김(clipMeshToConvexPolygon)
- *
- * @param bbox3857 지도에서 고른 범위 [minX, minY, maxX, maxY] (EPSG:3857)
- * @param options.onProgress 단계별 진행률(loadTerrainTtm 과 같은 단계)
- * @returns 렌더러에 넘길 메쉬(선택 범위 안)
- */
-export const loadTerrainTtp = async (
-    bbox3857: Extent,
-    options: { onProgress?: LoadProgress } = {},
-): Promise<TinMesh> => {
-    const { onProgress } = options
-    const t0 = performance.now()
-    onProgress?.("sheets", 0, 1)
-    const q = await getTtpSheetsInBbox(bbox3857)
-    // 범위 한도는 파일을 받기 전에 인덱스의 꼭짓점으로 미리 잰다(받고 나서 알려 주면 그 시간이 아깝다)
-    assertExtentWithinLimit(q.tiles)
-    const t1 = performance.now()
-    let downloaded = 0
-    onProgress?.("download", 0, q.sheets.length)
-    const files = await Promise.all(
-        q.sheets.map(async (s) => {
-            const file = parseTtp(await fetchGunzip(`${TTP_BASE}/${s.path}`))
-            onProgress?.("download", ++downloaded, q.sheets.length)
-            return file
-        }),
-    )
-    const t2 = performance.now()
-    const want = new Set(q.tiles.map((t) => t.map_id))
-    const allTiles = files.flatMap((f) => f.tiles)
-    const selected = allTiles.filter((t) => want.has(t.mapId))
-    console.log(
-        `TTP: 5K 파일 ${files.length}개(gen_flags ${files[0]?.genFlags}), 1K ${selected.length}/${allTiles.length}개 사용 (조회 ${Math.round(t1 - t0)}ms, 받기 ${Math.round(t2 - t1)}ms)`,
-    )
-    onProgress?.("merge", 0, selected.length)
-    const merged = mergeTtpTiles(selected, q.origin, onProgress)
-    // 걸친 1K 전체가 아니라 지도에서 그린 사각형만 남긴다(도엽 가장자리의 바늘 삼각형 제거, terrainClip 참고)
-    const [ox, oy] = q.origin
-    const selection = bboxToPolygon5179(bbox3857).map(([x, y]) => [x - ox, y - oy] as [number, number])
-    const t3 = performance.now()
-    const clipped = clipMeshToConvexPolygon(merged, selection)
-    console.log(`자르기 ${Math.round(performance.now() - t3)}ms`)
-    return clipped
 }

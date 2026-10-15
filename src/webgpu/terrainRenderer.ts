@@ -3,7 +3,6 @@ import { MeshChunk, TinMesh } from "../terrainData"
 import { hexToRgb, STOP_COUNT, stopsToUniform, TerrainTheme } from "../terrainTheme"
 import { createAoPasses } from "./ao"
 import { createSkyPass, sunDirection } from "./sky"
-import { computeVertexNormals, NORMAL_SMOOTH_ITERATIONS, smoothVertexNormals } from "../meshNormals"
 import type { AoDebugMode } from "./ao"
 import {
     Camera,
@@ -145,9 +144,6 @@ export const walkLighting = (debug: RenderDebug = {}): Lighting => ({
 /** 지형 표현 방식. tin: 정점 법선으로 부드럽게, stepped: 계단형(면 법선, 법선 버퍼 없음) */
 export type TerrainMode = "tin" | "stepped"
 
-/** 지형 밖의 레이어. 메쉬 하나를 통째로 받아 올리고(layerMeshUpdater) 전용 파이프라인으로 그린다 */
-export type OverlayLayerId = Exclude<LayerId, "terrain">
-
 /** 메쉬 정점 좌표의 범위. 원점을 뺀 로컬 좌표(m) 기준 */
 export type MeshBounds = {
     min: [number, number, number]
@@ -182,25 +178,6 @@ const renderBackgroundPassFactory =
         })
         backgroundPass.end()
     }
-
-/**
- * 메쉬 정점 좌표의 범위를 구한다. 카메라 초기 위치와 표고 색 범위에 쓴다.
- *
- * @param mesh 원점 기준 좌표의 메쉬
- * @returns 각 축의 최소·최대
- */
-export const meshBounds = (mesh: TinMesh): MeshBounds => {
-    const min: [number, number, number] = [Infinity, Infinity, Infinity]
-    const max: [number, number, number] = [-Infinity, -Infinity, -Infinity]
-    const p = mesh.positions
-    for (let i = 0; i < p.length; i += 3) {
-        for (let k = 0; k < 3; k++) {
-            if (p[i + k] < min[k]) min[k] = p[i + k]
-            if (p[i + k] > max[k]) max[k] = p[i + k]
-        }
-    }
-    return { min, max }
-}
 
 /**
  * 메쉬를 "버퍼 하나가 maxBytes 를 넘지 않는" 조각들로 나눈다. 넓은 범위에서 정점·인덱스 버퍼가
@@ -284,8 +261,8 @@ const float32x3Layout = (shaderLocation: number): GPUVertexBufferLayout => ({
  * 셰이더 모듈, 파이프라인(깊이 테스트 포함), uniform 버퍼, 바인드그룹은 여기서 한 번만 만든다.
  * 파이프라인은 셋이다: 지형 tin(좌표 + 정점 법선, 부드러운 음영), 지형 stepped(좌표만, 셰이더에서 면 법선),
  * buildings(좌표만, 면 법선, 건물색). uniform 버퍼는 모두 같이 쓰고, 바인드그룹만 파이프라인마다 만든다(layout "auto" 라서).
- * GPU 조각은 레이어별로 들고 있고(layerChunks), pass 는 보이는 레이어만 그린다(layerVisibilityUpdater).
- * 메쉬와 카메라는 반환하는 updater 로 버퍼만 바꾼다.
+ * GPU 조각은 도엽별로 들고 있고(streamTiles), pass 는 보이는 레이어만 그린다(layerVisibilityUpdater).
+ * 도엽과 카메라는 반환하는 updater 로 버퍼만 바꾼다.
  *
  * @param device GPU device
  * @param format 캔버스 텍스처 포맷
@@ -404,7 +381,7 @@ const createTerrainDrawingPassAndUpdaters = (
     }
     const shadowCascades = [createShadowCascade("far", shadowView), createShadowCascade("near", shadowViewNear)]
 
-    const pipelines: Record<TerrainMode | OverlayLayerId | "buildingHighlight", ReturnType<typeof createPipelineSet>> = {
+    const pipelines: Record<TerrainMode | "buildings" | "buildingHighlight", ReturnType<typeof createPipelineSet>> = {
         tin: createPipelineSet("terrain tin", createSmoothTerrainShader(), [
             float32x3Layout(0),
             float32x3Layout(1),
@@ -416,7 +393,6 @@ const createTerrainDrawingPassAndUpdaters = (
         buildingHighlight: createPipelineSet("building highlight", createBuildingHighlightShader(), [float32x3Layout(0)], { overlay: true }),
     }
 
-    let mode: TerrainMode = "tin"
     type GpuChunk = {
         vertexBuffer: GPUBuffer
         normalBuffer: GPUBuffer | null
@@ -425,8 +401,6 @@ const createTerrainDrawingPassAndUpdaters = (
         /** 원본 메쉬 인덱스 배열에서 이 조각이 시작하는 자리(조각이 삼각형 순서대로 나뉘므로). 건물 강조가 삼각형 범위를 조각 안 자리로 옮기는 데 쓴다 */
         indexStart: number
     }
-    /** 레이어별로 GPU 에 올라간 메쉬 조각들. 한 프레임에 보이는 레이어의 조각 수만큼 drawIndexed 한다 */
-    const layerChunks: Record<LayerId, GpuChunk[]> = { terrain: [], buildings: [] }
     const layerVisible: Record<LayerId, boolean> = { terrain: true, buildings: true }
 
     const destroyChunks = (chunks: GpuChunk[]) => {
@@ -454,78 +428,6 @@ const createTerrainDrawingPassAndUpdaters = (
     })
 
     /**
-     * 조각 단위 메쉬 교체를 시작한다. 조각을 하나씩 받아 올리는 함수들을 돌려주며, 조각이 나중에(Worker 메시지 등으로)
-     * 하나씩 도착해도 된다. 올라간 조각은 다음 프레임부터 바로 그려지므로 조각이 쌓이는 과정이 화면에 보인다.
-     *
-     * 이전 메쉬는 첫 조각이 올라갈 때(조각이 하나도 없으면 finish 때) 교체한다. 그때까지는 이전 지형이 그대로 보인다.
-     * 교체할 때 이전 조각들의 버퍼를 해제하고, 모드와 표고 범위(uniform offset 64)를 기록한다.
-     *
-     * @param options.mode 지형 표현 방식. tin 이면 조각에 normals 가 있어야 한다
-     * @param options.bounds 메쉬 전체의 정점 범위(표고 색 범위용)
-     * @returns maxBytes(조각의 버퍼 하나가 넘으면 안 되는 바이트 수), addChunk(조각 하나를 GPU 에 올림), finish(끝났음을 기록)
-     */
-    const meshStreamStarter = ({
-        mode: newMode,
-        bounds,
-    }: {
-        mode: TerrainMode
-        bounds: MeshBounds
-    }) => {
-        const maxBytes = device.limits.maxBufferSize
-        let started = false
-        let vertices = 0
-        let indices = 0
-        /** 실제로 올라간 조각 중 가장 큰 버퍼(바이트). 받는 쪽이 maxBytes 보다 작은 상한으로 끊었을 수 있어 로그에 같이 찍는다 */
-        let largestChunkBytes = 0
-
-        /** 이전 메쉬를 버리고 새 메쉬의 모드·표고 범위로 바꾼다. 첫 조각(또는 finish)에서 한 번만 실행된다 */
-        const start = () => {
-            started = true
-            mode = newMode
-            destroyChunks(layerChunks.terrain)
-            layerChunks.terrain = []
-            device.queue.writeBuffer(
-                uniformBuffer,
-                64,
-                new Float32Array([bounds.min[2], bounds.max[2]]),
-            )
-        }
-
-        const addChunk = (chunk: MeshChunk) => {
-            if (!started) start()
-            if (mode === "tin" && !chunk.normals) throw new Error("tin 모드 조각에는 normals 가 필요함")
-            layerChunks.terrain.push(uploadChunk("terrain", chunk))
-            vertices += chunk.positions.length / 3
-            indices += chunk.indices.length
-            largestChunkBytes = Math.max(largestChunkBytes, chunk.positions.byteLength, chunk.indices.byteLength)
-        }
-        const finish = () => {
-            if (!started) start()
-            console.log(
-                `GPU 버퍼(지형): ${layerChunks.terrain.length}조각 (가장 큰 조각 ${Math.round(largestChunkBytes / 1048576)}MB, device 한도 ${Math.round(maxBytes / 1048576)}MB, 정점 ${vertices}, 인덱스 ${indices})`,
-            )
-        }
-        return { maxBytes, addChunk, finish }
-    }
-
-    /**
-     * 지형 밖 레이어(건물 등)의 메쉬를 통째로 교체한다. 이전 조각을 해제하고, 버퍼 한도 안의 조각으로 나눠 올린다.
-     * 법선 버퍼는 쓰지 않는다(레이어 셰이더가 면 법선을 화면 미분으로 구함).
-     *
-     * @param id 레이어
-     * @param mesh 그릴 메쉬(지형과 같은 원점의 xyz). null 이면 비운다
-     */
-    const layerMeshUpdater = (id: OverlayLayerId, mesh: TinMesh | null) => {
-        destroyChunks(layerChunks[id])
-        layerChunks[id] = []
-        if (!mesh) return
-        for (const chunk of splitMeshIntoChunks(mesh.positions, mesh.indices, undefined, device.limits.maxBufferSize)) {
-            layerChunks[id].push(uploadChunk(id, chunk))
-        }
-        console.log(`GPU 버퍼(${id}): ${layerChunks[id].length}조각, 정점 ${mesh.positions.length / 3}, 인덱스 ${mesh.indices.length}`)
-    }
-
-    /**
      * 레이어를 그릴지 정한다(다음 프레임부터). 메쉬·버퍼는 그대로 두므로 바로 켜고 끌 수 있다.
      *
      * @param id 레이어
@@ -533,60 +435,6 @@ const createTerrainDrawingPassAndUpdaters = (
      */
     const layerVisibilityUpdater = (id: LayerId, visible: boolean) => {
         layerVisible[id] = visible
-    }
-
-    /**
-     * 조각을 동기로 내보내는 함수를 받아 메쉬를 교체한다(meshStreamStarter 를 한 번에 끝까지 돌리는 형태).
-     * 조각은 device.limits.maxBufferSize 안이어야 하므로 그 값을 chunks 함수에 넘겨 준다.
-     * 받는 즉시 올리고 버리므로 브라우저 메모리는 조각 하나 분량만 쓴다.
-     *
-     * @param options.mode 지형 표현 방식. tin 이면 조각에 normals 가 있어야 한다
-     * @param options.bounds 메쉬 전체의 정점 범위(표고 색 범위용)
-     * @param options.chunks 버퍼 최대 바이트 수를 받아 조각을 차례로 내보내는 함수
-     */
-    const streamedMeshUpdater = ({
-        mode,
-        bounds,
-        chunks,
-    }: {
-        mode: TerrainMode
-        bounds: MeshBounds
-        chunks: (maxBytes: number) => Iterable<MeshChunk>
-    }) => {
-        const stream = meshStreamStarter({ mode, bounds })
-        for (const chunk of chunks(stream.maxBytes)) stream.addChunk(chunk)
-        stream.finish()
-    }
-
-    /**
-     * 메쉬 하나를 통째로 받아 교체한다. tin 모드에서는 정점 법선을 computeVertexNormals 로 계산해
-     * smoothVertexNormals 로 부드럽게 한 뒤(전체 인접 관계가 필요해서 통째로 한다), splitMeshIntoChunks 로
-     * 버퍼 한도 안의 조각들로 나눠 streamedMeshUpdater 에 넘긴다.
-     *
-     * @param mesh 그릴 메쉬(원점을 뺀 xyz, 삼각형 인덱스)
-     * @param options.mode 지형 표현 방식. 기본 "tin"
-     * @returns 정점 범위. 카메라 초기 위치를 잡는 데 쓴다
-     */
-    const meshUpdater = (
-        mesh: TinMesh,
-        options: { mode?: TerrainMode } = {},
-    ): MeshBounds => {
-        const newMode = options.mode ?? "tin"
-        const normals =
-            newMode === "tin"
-                ? smoothVertexNormals(
-                      computeVertexNormals(mesh.positions, mesh.indices),
-                      mesh.indices,
-                      NORMAL_SMOOTH_ITERATIONS,
-                  )
-                : undefined
-        const bounds = meshBounds(mesh)
-        streamedMeshUpdater({
-            mode: newMode,
-            bounds,
-            chunks: (maxBytes) => splitMeshIntoChunks(mesh.positions, mesh.indices, normals, maxBytes),
-        })
-        return bounds
     }
 
     /**
@@ -718,7 +566,7 @@ const createTerrainDrawingPassAndUpdaters = (
 
     /**
      * 걸어 보기 스트리밍 도엽(walkTiles): 도엽 id → GPU 조각. 지형 조각은 계단형 파이프라인(면 법선, 법선 버퍼 없음)으로,
-     * 건물은 건물 파이프라인으로 그린다. 선택 범위 메쉬(layerChunks)와는 별개로 들고, 나가면 streamClearUpdater 로 모두 비운다
+     * 건물은 건물 파이프라인으로 그린다. 나가면 streamClearUpdater 로 모두 비운다. 선택 범위도 같은 도엽으로 온다(1K 도엽 통일, 계획서 7절 L)
      */
     type TileBounds = { min: [number, number]; max: [number, number] }
     const streamTiles = new Map<string, { terrain: GpuChunk[]; buildings: GpuChunk[]; mode: TerrainMode; bounds: TileBounds | null }>()
@@ -737,8 +585,6 @@ const createTerrainDrawingPassAndUpdaters = (
         const dy = Math.max(b.min[1] - eye[1], 0, eye[1] - b.max[1])
         return Math.hypot(dx, dy)
     }
-    /** 스트리밍 도엽이 선택 범위를 다 덮었으면 선택 메쉬(지형·건물)는 그리지 않는다(겹치면 z-fighting) */
-    let streamCovers = false
 
     /**
      * 도엽 하나를 올리거나(이전 것은 교체) 뺀다(null).
@@ -779,28 +625,20 @@ const createTerrainDrawingPassAndUpdaters = (
     const elevationRangeUpdater = (minZ: number, maxZ: number) => {
         device.queue.writeBuffer(uniformBuffer, 64, new Float32Array([minZ, maxZ]))
     }
-    const streamCoverUpdater = (covers: boolean) => {
-        streamCovers = covers
-    }
     const streamClearUpdater = () => {
         for (const t of streamTiles.values()) {
             destroyChunks(t.terrain)
             destroyChunks(t.buildings)
         }
         streamTiles.clear()
-        streamCovers = false
     }
     /**
-     * 이번 프레임에 그릴 (조각, 파이프라인) 목록: 선택 메쉬(스트리밍이 덮지 않았을 때) + 스트리밍 도엽.
+     * 이번 프레임에 그릴 (조각, 파이프라인) 목록: 스트리밍 도엽(거리 거르기 반경 안).
      *
      * @param radius 거리 거르기 반경(m). null 이면 모두 그린다
      */
     const collectDraws = (radius: number | null) => {
         const draws: { chunks: GpuChunk[]; set: ReturnType<typeof createPipelineSet> }[] = []
-        if (!streamCovers) {
-            if (layerVisible.terrain && layerChunks.terrain.length > 0) draws.push({ chunks: layerChunks.terrain, set: pipelines[mode] })
-            if (layerVisible.buildings && layerChunks.buildings.length > 0) draws.push({ chunks: layerChunks.buildings, set: pipelines.buildings })
-        }
         const eye = radius !== null ? lastEye : null
         for (const t of streamTiles.values()) {
             if (eye && t.bounds && distanceToBounds(eye, t.bounds) > radius!) continue
@@ -840,7 +678,7 @@ const createTerrainDrawingPassAndUpdaters = (
 
     /**
      * 장면을 그리는 pass. 배경 pass 가 비운 색·깊이 버퍼를 load 해서 그 위에 그린다.
-     * 보이는 레이어마다 파이프라인을 바꾸고(지형은 meshUpdater 가 정한 모드, 그 밖은 레이어 전용), 조각마다 버퍼를
+     * 보이는 레이어마다 파이프라인을 바꾸고(지형은 도엽이 들고 온 모드, 건물은 전용), 조각마다 버퍼를
      * 바꿔 가며 drawIndexed 한다(tin 모드에서만 법선 버퍼 바인딩). 그릴 조각이 없으면 아무것도 하지 않는다.
      *
      * @param encoder 이번 프레임의 command encoder
@@ -915,15 +753,10 @@ const createTerrainDrawingPassAndUpdaters = (
         setCameraListener,
         fogColorUpdater,
         streamTileUpdater,
-        streamCoverUpdater,
         streamClearUpdater,
         elevationRangeUpdater,
         cullRadiusUpdater,
         highlightUpdater,
-        meshUpdater,
-        meshStreamStarter,
-        streamedMeshUpdater,
-        layerMeshUpdater,
         layerVisibilityUpdater,
         cameraUpdater,
         aspectUpdater,
@@ -947,7 +780,7 @@ const createTerrainDrawingPassAndUpdaters = (
  * @param options.height 캔버스 실제 픽셀 높이
  * @param options.backgroundColor 처음 배경색(0 ~ 1). backgroundUpdater 로 바꿀 수 있다
  * @param options.debug 처음 렌더 디버그 설정(태양 고도·AO 디버그 출력). debugUpdater 로 바꿀 수 있다. 운영은 생략
- * @returns render(한 프레임 그리기), updaters(meshUpdater, meshStreamStarter, streamedMeshUpdater, layerMeshUpdater,
+ * @returns render(한 프레임 그리기), updaters(streamTileUpdater, streamClearUpdater, elevationRangeUpdater, cullRadiusUpdater,
  *   layerVisibilityUpdater, cameraUpdater, paletteUpdater, lightingUpdater, backgroundUpdater, resizeUpdater, debugUpdater), destroy(device 해제)
  */
 export const createTerrainRenderFunctionAndUpdateFunctions = async ({

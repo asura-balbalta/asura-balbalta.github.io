@@ -51,7 +51,7 @@ export type WalkStart = {
  * 메쉬 범위에 맞춘 초기 카메라를 만든다.
  * 메쉬 중심을 바라보고, 남쪽에서 약 34° 높이로 내려다보며, 메쉬 가로·세로 중 긴 쪽의 1.2배 거리에 둔다.
  *
- * @param bounds meshUpdater 가 돌려준 정점 범위
+ * @param bounds 정점 범위(선택 xy + 첫 도엽 z)
  * @returns 궤도 카메라 초기 상태
  */
 const initialCamera = ({ min, max }: MeshBounds): OrbitCamera => ({

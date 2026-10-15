@@ -35,7 +35,7 @@ type Sheet50kIndex = {
     }[]
 }
 
-/** 범위 조회 결과. 개발 서버 `/ttm/sheets` 응답(TtmSheetsInBbox)과 같은 모양이라 로더가 그대로 쓴다 */
+/** 범위 조회 결과(옛 개발 서버 `/ttm/sheets` 응답과 같은 모양) */
 export type TtpSheetsInBbox = {
     /** 공통 원점(정수 m, 5179). 서버 규칙과 같게 선택 범위를 5179 로 바꾼 외접 bbox 의 남서 모서리를 내린 값 */
     origin: [number, number]

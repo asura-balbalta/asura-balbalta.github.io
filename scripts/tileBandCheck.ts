@@ -203,7 +203,7 @@ const run = async () => {
             retries += r.attempts - 1
             usedBand = Math.max(...r.sides)
         } else {
-            merged = quiet(() => mergeTtpTiles(ttpTiles, origin, undefined, band > 0 ? bandExtent(poly, band) : undefined))
+            merged = quiet(() => mergeTtpTiles(ttpTiles, origin, band > 0 ? bandExtent(poly, band) : undefined))
         }
         const requiredBand = band === 0 ? Math.max(...circumcircleOverflow(merged, poly, tileExtent)) : 0
         const requiredBandEdge = band === 0 ? Math.max(...circumcircleOverflow(merged, poly, tileExtent, true)) : 0
