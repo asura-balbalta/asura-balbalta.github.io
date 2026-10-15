@@ -28,7 +28,7 @@ export type BuildJob = {
     type: "build"
     jobId: number
     tile: QueryTile
-    /** 이 도엽과 맞닿은 이웃(3×3, 자신 포함) */
+    /** 이 도엽의 이웃 두 겹(5×5, 자신 포함) */
     neighbors: QueryTile[]
     /** 이웃이 든 5K 파일 경로 */
     sheets: { id5k: string; path: string }[]
@@ -49,7 +49,7 @@ const TIN_CACHE_BYTES = 256 * 1048576
 /** 5K 파일 캐시 상한(개) */
 const TTP_CACHE_MAX = 64
 /**
- * 이웃 합치기의 경계 띠 폭(m, L5-C 2026-10-15). 도엽 하나를 만들 때 이웃 3×3 전체 대신 도엽 범위를 이만큼 넓힌 범위 안의 점만 합쳐
+ * 이웃 합치기의 경계 띠 폭(m, L5-C 2026-10-15). 도엽 하나를 만들 때 이웃 5×5 전체 대신 도엽 범위를 이만큼 넓힌 범위 안의 점만 합쳐
  * 삼각분할하고, 외접원이 띠 밖으로 나가는 쪽만 넓혀 다시 한다(terrainPslg.ts mergeTtpTilesForTile. 결과는 전체 합침과 같다).
  * 폭은 scripts/tileBandCheck.ts 로 50·100·200 m 를 재어 정했다. style.band 가 있으면 그 값(0 = 이웃 전체, 옛 동작. 디버그 페이지 band=)
  */

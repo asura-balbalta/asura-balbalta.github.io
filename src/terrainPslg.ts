@@ -400,25 +400,24 @@ export const mergeTtpTiles = (
         }
         return poly
     })
-    onProgress?.("retriangulate", 0, 1)
     return retriangulate(merged, tilePolygons, coords.subarray(0, 2 * n))
 }
 
-/** 적응 띠에서 한쪽 띠 폭이 이 값(m) 이상이 되면 그쪽은 제한을 푼다(1K 짧은 변 400 m. 이웃 3×3 은 400 ~ 500 m 까지라 더 넓혀도 같다) */
-const BAND_MAX = 400
+/** 적응 띠에서 한쪽 띠 폭이 이 값(m) 이상이 되면 그쪽은 제한을 푼다(이웃 두 겹(5×5)은 800 ~ 1000 m 까지라 더 넓혀도 같다) */
+const BAND_MAX = 900
 /** 적응 띠를 넓힐 때 나간 거리에 곱하는 배수. 2 로 해도 재시도가 줄지 않고(충주 330개 233 → 230) 한쪽 무한이 늘어 더 느렸다 → 1 */
 const BAND_GROW = 1
 
 /**
  * 도엽 하나를 위한 이웃 합치기·삼각분할(L5-C, 2026-10-15). 도엽 범위를 띠 폭 band 만큼 넓힌 범위의 점만 합쳐 삼각분할하고
  * (mergeTtpTiles 의 keep), 도엽에 걸친 삼각형의 외접원이 그 범위 밖으로 나가면(circumcircleOverflow) 나간 쪽만 그 거리만큼 넓혀
- * 다시 한다. 한쪽이 BAND_MAX 를 넘으면 그쪽은 제한 없음. 결과는 이웃 3×3 전체를 합친 것과 같다(빈 원 조건이 범위 안에서 닫히므로).
- * band 가 0 이면 이웃 전체를 한 번에 합친다(옛 동작).
+ * 다시 한다. 한쪽이 BAND_MAX 를 넘으면 그쪽은 제한 없음. 결과는 넘긴 이웃(5×5) 전체를 합친 것과 같다(빈 원 조건이 범위 안에서 닫히므로).
+ * band 가 0 이면 이웃 전체를 한 번에 합친다(옛 동작. 5×5 라 느리다).
  *
  * 고정 띠만으로는 안 되는 이유(측정, scripts/tileBandCheck.ts): 점이 성긴 곳(농지·강)은 띠 안에 점이 없어 꼭짓점끼리 큰 삼각형으로
  * 메워진다(충주 330개 띠 200 m: 전체 대비 최대 52 m). 서울 도심처럼 점이 촘촘한 곳은 100 m 로 충분하다.
  *
- * @param tiles 도엽과 이웃(3×3)의 ttp 1K
+ * @param tiles 도엽과 이웃(5×5)의 ttp 1K
  * @param commonOrigin 공통 원점(정수 m)
  * @param poly 도엽 폴리곤(원점 기준 m)
  * @param band 띠 폭(m). 0 이면 이웃 전체

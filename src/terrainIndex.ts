@@ -62,6 +62,15 @@ const fetchJsonCached = <T>(url: string): Promise<T> => {
 
 const extentsOverlap = (a: Extent, b: Extent) => a[0] <= b[2] && b[0] <= a[2] && a[1] <= b[3] && b[1] <= a[3]
 
+/**
+ * 도엽 bbox 를 자기 크기 + 1 m 만큼 넓힌 범위. 이것과 bbox 가 겹치는 도엽이 이웃 두 겹(5×5)이다(세 겹째는 한 변 크기만큼 더 멀다).
+ * 조정자(terrainTiles.worker)와 측정 스크립트(scripts/tileBandCheck.ts)가 같은 규칙을 쓴다
+ */
+export const neighborReach = (bbox: Extent): Extent => {
+    const w = bbox[2] - bbox[0] + 1, h = bbox[3] - bbox[1] + 1
+    return [bbox[0] - w, bbox[1] - h, bbox[2] + w, bbox[3] + h]
+}
+
 const extentOf = (pts: [number, number][]): Extent => {
     const xs = pts.map((p) => p[0])
     const ys = pts.map((p) => p[1])

@@ -30,7 +30,7 @@ import { computeVertexNormals, NORMAL_SMOOTH_ITERATIONS, smoothVertexNormals } f
 import { ClippedMesh, clipMeshToConvexPolygon } from "../src/terrainClip"
 import { fetchGunzip, TinMesh } from "../src/terrainData"
 import { createHeightSampler, HeightSampler } from "../src/terrainHeight"
-import { getTtpSheetsInBbox, TTP_BASE } from "../src/terrainIndex"
+import { getTtpSheetsInBbox, neighborReach, TTP_BASE } from "../src/terrainIndex"
 import { bandExtent, circumcircleOverflow, mergeTtpTiles, mergeTtpTilesForTile, parseTtp, TtpTile } from "../src/terrainPslg"
 
 type Args = { bbox: Extent; bands: number[]; grid: number; out: string; adaptive: "" | "all" | "edge" }
@@ -164,7 +164,7 @@ const run = async () => {
     }
 
     // 1) 조회: 선택 도엽과 이웃(조정자 select 와 같은 여유)
-    const margin = 900
+    const margin = 1650
     const [qSel, qAll] = await Promise.all([
         getTtpSheetsInBbox(args.bbox),
         getTtpSheetsInBbox([args.bbox[0] - margin, args.bbox[1] - margin, args.bbox[2] + margin, args.bbox[3] + margin]),
@@ -187,8 +187,7 @@ const run = async () => {
 
     // 3) 띠 폭마다 선택 도엽 전부 만들기(보조 워커와 같은 순서)
     const buildOne = (t: (typeof qSel.tiles)[number], band: number): Built => {
-        const expanded: Extent = [t.bbox[0] - 1, t.bbox[1] - 1, t.bbox[2] + 1, t.bbox[3] + 1]
-        const neighbors = qAll.tiles.filter((n) => extentsOverlap(n.bbox, expanded))
+        const neighbors = qAll.tiles.filter((n) => extentsOverlap(n.bbox, neighborReach(t.bbox)))
         const ttpTiles = neighbors.map((n) => ttpById.get(n.map_id)).filter((x): x is TtpTile => !!x)
         const poly = t.corners.map(([x, y]) => [x - ox, y - oy] as [number, number])
         const tileExtent = bandExtent(poly, 0)

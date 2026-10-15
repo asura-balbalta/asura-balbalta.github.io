@@ -3,7 +3,7 @@ import proj4 from "proj4"
 
 import type { BuildingTable } from "./buildingTable"
 import type { MeshChunk, TinMesh } from "./terrainData"
-import { getTtpSheetsInBbox } from "./terrainIndex"
+import { getTtpSheetsInBbox, neighborReach } from "./terrainIndex"
 import type { BuildRequest, BuildResponse } from "./terrainTileBuild.worker"
 import type { TerrainMode } from "./webgpu/terrainRenderer"
 
@@ -98,8 +98,8 @@ export type QueryTile = Query["tiles"][number]
 
 /** 반경의 이 배수 밖으로 나간 밖 도엽을 뺀다(들락날락 방지) */
 const REMOVE_RATIO = 1.5
-/** 이웃 도엽을 같이 조회하려고 반경·범위에 더하는 여유(m). 1K 한 변(500 m)보다 크게 */
-const NEIGHBOR_MARGIN = 600
+/** 이웃 도엽을 같이 조회하려고 반경·범위에 더하는 여유(m). 이웃 두 겹(5×5, 1K 한 변 500 m × 2)보다 크게 */
+const NEIGHBOR_MARGIN = 1100
 /** esbuild 가 src/terrainTileBuild.worker.ts 를 별도 entry 로 묶어 내는 파일(dist, 이 워커와 같은 폴더) */
 const BUILD_WORKER_URL = "terrainTileBuild.worker.js"
 /** 보조 워커 수: 코어 수에서 메인·조정자 몫을 빼고 1 ~ 3 */
@@ -196,7 +196,10 @@ let generation = 0
 let running = false
 
 /**
- * 도엽 하나를 보조 워커에 맡겨 만든다. 이웃(3×3)과 그 5K 경로를 조회 결과에서 골라 같이 보낸다
+ * 도엽 하나를 보조 워커에 맡겨 만든다. 이웃(5×5, 두 겹)과 그 5K 경로를 조회 결과에서 골라 같이 보낸다.
+ * 두 겹인 이유(L5-C 뒤, 2026-10-15): 점이 성긴 곳(농지)은 도엽에 걸친 삼각형의 외접원이 한 겹(400 ~ 500 m)을 넘어 이웃끼리
+ * 삼각형이 달라지고 경계에 균열이 났다(충주 330개 공유 변 표본 536곳 >1 cm). 보조 워커는 띠 범위만 합치므로 두 겹을 줘도 비용은
+ * 성긴 쪽으로 넓힐 때만 든다
  *
  * @param t 만들 도엽
  * @param q 이웃을 찾을 조회 결과(도엽 주변 여유를 포함한 것)
@@ -205,8 +208,7 @@ let running = false
 const buildTile = (t: QueryTile, q: Query, extra: boolean): Promise<TileData> => {
     const c = cfg!
     ensureHelpers()
-    const expanded: Extent = [t.bbox[0] - 1, t.bbox[1] - 1, t.bbox[2] + 1, t.bbox[3] + 1]
-    const neighbors = q.tiles.filter((n) => extentsOverlap(n.bbox, expanded))
+    const neighbors = q.tiles.filter((n) => extentsOverlap(n.bbox, neighborReach(t.bbox)))
     const ids5k = new Set(neighbors.map((n) => n.id5k))
     const sheets = q.sheets.filter((s) => ids5k.has(s.id5k)).map((s) => ({ id5k: s.id5k, path: s.path }))
     const jobId = nextJobId++
