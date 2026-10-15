@@ -152,8 +152,12 @@ const addTerrainSlabs = (builder: Builder, mesh: TinMesh, step: number, progress
  * 건물 k 의 고리는 건물 표에서 꺼낸다(buildingRings: mm 원본 좌표, 외곽 반시계·구멍 시계로 맞춤). 바닥 z 는 표의 바닥 높이에서
  * WALL_SINK_M 만큼 묻힌 높이(메쉬의 아래 고리와 같다), 지붕 z 는 바닥 높이 + 세운 높이다. 지붕은 그대로, 바닥은 뒤집어 넣고,
  * 벽은 영역을 왼쪽에 두고 걷는 변 p→q 에 [p아래, q아래, q위, p위] 로 넣어 바깥을 향하게 한다(addTerrainSlabs 와 같은 규칙).
- * 정의 이름은 "building-<전국 고유 번호>", 그룹 인스턴스 이름은 "번호 (층수F, 높이m)"(buildingLabel)이고, 정의의 attribute dictionary "asrbbt" 에 건물 속성
- * (buildingAttributes)을 적는다. 지형 밖이라 못 세운 건물은 넣지 않는다. 면 생성이 실패한(점이 겹치거나 일직선인) 면은 건너뛴다.
+ * 건물마다 일반 그룹이다: 이름은 "용도 (층수F, 높이m)"(buildingLabel), 그룹의 attribute dictionary "asrbbt" 에 건물 속성(buildingAttributes)을
+ * 적는다. openskp 는 중첩 그룹을 "정의를 만든 뒤 addGroupInstance 로 놓기" 로만 지원하므로 정의를 거치지만(SKP 형식은 모든 그룹이 내부
+ * 정의를 하나 갖는다. 최상위 addGroup 도 같다), 정의 이름은 그룹 이름과 같게 두고 속성은 정의가 아니라 그룹 배치에 붙인다
+ * (2026-10-15 결정 by @nanangqq: 배경 건물은 재사용할 컴포넌트가 아니므로 일반 그룹 + 그룹 속성. 전에는 정의 "building-번호" 에 속성을 붙여
+ * SketchUp 에서 그룹을 골라도 속성이 안 보이고 openskp 로도 읽히지 않았다). 지형 밖이라 못 세운 건물은 넣지 않는다. 면 생성이 실패한
+ * (점이 겹치거나 일직선인) 면은 건너뛴다.
  *
  * @param progress 이 레이어 안의 진행률(0 ~ 1)
  * @returns 건너뛴 면 수
@@ -165,18 +169,19 @@ const addBuildingGroups = (builder: Builder, table: BuildingTable, progress: (ra
     let skipped = 0
     const defs: ReturnType<Builder["addComponentDefinition"]>[] = []
     const names: string[] = []
+    const attributes: ReturnType<typeof buildingAttributes>[] = []
     for (let k = 0; k < table.count; k++) {
         if (table.vertexBase[k] === NOT_BUILT) continue
         const rings = buildingRings(table, k)
         if (rings.length === 0) continue
         const zBottom = table.baseZ[k] - WALL_SINK_M
         const zTop = table.baseZ[k] + table.builtHeight[k]
-        const name = String(table.ids[k])
         const groupName = buildingLabel(table, k)
         names.push(groupName)
+        attributes.push(buildingAttributes(table, k))
         defs.push(
             builder.addComponentDefinition(
-                `building-${name}`,
+                groupName,
                 (def) => {
                     const face = (points: Point3[], holes?: Point3[][]) => {
                         try {
@@ -202,14 +207,13 @@ const addBuildingGroups = (builder: Builder, table: BuildingTable, progress: (ra
                         }
                     }
                 },
-                { attributes: buildingAttributes(table, k), attributeDictName: "asrbbt" },
             ),
         )
         if (k % 500 === 499) progress((k + 1) / table.count)
     }
     builder.addGroup(
         (group) => {
-            defs.forEach((def, i) => group.addGroupInstance(def, { name: names[i] }))
+            defs.forEach((def, i) => group.addGroupInstance(def, { name: names[i], attributes: attributes[i], attributeDictName: "asrbbt" }))
         },
         { name: "buildings" },
     )
