@@ -15,6 +15,7 @@ import type { RenderDebug } from "../webgpu/terrainRenderer"
  * - spawn: 시작 xy(메쉬 로컬, m. 메쉬 origin 을 뺀 EPSG:5179). 없으면 범위 가운데
  * - yaw·pitch: 시작 방향(°, yaw 0 = 동쪽·반시계, 90 = 북쪽)·위아래(°, 위로 +). 없으면 북쪽·수평
  * - ao·shadow·sky: 0 이면 끔. edge: 외곽선 세기(0 ~ 1). sun: 태양 고도(°). aodebug: SSAO 디버그 출력 모드(ao.ts AoDebugMode 0 ~ 6)
+ * - aoradius·aobias: SSAO 표본 반지름·깊이 여유(m, 기본 1.2·0.03). 띠·후광이 어느 항에 반응하는지 가를 때
  * - walkradius: 둘러보기 중 장면에 그릴 반경(m, 기본 5000). 0 이면 모두 그림
  * - resident: 둘러보기 중 GPU 에 올려 둘 반경(m, 기본 walkradius 와 같음). 0 이면 내리지 않음(옛 동작)
  * - band: 도엽 생성 때 이웃을 합치는 경계 띠 폭(m). 0 이면 이웃 3×3 전체(옛 동작). 없으면 기본값. 범위 확정 때만 적용된다
@@ -51,8 +52,8 @@ export const parseWalkParams = (params: URLSearchParams): { preset: AppPreset; r
     const spawnValues = numberList(params.get("spawn"), 2)
     if (params.has("spawn") && !spawnValues) notes.push("spawn 형식 오류(x,y)")
     const aodebugRaw = number(params, "aodebug")
-    const aodebug = aodebugRaw !== undefined && Number.isInteger(aodebugRaw) && aodebugRaw >= 0 && aodebugRaw <= 6 ? (aodebugRaw as AoDebugMode) : undefined
-    if (params.has("aodebug") && aodebug === undefined) notes.push("aodebug 는 0 ~ 6")
+    const aodebug = aodebugRaw !== undefined && Number.isInteger(aodebugRaw) && aodebugRaw >= 0 && aodebugRaw <= 8 ? (aodebugRaw as AoDebugMode) : undefined
+    if (params.has("aodebug") && aodebug === undefined) notes.push("aodebug 는 0 ~ 8")
     const preset: AppPreset = {
         bbox: (bboxValues as Extent | null) ?? undefined,
         walk: !!bboxValues && params.get("walk") !== "0",
@@ -71,6 +72,8 @@ export const parseWalkParams = (params: URLSearchParams): { preset: AppPreset; r
         edge: number(params, "edge"),
         sun: number(params, "sun"),
         aodebug,
+        aoRadius: number(params, "aoradius"),
+        aoBias: number(params, "aobias"),
         pointerLock: flag(params, "lock"),
         mouseLook: flag(params, "look"),
         pick: flag(params, "pick"),

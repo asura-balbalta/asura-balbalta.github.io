@@ -118,6 +118,10 @@ export type RenderDebug = {
     pick?: boolean
     /** 도엽 생성 때 이웃을 합치는 경계 띠 폭(m). 0 이면 이웃 전체(옛 동작). 없으면 보조 워커 기본값(terrainTileBuild.worker.ts) */
     band?: number
+    /** SSAO 표본 반지름(m). 없으면 ao.ts AO_PARAMS.radius */
+    aoRadius?: number
+    /** SSAO 깊이 비교 여유(m). 없으면 AO_PARAMS.bias */
+    aoBias?: number
 }
 /**
  * 둘러보기 중 장면에 그릴 반경(m). 이보다 먼 도엽은 그리지 않는다(L4, 2026-10-14). 안개 1/1200 에서 5 km 의 가시도는 약 1.5 % 라
@@ -864,6 +868,7 @@ export const createTerrainRenderFunctionAndUpdateFunctions = async ({
         debug = next
         refreshPalette()
         sky.setSun(currentSun())
+        ao.setParams({ radius: next.aoRadius, bias: next.aoBias })
     }
 
     /**

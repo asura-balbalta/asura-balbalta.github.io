@@ -42,7 +42,7 @@ const AO_UNIFORM_SIZE = 208
  * 1 흐린 AO(대비 8배) · 2 흐림 전 AO(대비 8배) · 3 복원 법선(n·0.5+0.5) · 4 거리 등고선(fract(d/0.25)) ·
  * 5 이웃 행(아래)과의 거리 차 ×10 · 6 같은 차폐 계산을 전해상도로(대비 8배. 반해상도 pass 의 읽기 문제를 가르는 비교용)
  */
-export type AoDebugMode = 0 | 1 | 2 | 3 | 4 | 5 | 6
+export type AoDebugMode = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8
 /** 합성 pass 옵션. ao 가 꺼지면(그리고 debug 가 0 이면) 차폐·흐림 pass 를 건너뛰고 외곽선만 */
 export type CompositeOptions = { ao: boolean; edge: number; fogDensity: number; debug: AoDebugMode }
 
@@ -118,13 +118,18 @@ const aoCommon = /* wgsl */ `
 
     // 깊이 픽셀 c0 의 차폐(1 = 밝음). cell 은 4×4 타일 안의 자리(회전 패턴). AO pass(반해상도)와 디버그 6(전해상도 비교)이 같은 함수를 쓴다
     fn aoAtPixel(c0: vec2i, cell: vec2u) -> f32 {
+        return aoDiag(c0, cell).x;
+    }
+    // 차폐와 진단값(디버그 7·8, 2026-10-15 벽 띠 좁히기): x = 차폐(1 = 밝음), y = 표본마다 (표본 거리 − 장면 점 거리)/반지름의 평균을
+    // 0.5 + 0.5 × clamp(-1, 1) 로(0.5 = 같은 깊이, 1 = 장면 점이 반지름만큼 앞), z = 장면 점이 P 의 접평면 5 cm 안에 있는 표본 비율
+    fn aoDiag(c0: vec2i, cell: vec2u) -> vec3f {
         let uv = pixelUv(c0);
         let d = depthAtPixel(c0);
-        if (d <= 0.0) { return 1.0; } // 배경(역순 깊이: 0 이 가장 멀다)
+        if (d <= 0.0) { return vec3f(1.0, 0.5, 0.0); } // 배경(역순 깊이: 0 이 가장 멀다)
         let P = worldAt(uv, d);
         let dist = length(P);
         let maxDist = a.params.z;
-        if (dist > maxDist) { return 1.0; }
+        if (dist > maxDist) { return vec3f(1.0, 0.5, 0.0); }
 
         // 법선: 좌우·상하 이웃 중 깊이 차가 작은 쪽으로 위치 차를 잡아 모서리에서 번지지 않게
         let Pr = worldAtPixel(c0 + vec2i(1, 0));
@@ -142,6 +147,8 @@ const aoCommon = /* wgsl */ `
         let bias = a.params.x + dist * a.params.w;
         let P0 = P + n * (dist * a.offset.x);
         var occlusion = 0.0;
+        var offsetSum = 0.0;
+        var onPlane = 0.0;
         for (var i = 0u; i < SAMPLE_COUNT; i = i + 1u) {
             let k = KERNEL[i];
             let s = P0 + (t * k.x + b * k.y + n * k.z) * a.radius;
@@ -155,10 +162,12 @@ const aoCommon = /* wgsl */ `
             // 표본보다 앞에 뭔가 있으면 가려진 것. 너무 멀리 떨어진 것(다른 물체)은 반지름 비율로 약하게
             let range = smoothstep(0.0, 1.0, a.radius / max(abs(dist - sceneDist), 1e-3));
             occlusion = occlusion + select(0.0, 1.0, sceneDist < sampleDist - bias) * range;
+            offsetSum = offsetSum + clamp((sampleDist - sceneDist) / a.radius, -1.0, 1.0);
+            onPlane = onPlane + select(0.0, 1.0, abs(dot(S - P, n)) < 0.05);
         }
         var ao = 1.0 - (occlusion / f32(SAMPLE_COUNT)) * a.params.y;
         ao = mix(ao, 1.0, smoothstep(maxDist * 0.6, maxDist, dist));
-        return ao;
+        return vec3f(ao, 0.5 + 0.5 * offsetSum / f32(SAMPLE_COUNT), onPlane / f32(SAMPLE_COUNT));
     }
 `
 
@@ -249,6 +258,8 @@ const compositeShader = (): GPUShaderModuleDescriptor => ({
             return contrast8(textureLoad(rawAoTex, ac, 0).r);
         }
         if (mode == 6) { return contrast8(aoAtPixel(c, vec2u(fragXY) % 4u)); }
+        if (mode == 7) { return vec4f(vec3f(aoDiag(c, vec2u(fragXY) % 4u).y), 1.0); }
+        if (mode == 8) { return vec4f(vec3f(aoDiag(c, vec2u(fragXY) % 4u).z), 1.0); }
         let P = worldAtPixel(c);
         if (mode == 4) { return vec4f(vec3f(fract(length(P) / 0.25)), 1.0); }
         let Pd = worldAtPixel(c + vec2i(0, 1));
@@ -412,6 +423,15 @@ export const createAoPasses = (device: GPUDevice, format: GPUTextureFormat) => {
         device.queue.writeBuffer(uniformBuffer, 64, invViewProj)
         device.queue.writeBuffer(uniformBuffer, 128, new Float32Array(eye))
     }
+    /**
+     * 표본 반지름·깊이 여유를 바꾼다(디버그 페이지 aoradius=·aobias=, 2026-10-15 벽 윗모서리 띠 좁히기용). 없으면 AO_PARAMS 기본값
+     *
+     * @param radius 표본 반구 반지름(m)
+     * @param bias 깊이 비교 여유(m)
+     */
+    const setParams = ({ radius, bias }: { radius?: number; bias?: number }) => {
+        device.queue.writeBuffer(uniformBuffer, 140, new Float32Array([radius ?? AO_PARAMS.radius, bias ?? AO_PARAMS.bias]))
+    }
 
     const fullscreen = (
         encoder: GPUCommandEncoder,
@@ -464,6 +484,7 @@ export const createAoPasses = (device: GPUDevice, format: GPUTextureFormat) => {
         /** 장면을 그릴 오프스크린 색 텍스처 view(resize 뒤에 있다) */
         sceneView: () => targets?.sceneView ?? null,
         setCamera,
+        setParams,
         resize,
         run,
         destroy: () => {
