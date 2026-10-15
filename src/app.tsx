@@ -508,7 +508,7 @@ function App({
         setTerrainProgress(null)
         setSelection(bbox)
         setSheetCount(null)
-        tiles.select(bbox, { mode, step: stepInterval })
+        tiles.select(bbox, { mode, step: stepInterval, band: renderDebug?.band })
     }
     /** 도엽 집합의 일을 상태로 옮긴다. 구독은 한 번만 하고, 처리 함수는 최신 상태를 보도록 ref 로 */
     const onTilesEventRef = useRef<(event: TerrainTilesEvent) => void>(() => {})
@@ -595,7 +595,7 @@ function App({
         if (terrain) {
             setBusy(true)
             setTerrainProgress(null)
-            tiles.setStyle({ mode: next, step: stepInterval })
+            tiles.setStyle({ mode: next, step: stepInterval, band: renderDebug?.band })
         }
     }
 
@@ -606,7 +606,7 @@ function App({
         if (terrain && mode === "stepped") {
             setBusy(true)
             setTerrainProgress(null)
-            tiles.setStyle({ mode, step: next })
+            tiles.setStyle({ mode, step: next, band: renderDebug?.band })
         }
     }
 

@@ -115,6 +115,8 @@ export type RenderDebug = {
     mouseLook?: boolean
     /** false 면 둘러보기 중 조준점의 건물 찾기(강조·조준점 옆 정보)를 끈다(TerrainViewCanvas·buildingPick.ts) */
     pick?: boolean
+    /** 도엽 생성 때 이웃을 합치는 경계 띠 폭(m). 0 이면 이웃 전체(옛 동작). 없으면 보조 워커 기본값(terrainTileBuild.worker.ts) */
+    band?: number
 }
 /**
  * 둘러보기 중 장면에 그릴 반경(m). 이보다 먼 도엽은 그리지 않는다(L4, 2026-10-14). 안개 1/1200 에서 5 km 의 가시도는 약 1.5 % 라

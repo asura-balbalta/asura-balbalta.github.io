@@ -8,7 +8,7 @@ import { computeVertexNormals, NORMAL_SMOOTH_ITERATIONS, positionsBounds, smooth
 import { ClippedMesh, clipMeshToConvexPolygon } from "./terrainClip"
 import { fetchGunzip, MeshChunk, TinMesh } from "./terrainData"
 import { TTP_BASE } from "./terrainIndex"
-import { mergeTtpTiles, parseTtp, TtpTile } from "./terrainPslg"
+import { mergeTtpTilesForTile, parseTtp, TtpTile } from "./terrainPslg"
 import { buildSteppedMeshChunks } from "./terrainSteps"
 import type { QueryTile, TileData, TileStyle } from "./terrainTiles.worker"
 
@@ -48,6 +48,12 @@ export type BuildResponse =
 const TIN_CACHE_BYTES = 256 * 1048576
 /** 5K 파일 캐시 상한(개) */
 const TTP_CACHE_MAX = 64
+/**
+ * 이웃 합치기의 경계 띠 폭(m, L5-C 2026-10-15). 도엽 하나를 만들 때 이웃 3×3 전체 대신 도엽 범위를 이만큼 넓힌 범위 안의 점만 합쳐
+ * 삼각분할하고, 외접원이 띠 밖으로 나가는 쪽만 넓혀 다시 한다(terrainPslg.ts mergeTtpTilesForTile. 결과는 전체 합침과 같다).
+ * 폭은 scripts/tileBandCheck.ts 로 50·100·200 m 를 재어 정했다. style.band 가 있으면 그 값(0 = 이웃 전체, 옛 동작. 디버그 페이지 band=)
+ */
+const NEIGHBOR_BAND_M = 100
 
 const post = (msg: BuildResponse, transfer: Transferable[] = []) => self.postMessage(msg, { transfer })
 
@@ -182,9 +188,18 @@ const buildTile = async (job: BuildJob): Promise<{ data: TileData; transfer: Tra
     const t0 = performance.now()
     const poly = t.corners.map(([x, y]) => [x - ox, y - oy] as [number, number])
     const needNormals = style.mode === "tin"
-    /** 이웃을 합친 메쉬. 캐시가 맞으면 만들지 않는다(건물 바닥 높이에 필요하면 그때 만든다) */
+    const band = style.band ?? NEIGHBOR_BAND_M
+    /** 이웃을 합친 메쉬(띠 범위만, 외접원 검사로 넓힘). 캐시가 맞으면 만들지 않는다(건물 바닥 높이에 필요하면 그때 만든다) */
     let merged: TinMesh | null = null
-    const mergedMesh = () => (merged ??= mergeTtpTiles(ttpTiles, origin))
+    let mergeNote = ""
+    const mergedMesh = () => {
+        if (!merged) {
+            const r = mergeTtpTilesForTile(ttpTiles, origin, poly, band)
+            merged = r.mesh
+            mergeNote = band > 0 ? `띠 ${r.sides.map((s) => (s === Infinity ? "∞" : s)).join("/")}m ${r.attempts}회` : "전체"
+        }
+        return merged
+    }
     const cachedTin = tinCacheGet(t.map_id)
     let tin: ClippedMesh
     let fromCache = false
@@ -244,7 +259,7 @@ const buildTile = async (job: BuildJob): Promise<{ data: TileData; transfer: Tra
         }
     }
     console.log(
-        `도엽 ${t.name}${extra ? "(밖)" : ""}: ${fromCache ? "캐시" : `이웃 ${ttpTiles.length}개 합침`} ${Math.round(t1 - t0)}ms, ${style.mode} ${Math.round(t2 - t1)}ms, 삼각형 ${tin.indices.length / 3}, 건물 ${built}${cached ? "(캐시)" : ""}, ${Math.round(performance.now() - t2)}ms`,
+        `도엽 ${t.name}${extra ? "(밖)" : ""}: ${fromCache ? "캐시" : `이웃 ${ttpTiles.length}개 ${mergeNote} 합침`} ${Math.round(t1 - t0)}ms, ${style.mode} ${Math.round(t2 - t1)}ms, 삼각형 ${tin.indices.length / 3}, 건물 ${built}${cached ? "(캐시)" : ""}, ${Math.round(performance.now() - t2)}ms`,
     )
 
     const xy = positionsBounds(tin.positions)

@@ -27,6 +27,8 @@ export type TileStyle = {
     mode: TerrainMode
     /** 계단형 층 간격(m). mode 가 stepped 일 때만 쓴다 */
     step: number
+    /** 이웃 합치기의 경계 띠 폭(m, L5-C). 0 이면 이웃 3×3 전체(옛 동작). 없으면 보조 워커 기본값. 디버그 페이지 band= */
+    band?: number
 }
 export type TerrainTilesRequest =
     | {
