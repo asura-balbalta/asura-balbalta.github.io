@@ -246,14 +246,104 @@ button.ui-status-pill:focus-visible,
     font-weight: 400;
 }
 
-/* 저작권. 상태 표시줄에서 유일하게 줄어드는 항목. 창이 좁으면 말줄임 */
+/* 데이터 출처 한 줄(버튼). 상태 표시줄에서 유일하게 줄어드는 항목. 창이 좁으면 말줄임 */
 .ui-statusbar-attribution {
     flex: 0 1 auto;
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
+    white-space: nowrap;
+    border: 0;
+    padding: 0;
+    background: none;
+    font-family: inherit;
     font-size: 11px;
+    line-height: inherit;
     color: var(--ui-text-secondary);
+}
+button.ui-statusbar-attribution {
+    cursor: pointer;
+}
+button.ui-statusbar-attribution:hover {
+    color: var(--ui-text);
+    text-decoration: underline;
+}
+
+/* 글자 링크 모양 버튼(패널 꼬리말의 "데이터 출처") */
+.ui-link {
+    border: 0;
+    padding: 0;
+    background: none;
+    font: inherit;
+    color: var(--ui-accent-text);
+    text-decoration: underline;
+    cursor: pointer;
+}
+.ui-panel-footer-line {
+    margin-top: 4px;
+}
+
+/* ---- 데이터 출처 표시문(AttributionContent). 출처 창(.ui-attribution-dialog)과 페이지(.ui-attribution-page)가 같이 쓴다 ---- */
+.ui-attribution {
+    font-size: 12px;
+    line-height: 18px;
+    color: var(--ui-text);
+}
+.ui-attribution p {
+    margin: 0 0 8px;
+}
+.ui-attribution ul {
+    margin: 0 0 8px;
+    padding: 0;
+    list-style: none;
+}
+.ui-attribution-item {
+    margin: 0 0 10px;
+}
+.ui-attribution-name,
+.ui-attribution-sub {
+    font-weight: 600;
+}
+.ui-attribution-sub {
+    margin-top: 12px;
+}
+.ui-attribution-license,
+.ui-attribution-note,
+.ui-attribution-links,
+.ui-attribution-disclaimer {
+    font-size: 11px;
+    line-height: 16px;
+    color: var(--ui-text-secondary);
+}
+.ui-attribution a {
+    color: var(--ui-accent-text);
+}
+.ui-attribution-dialog {
+    max-width: 560px;
+}
+/* 페이지는 body 배경을 따로 두지 않으므로(App 은 캔버스가 바닥) 틀이 화면을 채우고 테마 배경을 깐다 */
+.ui-attribution-page {
+    box-sizing: border-box;
+    min-height: 100vh;
+    padding: 32px 16px 48px;
+    background: var(--ui-panel);
+    color: var(--ui-text);
+}
+.ui-attribution-page-body {
+    max-width: 640px;
+    margin: 0 auto;
+}
+.ui-attribution-page h1 {
+    margin: 0 0 16px;
+    font-size: 20px;
+    font-weight: 600;
+}
+.ui-attribution-back {
+    margin-top: 24px;
+    font-size: 12px;
+}
+.ui-attribution-back a {
+    color: var(--ui-accent-text);
 }
 
 /* ---- 지도 틀: 전체 화면 ↔ 미니맵. 같은 #map 요소를 감싼 채 클래스만 바뀐다 ---- */
@@ -831,9 +921,13 @@ button.ui-status-pill:focus-visible,
 
 /* ---- 레이어 패널 ---- */
 
+/* 열: 이름 · 보기 · 내보내기 · 출처보기(머리글 없음, 항상 맨 끝). 머리글과 행이 같은 격자라 마지막 열도 고정 폭이어야
+   줄이 맞는다(auto 면 머리글은 빈 칸 0px, 행은 글자 폭이라 1fr 이 밀려 체크박스가 어긋난다. 2026-10-16). 데스크톱 레이어 패널은 320px
+   (app.tsx 의 width)라 첫 열이 150px: "지형 삼각형 1,234,567"(약 125px)까지 한 줄. 272px 로 두면 "61,295" 는 들어가고 "136,993" 부터
+   꺾였다(표본 값에 맞췄던 실수, 2026-10-16 확인 by @nanangqq). "내보내기" 머리글 44px, "출처보기" 38px */
 .ui-layer-head {
     display: grid;
-    grid-template-columns: 1fr 48px 64px;
+    grid-template-columns: 1fr 48px 56px 44px;
     align-items: center;
     padding: 0 8px 0 14px;
     height: 20px;
@@ -845,16 +939,27 @@ button.ui-status-pill:focus-visible,
 
 .ui-layer-row {
     display: grid;
-    grid-template-columns: 1fr 48px 64px;
+    grid-template-columns: 1fr 48px 56px 44px;
     justify-items: center;
+}
+.ui-layer-source {
+    font-size: 11px;
+    white-space: nowrap;
+    color: var(--ui-text-secondary);
+}
+.ui-layer-source:hover {
+    color: var(--ui-accent-text);
 }
 .ui-layer-row > :first-child {
     justify-self: start;
 }
 
+/* 보조 문구는 통째로 줄바꿈(숫자가 길어 안 들어가면 "삼각형 61,295" 가 그대로 다음 줄로. 글자 중간에서 끊기지 않게) */
 .ui-layer-note {
+    display: inline-block;
     margin-left: 6px;
     font-size: 11px;
+    white-space: nowrap;
     color: var(--ui-text-secondary);
 }
 
@@ -940,9 +1045,10 @@ button.ui-status-pill:focus-visible,
 
 /* ---- 모바일 (< 768px): 탭 막대 · 바텀 시트 · 상태 알약 · 접히는 미니맵 ---- */
 
-/* 아래 여백: 탭 막대 아래 20px(+ safe-area)에 저작권 한 줄(9px)이 들어간다. 탭 막대 위에 두는 것은 --ui-above-tabbar 부터 */
+/* 아래 여백: 탭 막대 아래 32px(+ safe-area)에 출처 줄(.ui-attribution-mobile, 9px 두 줄까지. 2026-10-16 데이터 출처 추가 전에는
+   저작권 한 줄 20px)이 들어간다. 탭 막대 위에 두는 것은 --ui-above-tabbar 부터 */
 :root {
-    --ui-tabbar-bottom: calc(20px + env(safe-area-inset-bottom));
+    --ui-tabbar-bottom: calc(32px + env(safe-area-inset-bottom));
     --ui-above-tabbar: calc(var(--ui-tabbar-bottom) + 56px + 8px);
 }
 
@@ -1209,6 +1315,30 @@ button.ui-status-pill {
     .ui-search-foot,
     .ui-search-key {
         display: none;
+    }
+    /* 데이터 출처 줄(전체 지도에서는 둘째 줄에 바탕 지도 저작권): 탭 막대 아래 왼쪽 9px, 줄마다 span. 바탕 없이 글자만. 누르면 출처 창 */
+    .ui-attribution-mobile {
+        position: fixed;
+        left: 16px;
+        right: 16px;
+        bottom: calc(4px + env(safe-area-inset-bottom));
+        z-index: 20;
+        border: 0;
+        padding: 0;
+        background: none;
+        font-family: inherit;
+        font-size: 9px;
+        line-height: 12px;
+        color: var(--ui-text-secondary);
+        text-align: left;
+        white-space: nowrap;
+        overflow: hidden;
+        cursor: pointer;
+    }
+    .ui-attribution-mobile span {
+        display: block;
+        overflow: hidden;
+        text-overflow: ellipsis;
     }
     /* 전체 지도의 저작권: 탭 막대 아래 왼쪽 9px 한 줄(화면 시안). 바탕 없이 글자만 */
     .ui-map-full .ui-map-attribution {

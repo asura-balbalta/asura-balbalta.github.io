@@ -17,7 +17,8 @@ export type StatusMenu = {
  * @param props.status 진행 막대 없이 점만 붙는 상태 문구("걸어 보기 중"). progress 가 있으면 그쪽이 우선
  * @param props.stats 수치 항목("범위 2.4 × 2.4 km" 같은 완성된 문구)
  * @param props.menus 오른쪽 드롭다운들
- * @param props.attribution 바탕 지도 저작권 문구(태그 없는 글자)
+ * @param props.attribution 데이터 출처 한 줄(attribution.ts ATTRIBUTION_SHORT). 바탕 지도 저작권은 MapFrame 안에 따로 있다
+ * @param props.onAttribution 출처 글자를 눌렀을 때(출처 창 열기). 있으면 글자가 버튼이 된다
  * @param props.children 수치 뒤에 둘 추가 항목("3D로 돌아가기" 같은 작은 버튼)
  */
 export const StatusBar = ({
@@ -26,6 +27,7 @@ export const StatusBar = ({
     stats,
     menus,
     attribution,
+    onAttribution,
     children,
 }: {
     progress?: { label: string; ratio?: number } | null
@@ -33,6 +35,7 @@ export const StatusBar = ({
     stats: string[]
     menus: StatusMenu[]
     attribution?: string
+    onAttribution?: () => void
     children?: ReactNode
 }) => (
     <footer className="ui-statusbar ui-glass-strong">
@@ -90,6 +93,13 @@ export const StatusBar = ({
                 </MenuPopover>
             </Menu>
         ))}
-        {attribution && <span className="ui-statusbar-attribution">{attribution}</span>}
+        {attribution &&
+            (onAttribution ? (
+                <button type="button" className="ui-statusbar-attribution" onClick={onAttribution} title="원본 데이터 출처 보기">
+                    {attribution}
+                </button>
+            ) : (
+                <span className="ui-statusbar-attribution">{attribution}</span>
+            ))}
     </footer>
 )

@@ -132,8 +132,14 @@ export type GlbNode = {
  * @param root 루트 노드(장면에 이것 하나를 둔다)
  * @param materials 재질 목록(단색, 양면). 조각의 material 이 이 배열의 번호다
  * @param extras asset.extras 에 넣을 메타데이터(원점·좌표계 등). 뷰어는 무시하고 파일에만 남는다
+ * @param copyright asset.copyright(glTF 2.0 표준 필드. 공공데이터 출처). Blender·three.js 등이 그대로 보여 준다
  */
-export const encodeGlb = (root: GlbNode, materials: GlbMaterial[], extras: Record<string, unknown> = {}): ArrayBuffer => {
+export const encodeGlb = (
+    root: GlbNode,
+    materials: GlbMaterial[],
+    extras: Record<string, unknown> = {},
+    copyright?: string,
+): ArrayBuffer => {
     // 1) 조각을 트리 순서로 모아 종류별 총 길이를 센다
     const prims: GlbPrimitive[] = []
     const walk = (node: GlbNode) => {
@@ -215,7 +221,7 @@ export const encodeGlb = (root: GlbNode, materials: GlbMaterial[], extras: Recor
     }
     addNode(root)
     const json = {
-        asset: { version: "2.0", generator: "asrbbt", extras },
+        asset: { version: "2.0", generator: "asrbbt", ...(copyright ? { copyright } : {}), extras },
         scene: 0,
         scenes: [{ nodes: [0] }],
         nodes,

@@ -1,3 +1,4 @@
+import { ATTRIBUTION_LINE, attributionFileText, attributionPageUrl } from "../attribution"
 import { WALL_SINK_M } from "../buildingsMesh"
 import { buildingAttributes, buildingLabel, buildingRings, NOT_BUILT } from "../buildingTable"
 import { LAYER_DEFS } from "../layers"
@@ -139,6 +140,11 @@ self.onmessage = async (e: MessageEvent<Rhino3dmExportRequest>) => {
 
     const doc = new rhino.File3dm()
     doc.settings().modelUnitSystem = rhino.UnitSystem.Meters
+    // 공공데이터 출처(src/attribution.ts). 파일 머리의 작성 프로그램 정보와 문서 사용자 문자열(Rhino 의 DocumentText)에 남긴다
+    doc.applicationName = "asrbbt"
+    doc.applicationUrl = attributionPageUrl()
+    doc.applicationDetails = ATTRIBUTION_LINE
+    doc.strings().set("attribution", attributionFileText())
     let skipped = 0
     let failedSolids = 0
     for (const { id } of LAYER_DEFS) {

@@ -5,6 +5,7 @@ import reset from "styled-reset"
 
 import App from "./app.tsx"
 import { DebugPage, isDebugHash } from "./debug/index.tsx"
+import { AttributionPage, isAttributionHash } from "./ui/AttributionPage.tsx"
 // 그릇(레일·패널·상태 표시줄 등)의 재질·배치. esbuild 가 dist/index.css 로 내고 dist/index.html 이 링크한다
 import "./ui/ui.css"
 
@@ -30,7 +31,8 @@ const GlobalStyle = createGlobalStyle`
 `
 
 /**
- * 페이지 선택(docs/design-code-plan.md 7절): 주소 해시가 `#/debug/` 로 시작하면 디버그 페이지(src/debug/), 아니면 운영 App.
+ * 페이지 선택(docs/design-code-plan.md 7절): 주소 해시가 `#/debug/` 로 시작하면 디버그 페이지(src/debug/), `#/attribution` 이면
+ * 데이터 출처 페이지(src/ui/AttributionPage), 아니면 운영 App.
  * 번들 하나·같은 App 이고 페이지만 상태로 고른다. 해시가 바뀌면(hashchange) 새로고침 없이 따라간다.
  * 해시라 정적 서버(npx serve dist)·Firebase 설정에 손댈 것이 없다
  */
@@ -41,7 +43,9 @@ const Root = () => {
         window.addEventListener("hashchange", onHashChange)
         return () => window.removeEventListener("hashchange", onHashChange)
     }, [])
-    return isDebugHash(hash) ? <DebugPage hash={hash} /> : <App />
+    if (isDebugHash(hash)) return <DebugPage hash={hash} />
+    if (isAttributionHash(hash)) return <AttributionPage />
+    return <App />
 }
 
 // iOS Safari 는 viewport 의 user-scalable=no 를 무시하고 두 손가락 벌리기로 페이지를 확대한다. 3D 캔버스는

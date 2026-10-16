@@ -1,5 +1,6 @@
 import { create, type Point3 } from "openskp"
 
+import { ATTRIBUTION_DISCLAIMER, ATTRIBUTION_LINE, attributionPageUrl } from "../attribution"
 import { WALL_SINK_M } from "../buildingsMesh"
 import { buildingAttributes, buildingLabel, buildingRings, BuildingTable, NOT_BUILT } from "../buildingTable"
 import { LAYER_DEFS } from "../layers"
@@ -29,6 +30,15 @@ const INCH_PER_METER = 1 / 0.0254
 const PROGRESS_EVERY_FACES = 20_000
 
 const post = (msg: SkpExportResponse, transfer: Transferable[] = []) => self.postMessage(msg, { transfer })
+
+/**
+ * 최상위 그룹("terrain"·"buildings")에 붙이는 공공데이터 출처(src/attribution.ts). openskp 는 모델 수준 속성 사전을 쓰는 API 가 없어
+ * 그룹의 속성 사전("asrbbt", 건물 속성과 같은 이름)에 둔다. SketchUp 화면에는 안 보이고 Ruby API 로 읽힌다
+ */
+const ATTRIBUTION_ATTRS = {
+    attributes: { source: ATTRIBUTION_LINE, source_url: attributionPageUrl(), disclaimer: ATTRIBUTION_DISCLAIMER },
+    attributeDictName: "asrbbt",
+}
 
 type Builder = ReturnType<typeof create>
 type FaceOptions = { softEdges?: boolean; smoothEdges?: boolean }
@@ -128,7 +138,7 @@ const addTerrainSlabs = (builder: Builder, mesh: TinMesh, step: number, progress
         (group) => {
             bands.forEach((band, i) => group.addGroupInstance(defs[i], { name: `${band.zTop}m` }))
         },
-        { name: "terrain" },
+        { name: "terrain", ...ATTRIBUTION_ATTRS },
     )
 
     const polygons = bands.reduce((s, b) => s + b.polygons.length, 0)
@@ -215,7 +225,7 @@ const addBuildingGroups = (builder: Builder, table: BuildingTable, progress: (ra
         (group) => {
             defs.forEach((def, i) => group.addGroupInstance(def, { name: names[i], attributes: attributes[i], attributeDictName: "asrbbt" }))
         },
-        { name: "buildings" },
+        { name: "buildings", ...ATTRIBUTION_ATTRS },
     )
     progress(1)
     console.log(`SKP 건물: ${defs.length}동, 면 ${faces}개, ${Math.round(performance.now() - started)}ms`)
@@ -261,7 +271,7 @@ self.onmessage = (e: MessageEvent<SkpExportRequest>) => {
             skipped += addBuildingGroups(builder, mesh.table, (ratio) => progress(ratio, w))
         } else {
             const options: FaceOptions = id === "terrain" ? { softEdges: true, smoothEdges: true } : { softEdges: true }
-            builder.addGroup((def) => void (skipped += addPlain(def, mesh, options)), { name: id })
+            builder.addGroup((def) => void (skipped += addPlain(def, mesh, options)), { name: id, ...ATTRIBUTION_ATTRS })
         }
         doneBefore += w
     }

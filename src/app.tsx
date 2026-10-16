@@ -25,6 +25,8 @@ import { Dock, PanelId } from "./ui/Dock"
 import { SettingsPanel } from "./ui/SettingsPanel"
 import { DockPanel } from "./ui/DockPanel"
 import { StatusBar, StatusMenu } from "./ui/StatusBar"
+import { AttributionDialog } from "./ui/AttributionContent"
+import { ATTRIBUTION_SHORT } from "./attribution"
 import { fluentTheme, uiCssVars } from "./ui/theme"
 import { AppToaster, useAppToast } from "./ui/Toasts"
 import { BottomSheet } from "./ui/BottomSheet"
@@ -284,6 +286,17 @@ function App({
     const [view, setView] = useState<"map" | "3d">("map")
     /** 열려 있는 패널(독 팝오버 또는 바텀 시트) */
     const [openPanel, setOpenPanel] = useState<PanelId | null>(null)
+    /**
+     * 출처 창(AttributionDialog). 열림과 "어느 레이어" 를 따로 든다: Fluent Dialog 는 닫히는 애니메이션 동안 창을 유지하므로 닫을 때
+     * 레이어까지 지우면 그 사이 내용이 통합 출처로 바뀌어 한 번 비친다(2026-10-16 Chrome 확인 by @nanangqq). 닫을 때는 열림만 끄고
+     * 레이어는 다음에 열 때 다시 정한다. 통합(상태 표시줄·모바일 한 줄·설정·내려받기 꼬리말)은 레이어 없이, 레이어 패널 "출처보기" 는 레이어 id 로
+     */
+    const [attributionOpen, setAttributionOpen] = useState(false)
+    const [attributionLayer, setAttributionLayer] = useState<LayerId | undefined>()
+    const openAttribution = (layer?: LayerId) => {
+        setAttributionLayer(layer)
+        setAttributionOpen(true)
+    }
     /** 모바일 미니맵이 접혀 있는지. 지도 화면으로 돌아가면 풀어, 다음에 미니맵이 될 때 펼친 채 시작한다 */
     const [minimapCollapsed, setMinimapCollapsed] = useState(false)
     useEffect(() => {
@@ -757,7 +770,8 @@ function App({
             <MapFrame
                 mode={view === "3d" ? "mini" : "full"}
                 onExpand={() => setView("map")}
-                attribution={basemapAttribution(basemap)}
+                // 모바일 전체 지도의 바탕 지도 문구는 아래 .ui-attribution-mobile 한 줄이 데이터 출처와 함께 쓴다(3D 의 미니맵은 그대로)
+                attribution={isMobile && view === "map" ? undefined : basemapAttribution(basemap)}
                 collapsible={isMobile}
                 collapsed={minimapCollapsed}
                 onCollapsedChange={setMinimapCollapsed}
@@ -820,19 +834,26 @@ function App({
                 />
             )}
 
+            {/* 레이어 패널 320px: 첫 열이 "지형 삼각형 1,234,567" 까지 한 줄에 들어가게(ui.css .ui-layer-row). 레이어 종류가 늘 때 패널을 다시 손본다 */}
             {openPanel === "layers" && (
-                <Panel title="레이어" onClose={() => setOpenPanel(null)} above={panelAbove}>
+                <Panel title="레이어" onClose={() => setOpenPanel(null)} above={panelAbove} width={320}>
                     <LayersPanel
                         layers={layers}
                         onChange={setLayerFlag}
                         loading={{ buildings: busy && !!terrain && terrain.count < terrain.total }}
                         notes={layerNotes}
+                        onAttribution={openAttribution}
                     />
                 </Panel>
             )}
             {openPanel === "export" && (
                 <Panel title="내려받기" onClose={() => setOpenPanel(null)} above={panelAbove}>
-                    <ExportPanel exporting={exporting} onExport={startExport} included={included} />
+                    <ExportPanel
+                        exporting={exporting}
+                        onExport={startExport}
+                        included={included}
+                        onAttribution={() => openAttribution()}
+                    />
                 </Panel>
             )}
             {openPanel === "settings" && (
@@ -847,6 +868,7 @@ function App({
                         modeDisabled={!terrainReady || busy}
                         stepInterval={stepInterval}
                         onStepInterval={changeStepInterval}
+                        onAttribution={() => openAttribution()}
                     />
                 </Panel>
             )}
@@ -879,11 +901,27 @@ function App({
                 )
             )}
 
+            {/* 공공데이터 출처(src/attribution.ts). 모바일은 탭 막대 아래 왼쪽 9px 줄(전체 지도에서는 둘째 줄에 바탕 지도 저작권),
+                데스크톱은 상태 표시줄 오른쪽. 누르면 출처 창 */}
+            {isMobile && (
+                <button type="button" className="ui-attribution-mobile" onClick={() => openAttribution()} title="원본 데이터 출처 보기">
+                    <span>{ATTRIBUTION_SHORT}</span>
+                    {view === "map" && <span>{basemapAttribution(basemap)}</span>}
+                </button>
+            )}
+            <AttributionDialog open={attributionOpen} layer={attributionLayer} onClose={() => setAttributionOpen(false)} />
             {isMobile ? (
                 // 시트가 열려 있으면 알약은 시트 위에 얹혀 있다(above)
                 openPanel ? null : mobilePill
             ) : (
-                <StatusBar progress={progress} status={walking ? "둘러보는 중" : undefined} stats={stats} menus={menus}>
+                <StatusBar
+                    progress={progress}
+                    status={walking ? "둘러보는 중" : undefined}
+                    stats={stats}
+                    menus={menus}
+                    attribution={ATTRIBUTION_SHORT}
+                    onAttribution={() => openAttribution()}
+                >
                     {walking && (
                         <Button appearance="subtle" size="small" className="ui-statusbar-action" onClick={stopWalking}>
                             나가기

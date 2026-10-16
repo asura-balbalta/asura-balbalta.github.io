@@ -3,6 +3,7 @@ import { LAYER_DEFS } from "../layers"
 import type { TinMesh } from "../terrainData"
 import { buildSteppedMeshChunks } from "../terrainSteps"
 import type { TerrainMode } from "../webgpu/terrainRenderer"
+import { attributionFileText } from "../attribution"
 import { computeVertexNormals, encodeGlb, GlbMaterial, GlbNode, toFlatPrimitive } from "./glb"
 import type { ExportMesh, LayerMeshes } from "./stlClient"
 
@@ -97,11 +98,12 @@ self.onmessage = (e: MessageEvent<GlbExportRequest>) => {
         progress(0, 0)
     }
     const root: GlbNode = { name: materials.map((m) => m.name).join("+"), children }
-    const buffer = encodeGlb(root, materials, {
-        origin,
-        crs: "ESRI:102080",
-        unit: "m",
-        up: "+Y (원본 Z-up 을 (x, z, -y) 로 변환)",
-    })
+    const buffer = encodeGlb(
+        root,
+        materials,
+        { origin, crs: "ESRI:102080", unit: "m", up: "+Y (원본 Z-up 을 (x, z, -y) 로 변환)" },
+        // 공공데이터 출처(src/attribution.ts)를 표준 asset.copyright 에
+        attributionFileText(),
+    )
     post({ type: "done", buffer }, [buffer])
 }

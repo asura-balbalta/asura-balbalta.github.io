@@ -12,15 +12,18 @@ import { LAYER_DEFS, LayerId } from "../layers"
  * @param props.exporting 만드는 중인 형식과 진행률(없으면 null)
  * @param props.onExport 형식의 "내려받기" 를 눌렀을 때
  * @param props.included 지금 "내보내기" 에 체크돼 파일에 담길 레이어(꼬리말 표시용)
+ * @param props.onAttribution 꼬리말의 "데이터 출처" 를 눌렀을 때(출처 창 열기). 파일 메타데이터에 같은 출처가 들어간다
  */
 export const ExportPanel = ({
     exporting,
     onExport,
     included,
+    onAttribution,
 }: {
     exporting: { kind: ExportKind; ratio?: number } | null
     onExport: (kind: ExportKind) => void
     included: LayerId[]
+    onAttribution?: () => void
 }) => (
     <>
         {EXPORT_KINDS.map(({ kind, label, description }) => {
@@ -52,6 +55,12 @@ export const ExportPanel = ({
                       .map((d) => d.label)
                       .join(" · ")}. 레이어 패널의 "내보내기" 체크를 따릅니다.`
                 : '담을 레이어가 없습니다. 레이어 패널에서 "내보내기" 를 하나 이상 체크하세요.'}
+            <div className="ui-panel-footer-line">
+                파일에는 공공데이터 출처 표시가 담깁니다.{" "}
+                <button type="button" className="ui-link" onClick={onAttribution}>
+                    원본 데이터 출처
+                </button>
+            </div>
         </div>
     </>
 )

@@ -44,6 +44,7 @@ const STEP_MAX = 5
  * 계단 간격은 숫자를 바꾼 뒤 "다시 만들기"(또는 Enter)를 눌러야 적용된다(계단형 지형을 다시 만드는 일이라 명시적으로).
  *
  * @param props.modeDisabled 아직 3D 지형이 없어 보기 모드를 바꿀 수 없을 때
+ * @param props.onAttribution 꼬리말의 "데이터 출처" 를 눌렀을 때(출처 창 열기)
  */
 export const SettingsPanel = ({
     theme,
@@ -55,6 +56,7 @@ export const SettingsPanel = ({
     modeDisabled,
     stepInterval,
     onStepInterval,
+    onAttribution,
 }: {
     theme: Theme
     onTheme: (theme: Theme) => void
@@ -65,6 +67,7 @@ export const SettingsPanel = ({
     modeDisabled?: boolean
     stepInterval: number
     onStepInterval: (step: number) => void
+    onAttribution?: () => void
 }) => {
     // 입력 중의 글자는 따로 두고, "다시 만들기" 를 눌렀을 때만 부모에 알린다
     const [stepText, setStepText] = useState(String(stepInterval))
@@ -137,6 +140,12 @@ export const SettingsPanel = ({
             </div>
             <div className="ui-panel-footer">
                 계단 간격은 {STEP_MIN} ~ {STEP_MAX} m 입니다. 바꾼 뒤 "다시 만들기" 를 누르면 계단형 지형을 다시 만듭니다.
+                <div className="ui-panel-footer-line">
+                    지형·건물은 공공데이터를 가공한 것입니다.{" "}
+                    <button type="button" className="ui-link" onClick={onAttribution}>
+                        원본 데이터 출처
+                    </button>
+                </div>
             </div>
         </>
     )

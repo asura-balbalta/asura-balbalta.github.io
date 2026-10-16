@@ -35,6 +35,8 @@ export const BottomSheet = ({
     onClose: () => void
     footer?: ReactNode
     above?: ReactNode
+    /** DockPanel 과 props 를 맞추기 위한 것. 시트는 항상 화면 폭이라 쓰지 않는다 */
+    width?: number
     children: ReactNode
 }) => {
     const [expanded, setExpanded] = useState(false)
