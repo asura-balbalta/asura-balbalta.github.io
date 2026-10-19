@@ -39,6 +39,7 @@ const commonWgsl = /* wgsl */ `
         lightViewProjNear: mat4x4f, // 가까운 캐스케이드(카메라 주변 40 m, 텍셀 4 cm)의 빛 기준 투영
         sky: vec4f, // xyz 태양 방향(하늘·안개용), w 하늘 켬(0/1)
         highlightColor: vec4f, // 조준점 건물 강조색(테마 accent) rgb + 투명도
+        roadColor: vec4f, // 도로 레이어 색 (r, g, b, 1)
     };
     @group(0) @binding(0) var<uniform> u: Uniforms;
     @group(0) @binding(1) var shadowMap: texture_depth_2d;
@@ -240,6 +241,80 @@ export const createBuildingShader = () => ({
         let wallShade = 1.0 - 0.25 * (1.0 - abs(n.z));
         let base = u.buildingColor.rgb * wallShade;
         return vec4f(shade(base, n, input.world), 1);
+    }
+    `,
+})
+
+/**
+ * 도로 레이어 셰이더 descriptor. 건물 셰이더와 같은 입력·조명(위치만, 화면 미분 법선, 양면)이고 색만 uniform roadColor 다.
+ * 지형에 얹은 판은 지형과 같은 법선이라 같은 음영을 받고, 계단형의 도로 벽은 건물 벽처럼 25% 어둡다.
+ * 지형과 같은 평면이라 깊이 싸움이 나는 것은 파이프라인의 depthBias(terrainRenderer)와 메쉬의 띄움(roadsMesh)이 막는다
+ *
+ * @returns `{ label, code }` 형태의 GPUShaderModuleDescriptor
+ */
+export const createRoadShader = () => ({
+    label: "road shader",
+    code: /* wgsl */ `
+    ${commonWgsl}
+
+    struct VertexOutput {
+        @builtin(position) p: vec4f,
+        @location(0) world: vec3f,
+        @location(1) rel: vec3f,
+    };
+
+    @vertex
+    fn vertexMain(@location(0) pos: vec3f) -> VertexOutput {
+        var output: VertexOutput;
+        output.p = u.viewProj * vec4f(pos, 1);
+        output.world = pos;
+        output.rel = pos - u.eye;
+        return output;
+    }
+
+    @fragment
+    fn fragmentMain(input: VertexOutput) -> @location(0) vec4f {
+        let v = normalize(u.eye - input.world);
+        let faceNormal = normalize(cross(dpdx(input.rel), dpdy(input.rel)));
+        let n = select(-faceNormal, faceNormal, dot(faceNormal, v) >= 0.0);
+        let wallShade = 1.0 - 0.25 * (1.0 - abs(n.z));
+        let base = u.roadColor.rgb * wallShade;
+        return vec4f(shade(base, n, input.world), 1);
+    }
+    `,
+})
+
+/**
+ * 매끈한 면 모드의 도로 셰이더 descriptor. 매끈한 지형 셰이더와 같이 정점 법선(@location(1))을 받아 픽셀마다 보간한다. 도로 정점 법선은
+ * 그 자리 지형의 부드러운 법선을 보간한 것(roadsMesh)이라 도로가 지형과 같은 음영을 받고 지형 삼각형 경계가 드러나지 않는다
+ * (2026-10-19 지적 by @nanangqq: 면 법선 셰이더로는 도로 조각마다 각이 보였다). 색은 uniform roadColor
+ *
+ * @returns `{ label, code }` 형태의 GPUShaderModuleDescriptor
+ */
+export const createRoadSmoothShader = () => ({
+    label: "road smooth shader",
+    code: /* wgsl */ `
+    ${commonWgsl}
+
+    struct VertexOutput {
+        @builtin(position) p: vec4f,
+        @location(0) world: vec3f,
+        @location(1) normal: vec3f,
+    };
+
+    @vertex
+    fn vertexMain(@location(0) pos: vec3f, @location(1) normal: vec3f) -> VertexOutput {
+        var output: VertexOutput;
+        output.p = u.viewProj * vec4f(pos, 1);
+        output.world = pos;
+        output.normal = normal;
+        return output;
+    }
+
+    @fragment
+    fn fragmentMain(input: VertexOutput) -> @location(0) vec4f {
+        let n = normalize(input.normal);
+        return vec4f(shade(u.roadColor.rgb, n, input.world), 1);
     }
     `,
 })

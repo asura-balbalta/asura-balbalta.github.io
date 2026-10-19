@@ -11,65 +11,10 @@ export const DEFAULT_BUILDING_HEIGHT_M = DEFAULT_STOREY_HEIGHT_M
  * 낮아 틈이 보이고, 경사지에서는 평균 높이로 둔 바닥 아래가 비므로 벽을 지형 속으로 묻는다
  */
 export const WALL_SINK_M = 1
+import { createTerrainSampler } from "./terrainSampler"
 
-/**
- * 지형 삼각형을 격자에 넣어 두고 점 (x, y) 의 지형 높이를 찾는 함수를 만든다.
- * 격자 셀마다 그 셀의 bbox 에 걸친 삼각형 번호를 CSR 형태(cellStart·cellTris)로 들고 있는다.
- *
- * @param positions 지형 정점 (x, y, z) 연속 배열(원점 기준 m)
- * @param indices 지형 삼각형 인덱스
- * @param cellM 격자 셀 한 변(m)
- * @returns (x, y) → z. 어느 삼각형에도 들지 않으면 null
- */
-export const createTerrainSampler = (positions: Float32Array, indices: Uint32Array, cellM = 50) => {
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
-    for (let i = 0; i < positions.length; i += 3) {
-        minX = Math.min(minX, positions[i])
-        maxX = Math.max(maxX, positions[i])
-        minY = Math.min(minY, positions[i + 1])
-        maxY = Math.max(maxY, positions[i + 1])
-    }
-    const nx = Math.max(1, Math.ceil((maxX - minX) / cellM))
-    const ny = Math.max(1, Math.ceil((maxY - minY) / cellM))
-    const cellX = (x: number) => Math.min(nx - 1, Math.max(0, Math.floor((x - minX) / cellM)))
-    const cellY = (y: number) => Math.min(ny - 1, Math.max(0, Math.floor((y - minY) / cellM)))
-    const nTri = indices.length / 3
-    /** 삼각형 t 의 셀 범위를 콜백에 넘긴다 */
-    const forCells = (t: number, fn: (cell: number) => void) => {
-        const a = indices[3 * t] * 3, b = indices[3 * t + 1] * 3, c = indices[3 * t + 2] * 3
-        const x0 = cellX(Math.min(positions[a], positions[b], positions[c]))
-        const x1 = cellX(Math.max(positions[a], positions[b], positions[c]))
-        const y0 = cellY(Math.min(positions[a + 1], positions[b + 1], positions[c + 1]))
-        const y1 = cellY(Math.max(positions[a + 1], positions[b + 1], positions[c + 1]))
-        for (let cy = y0; cy <= y1; cy++) for (let cx = x0; cx <= x1; cx++) fn(cy * nx + cx)
-    }
-    const cellStart = new Uint32Array(nx * ny + 1)
-    for (let t = 0; t < nTri; t++) forCells(t, (cell) => cellStart[cell + 1]++)
-    for (let c = 1; c < cellStart.length; c++) cellStart[c] += cellStart[c - 1]
-    const cellTris = new Uint32Array(cellStart[cellStart.length - 1])
-    const fill = cellStart.slice(0, -1)
-    for (let t = 0; t < nTri; t++) forCells(t, (cell) => (cellTris[fill[cell]++] = t))
-
-    const EPS = 1e-6
-    return (x: number, y: number): number | null => {
-        const cell = cellY(y) * nx + cellX(x)
-        for (let k = cellStart[cell]; k < cellStart[cell + 1]; k++) {
-            const t = cellTris[k]
-            const a = indices[3 * t] * 3, b = indices[3 * t + 1] * 3, c = indices[3 * t + 2] * 3
-            const ax = positions[a], ay = positions[a + 1]
-            const bx = positions[b], by = positions[b + 1]
-            const cx = positions[c], cy = positions[c + 1]
-            const det = (bx - ax) * (cy - ay) - (cx - ax) * (by - ay)
-            if (det === 0) continue
-            const l1 = ((bx - x) * (cy - y) - (cx - x) * (by - y)) / det
-            const l2 = ((cx - x) * (ay - y) - (ax - x) * (cy - y)) / det
-            const l3 = 1 - l1 - l2
-            if (l1 < -EPS || l2 < -EPS || l3 < -EPS) continue
-            return l1 * positions[a + 2] + l2 * positions[b + 2] + l3 * positions[c + 2]
-        }
-        return null
-    }
-}
+/** 지형 조회기는 terrainSampler.ts 로 옮겼다. 기존 import 경로를 위해 다시 내보낸다 */
+export { createTerrainSampler, type TerrainSampler } from "./terrainSampler"
 
 /** 고리의 부호 있는 넓이 ×2 (양수 = 반시계) */
 const ringArea2 = (xy: Float64Array, start: number, end: number) => {

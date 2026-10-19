@@ -19,6 +19,8 @@ import type { RenderDebug } from "../webgpu/terrainRenderer"
  * - walkradius: 둘러보기 중 장면에 그릴 반경(m, 기본 5000). 0 이면 모두 그림
  * - resident: 둘러보기 중 GPU 에 올려 둘 반경(m, 기본 walkradius 와 같음). 0 이면 내리지 않음(옛 동작)
  * - band: 도엽 생성 때 이웃을 합치는 경계 띠 폭(m). 0 이면 이웃 3×3 전체(옛 동작). 없으면 기본값. 범위 확정 때만 적용된다
+ * - roads=0: 도로 레이어를 그리지 않음(회귀 비교). roadsclip=0: 도로 얹기의 B(지형 삼각형으로 자르기) 끔. roadsbridge=0: 교량·고가도 지형을 따라감.
+ *   roadslift: 띄움(m, 기본 0.1). roadsbias: 깊이 바이어스(0 이면 끔, 기본 1). roadscolor: 도로색 RRGGBB(# 없이). clip·bridge 는 범위 확정 때만 적용
  * - lock=0: 포인터 잠금 없이 흉내(내장 브라우저·Playwright. 마우스는 어디서 움직여도 시점, Esc 가 포커스 끔)
  * - look=0: 마우스로 시점을 돌리지 않음(자동 캡처. 보이는 창 위를 실제 마우스가 지나가도 시점이 그대로)
  * 해시를 고치면(새로고침 없이) 렌더 디버그 설정은 바로 반영되고, 프리셋(bbox·spawn·yaw·pitch)은 처음 한 번만 적용된다.
@@ -78,6 +80,12 @@ export const parseWalkParams = (params: URLSearchParams): { preset: AppPreset; r
         mouseLook: flag(params, "look"),
         pick: flag(params, "pick"),
         band: number(params, "band"),
+        roads: flag(params, "roads"),
+        roadsClip: flag(params, "roadsclip"),
+        roadsBridge: flag(params, "roadsbridge"),
+        roadsLift: number(params, "roadslift"),
+        roadsBias: number(params, "roadsbias"),
+        roadsColor: params.has("roadscolor") ? `#${params.get("roadscolor")}` : undefined,
     }
     return { preset, renderDebug, notes }
 }

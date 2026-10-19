@@ -4,6 +4,8 @@ import { ATTRIBUTION_DISCLAIMER, ATTRIBUTION_LINE, attributionPageUrl } from "..
 import { WALL_SINK_M } from "../buildingsMesh"
 import { buildingAttributes, buildingLabel, buildingRings, BuildingTable, NOT_BUILT } from "../buildingTable"
 import { LAYER_DEFS } from "../layers"
+import { roadExportSampler, roadGroupExportChunks } from "../roadsMesh"
+import { roadAttributes, roadGroups, roadLabel, RoadTable } from "../roadTable"
 import type { TinMesh } from "../terrainData"
 import type { TerrainMode } from "../webgpu/terrainRenderer"
 import type { ExportMesh, LayerMeshes } from "./stlClient"
@@ -28,6 +30,8 @@ export type SkpExportResponse = { type: "progress"; ratio: number } | { type: "d
 const INCH_PER_METER = 1 / 0.0254
 /** 삼각형 메쉬는 이 면 수마다 진행률을 보낸다 */
 const PROGRESS_EVERY_FACES = 20_000
+/** 도로 계단화 조각의 버퍼 상한(바이트. Worker 메모리만 고려) */
+const STEPPED_CHUNK_BYTES = 64 * 1048576
 
 const post = (msg: SkpExportResponse, transfer: Transferable[] = []) => self.postMessage(msg, { transfer })
 
@@ -53,7 +57,7 @@ type GroupBuilder = ReturnType<Builder["addGroup"]>
  * @returns 건너뛴 삼각형 수
  */
 const addTriangles = (
-    def: GroupBuilder,
+    def: Pick<GroupBuilder, "addFace">,
     positions: Float32Array,
     indices: Uint32Array,
     options: FaceOptions,
@@ -233,6 +237,53 @@ const addBuildingGroups = (builder: Builder, table: BuildingTable, progress: (ra
 }
 
 /**
+ * 도로 레이어를 "이은 중심선마다 삼각형 면 그룹" 들을 모은 "roads" 그룹으로 넣는다(2026-10-19 결정 by @nanangqq: 그룹 단위는 lineId).
+ * 그룹 이름은 "도로구분 (폭m, N차로, 교통시설)"(roadLabel), 그룹의 attribute dictionary "asrbbt" 에 속성(roadAttributes). 띄움(과 지형이
+ * 계단형이면 같은 계단화)은 roadGroupExportChunks 가 한다. 면은 soft 만 두어 선은 숨기되 평면 음영은 유지한다. 건물과 같은 "정의 → 배치" 구조
+ *
+ * @returns 건너뛴 면 수
+ */
+const addRoadGroups = (
+    builder: Builder,
+    mesh: TinMesh,
+    table: RoadTable,
+    mode: TerrainMode,
+    step: number,
+    zAt: ((x: number, y: number) => number | null) | null,
+    progress: (ratio: number) => void,
+) => {
+    const started = performance.now()
+    let skipped = 0
+    const groups = roadGroups(table)
+    const defs: ReturnType<Builder["addComponentDefinition"]>[] = []
+    const names: string[] = []
+    const attributes: ReturnType<typeof roadAttributes>[] = []
+    groups.forEach((g, i) => {
+        const chunks = roadGroupExportChunks(mesh, table, g, mode, step, STEPPED_CHUNK_BYTES, zAt)
+        if (chunks.every((c) => c.indices.length === 0)) return
+        const name = roadLabel(table, g.k0)
+        names.push(name)
+        attributes.push(roadAttributes(table, g.k0, g.k1))
+        defs.push(
+            builder.addComponentDefinition(name, (def) => {
+                // 매끈한 면이면 지형 tin 과 같이 soft + smooth(SketchUp 이 음영을 매끄럽게), 계단형은 평면이라 soft 만
+                for (const c of chunks) skipped += addTriangles(def, c.positions, c.indices, mode === "tin" ? { softEdges: true, smoothEdges: true } : { softEdges: true })
+            }),
+        )
+        if (i % 200 === 199) progress((i + 1) / groups.length)
+    })
+    builder.addGroup(
+        (group) => {
+            defs.forEach((def, i) => group.addGroupInstance(def, { name: names[i], attributes: attributes[i], attributeDictName: "asrbbt" }))
+        },
+        { name: "roads", ...ATTRIBUTION_ATTRS },
+    )
+    progress(1)
+    console.log(`SKP 도로: ${defs.length}구간, ${Math.round(performance.now() - started)}ms`)
+    return skipped
+}
+
+/**
  * openskp(SDK 없이 .skp 를 쓰는 라이브러리)로 레이어들을 SketchUp 2017 포맷 파일 하나로 만든다. 메인 스레드 밖에서 돈다.
  *
  * LAYER_DEFS 순서로 레이어마다 그룹(레이어 id 이름)을 하나씩 둔다. 지형 tin 은 삼각형 면을 soft·smooth 로 두어 SketchUp 이
@@ -269,6 +320,8 @@ self.onmessage = (e: MessageEvent<SkpExportRequest>) => {
             skipped += addTerrainSlabs(builder, mesh, step, (ratio) => progress(ratio, w))
         } else if (id === "buildings" && mesh.table) {
             skipped += addBuildingGroups(builder, mesh.table, (ratio) => progress(ratio, w))
+        } else if (id === "roads" && mesh.roadTable) {
+            skipped += addRoadGroups(builder, mesh, mesh.roadTable, mode, step, roadExportSampler(layers.terrain), (ratio) => progress(ratio, w))
         } else {
             const options: FaceOptions = id === "terrain" ? { softEdges: true, smoothEdges: true } : { softEdges: true }
             builder.addGroup((def) => void (skipped += addPlain(def, mesh, options)), { name: id, ...ATTRIBUTION_ATTRS })

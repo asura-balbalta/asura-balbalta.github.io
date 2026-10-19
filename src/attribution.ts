@@ -25,6 +25,7 @@ const LAYERS_BASE = "https://layers.asrbbt.world"
 const LAYER_INDEX_URLS: Record<LayerId, string> = {
     terrain: `${LAYERS_BASE}/ttp/index/v1/sheets50k.json`,
     buildings: `${LAYERS_BASE}/buildings/index/v1/sheets50k.json`,
+    roads: `${LAYERS_BASE}/roads/index/v1/sheets50k.json`,
 }
 
 /** 버킷 루트의 사람이 읽는 전체 표시문(텍스트). 출처 창에서 링크한다 */
@@ -82,7 +83,7 @@ export type Attribution = LayerAttribution & {
     extras: AttributionSource[]
 }
 
-/** 서버를 못 받을 때의 레이어별 대체문(안내문 5절. 도로는 아직 서빙하지 않아 뺐다. 인덱스에 생기면 자동으로 붙는다) */
+/** 서버를 못 받을 때의 레이어별 대체문(안내문 5절. 도로는 2026-10-17 roads 안내문과 인덱스 `attribution` 의 문구) */
 const FALLBACK_SOURCES: Record<LayerId, AttributionSource[]> = {
     terrain: [
         {
@@ -117,6 +118,18 @@ const FALLBACK_SOURCES: Record<LayerId, AttributionSource[]> = {
         processing: "건물 도형과 필지 단위 연계, 오류 값 정제",
     },
     ],
+    roads: [
+        {
+            name: "도로 (국가기본도 차도경계면·차도중심선)",
+            provider: "국토지리정보원 (국토교통부)",
+            asof: "2025-02",
+            portal: "브이월드 데이터마켓",
+            url: "https://www.vworld.kr/dtmk/dtmk_ntads_s002.do?svcCde=MK&dsId=20250122DS00013",
+            license: "공공누리 제1유형 (출처표시)",
+            license_url: KOGL_URL,
+            processing: "좌표 변환, 도엽 단위 분할, 형식 변환, 중심선 이어 붙임, 조각에 중심선 속성 연결",
+        },
+    ],
 }
 
 /** 레이어 밖의 출처. 검색은 VWorld 통합 검색 API(vworld.ts), 바탕 지도는 basemap.ts 의 타일 출처 */
@@ -144,7 +157,7 @@ export const attributionPageUrl = () => `${self.location.origin}/#/attribution`
  * 내려받기 파일 메타데이터에 적는 문구(여러 줄). GLB asset.copyright, 3DM 문서 문자열, SKP 그룹 속성에 같은 글을 넣는다
  */
 export const attributionFileText = () =>
-    `지형·건물 데이터 출처: ${ATTRIBUTION_LINE}\n출처 전체: ${attributionPageUrl()} · ${ATTRIBUTION_TXT_URL}\n${ATTRIBUTION_DISCLAIMER}`
+    `지형·건물·도로 데이터 출처: ${ATTRIBUTION_LINE}\n출처 전체: ${attributionPageUrl()} · ${ATTRIBUTION_TXT_URL}\n${ATTRIBUTION_DISCLAIMER}`
 
 const layerCache = new Map<LayerId, Promise<LayerAttribution>>()
 

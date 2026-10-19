@@ -1,5 +1,7 @@
 import { buildingAttributes, buildingLabel, NOT_BUILT } from "../buildingTable"
 import { LAYER_DEFS } from "../layers"
+import { roadExportSampler, roadGroupExportChunks } from "../roadsMesh"
+import { roadAttributes, roadGroups, roadLabel } from "../roadTable"
 import type { TinMesh } from "../terrainData"
 import { buildSteppedMeshChunks } from "../terrainSteps"
 import type { TerrainMode } from "../webgpu/terrainRenderer"
@@ -29,6 +31,7 @@ const STEPPED_CHUNK_BYTES = 64 * 1048576
 const LAYER_COLORS: Record<string, [number, number, number]> = {
     terrain: [0.55, 0.67, 0.47],
     buildings: [0.78, 0.78, 0.78],
+    roads: [0.6, 0.6, 0.62],
 }
 
 const post = (msg: GlbExportResponse, transfer: Transferable[] = []) => self.postMessage(msg, { transfer })
@@ -90,6 +93,24 @@ self.onmessage = (e: MessageEvent<GlbExportRequest>) => {
                     extras: buildingAttributes(table, k),
                 })
             })
+        } else if (id === "roads" && mesh.roadTable) {
+            // 도로: "roads" 노드 아래 이은 중심선마다 노드(이름 = 도로구분·폭·차로, extras = 속성). 띄움·계단화는 roadGroupExportChunks
+            const table = mesh.roadTable
+            delete node.primitives
+            node.children = []
+            const zAt = roadExportSampler(layers.terrain)
+            // 매끈한 면: 지형 tin 과 같이 정점 법선을 계산해 넣는다(도로 조각은 지형 삼각형 위 평면이고 정점을 공유하므로 이 평균이 지형 법선과
+            // 거의 같다. 면 법선으로 넣으면 Blender 에서 조각마다 각진다 — 2026-10-19 질문 by @nanangqq). 계단형 조각은 건물처럼 면 법선
+            const normals = mode === "tin" ? computeVertexNormals(mesh.positions, mesh.indices) : undefined
+            for (const g of roadGroups(table)) {
+                node.children.push({
+                    name: roadLabel(table, g.k0),
+                    primitives: roadGroupExportChunks(mesh, table, g, mode, step, STEPPED_CHUNK_BYTES, zAt, normals).map((c) =>
+                        c.normals ? { positions: c.positions, indices: c.indices, normals: c.normals, material } : toFlatPrimitive(c.positions, c.indices, material),
+                    ),
+                    extras: roadAttributes(table, g.k0, g.k1),
+                })
+            }
         } else {
             node.primitives!.push(toFlatPrimitive(mesh.positions, mesh.indices, material))
         }

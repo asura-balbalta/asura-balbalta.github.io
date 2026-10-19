@@ -168,6 +168,8 @@ export function* buildSteppedMeshChunks(
     step: number,
     maxBytes: number,
     onProgress?: (done: number, total: number) => void,
+    /** quiet: 끝에 요약 로그를 찍지 않는다(도로 내보내기가 그룹마다 부를 때) */
+    options: { quiet?: boolean } = {},
 ): Generator<MeshChunk> {
     const started = performance.now()
     let lastProgress = started
@@ -352,6 +354,7 @@ export function* buildSteppedMeshChunks(
     if (indices.length() > 0) yield flush()
     onProgress?.(I0.length / 3, I0.length / 3)
 
+    if (options.quiet) return
     console.log(
         `계단형(${step}m): 원본 삼각형 ${I0.length / 3} → ${totalTriangles}, 정점 ${totalVertices}, ${chunkCount}조각, ${Math.round(performance.now() - started)}ms (yield 한 뒤 받는 쪽이 조각을 처리하는 시간 포함. Worker 에서는 postMessage 시간)`,
     )

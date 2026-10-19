@@ -371,6 +371,7 @@ export const TerrainViewCanvas = ({
                         renderer.updaters.streamTileUpdater(event.tile.id, {
                             terrain: event.tile.terrain,
                             buildings: event.tile.buildings,
+                            roads: event.tile.roadChunks,
                             mode: event.tile.mode,
                             bounds: { min: [event.tile.bounds.min[0], event.tile.bounds.min[1]], max: [event.tile.bounds.max[0], event.tile.bounds.max[1]] },
                         })

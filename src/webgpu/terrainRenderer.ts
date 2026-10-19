@@ -21,6 +21,8 @@ import { initWebGPU } from "./device"
 import {
     createBuildingHighlightShader,
     createBuildingShader,
+    createRoadShader,
+    createRoadSmoothShader,
     createShadowShader,
     createSmoothTerrainShader,
     createSteppedTerrainShader,
@@ -41,7 +43,14 @@ const HEMI_OFFSET = FOG_COLOR_OFFSET + 16 // vec4f: 반구 조명 세기
 const LIGHT_VP_NEAR_OFFSET = HEMI_OFFSET + 16 // 가까운 캐스케이드의 빛 기준 viewProj mat4x4f
 const SKY_OFFSET = LIGHT_VP_NEAR_OFFSET + 64 // vec4f: 태양 방향 xyz + 하늘 켬
 const HIGHLIGHT_COLOR_OFFSET = SKY_OFFSET + 16 // vec4f: 조준점 건물 강조색(테마 accent) + 투명도
-const UNIFORM_SIZE = HIGHLIGHT_COLOR_OFFSET + 16 // viewProj(0~64) + zRange(64~72) + eye(80~92) + stops + buildingColor + lightViewProj + lighting + fogColor + hemi + lightViewProjNear + sky + highlightColor
+const ROAD_COLOR_OFFSET = HIGHLIGHT_COLOR_OFFSET + 16 // vec4f: 도로색
+const UNIFORM_SIZE = ROAD_COLOR_OFFSET + 16 // viewProj(0~64) + zRange(64~72) + eye(80~92) + stops + buildingColor + lightViewProj + lighting + fogColor + hemi + lightViewProjNear + sky + highlightColor + roadColor
+/**
+ * 도로 파이프라인의 깊이 바이어스(상수·기울기 배수). 도로는 지형과 같은 평면에 띄움 0.1 m 로 놓이는데 아주 멀리서 비스듬히 보면 그 차이가
+ * 1픽셀 깊이 아래로 내려가 다시 깊이 싸움이 나므로 비교에 쓰는 깊이만 카메라 쪽으로 치우친다(2026-10-19 결정 by @nanangqq: 띄움 + bias 둘 다).
+ * 역순 깊이(가까울수록 큼)라 양수가 카메라 쪽이다. 디버그 roadsbias= 로 바꾼다(0 이면 끔)
+ */
+const ROAD_DEPTH_BIAS = 1
 const SHADOW_FORMAT: GPUTextureFormat = "depth32float"
 /** 빛 방향(표면에서 빛으로, 남동 위 고도각 60°). shaders.ts 의 LIGHT_DIR 과 같아야 한다. 하늘의 태양은 이 방위각에 테마의 고도를 쓴다 */
 const LIGHT_DIR: Vec3 = [0.40825, -0.40825, 1]
@@ -122,6 +131,18 @@ export type RenderDebug = {
     aoRadius?: number
     /** SSAO 깊이 비교 여유(m). 없으면 AO_PARAMS.bias */
     aoBias?: number
+    /** false 면 도로 레이어를 그리지 않는다(roads=0. 회귀 비교용. 레이어 패널의 "보기" 와 별개) */
+    roads?: boolean
+    /** false 면 도로 얹기의 B(지형 삼각형으로 자르기)를 끈다(roadsclip=0. 범위 확정 때만 적용) */
+    roadsClip?: boolean
+    /** false 면 교량·고가도 지형을 따라가게 한다(roadsbridge=0. 범위 확정 때만 적용) */
+    roadsBridge?: boolean
+    /** 도로 띄움(m). 없으면 roadsMesh ROAD_LIFT_M */
+    roadsLift?: number
+    /** 도로 깊이 바이어스(상수·기울기 배수에 같이 씀). 0 이면 끔. 없으면 ROAD_DEPTH_BIAS */
+    roadsBias?: number
+    /** 도로색("#RRGGBB"). 없으면 테마 roadColor */
+    roadsColor?: string
 }
 /**
  * 둘러보기 중 장면에 그릴 반경(m). 이보다 먼 도엽은 그리지 않는다(L4, 2026-10-14). 안개 1/1200 에서 5 km 의 가시도는 약 1.5 % 라
@@ -315,8 +336,11 @@ const createTerrainDrawingPassAndUpdaters = (
         name: string,
         shader: GPUShaderModuleDescriptor,
         buffers: GPUVertexBufferLayout[],
-        /** overlay: 반투명으로 덮어 그리는 파이프라인(건물 강조). 알파 블렌딩, 깊이는 읽기만(같은 면을 통과하도록 greater-equal) */
-        options: { overlay?: boolean } = {},
+        /**
+         * overlay: 반투명으로 덮어 그리는 파이프라인(건물 강조). 알파 블렌딩, 깊이는 읽기만(같은 면을 통과하도록 greater-equal).
+         * depthBias: 깊이 비교 값을 카메라 쪽으로 치우치는 상수·기울기 배수(도로. 역순 깊이라 양수)
+         */
+        options: { overlay?: boolean; depthBias?: number } = {},
     ) => {
         const shaderModule = device.createShaderModule(shader)
         const pipeline = device.createRenderPipeline({
@@ -343,6 +367,8 @@ const createTerrainDrawingPassAndUpdaters = (
                 format: DEPTH_FORMAT,
                 depthWriteEnabled: !options.overlay,
                 depthCompare: options.overlay ? "greater-equal" : "greater", // 역순 깊이
+                depthBias: options.depthBias ?? 0,
+                depthBiasSlopeScale: options.depthBias ?? 0,
             },
         })
         // layout "auto" 는 셰이더가 실제로 쓰는 바인딩만 레이아웃에 넣는다. 강조(overlay) 셰이더는 uniform 만 써서 섀도 맵 entry 를
@@ -387,7 +413,13 @@ const createTerrainDrawingPassAndUpdaters = (
     }
     const shadowCascades = [createShadowCascade("far", shadowView), createShadowCascade("near", shadowViewNear)]
 
-    const pipelines: Record<TerrainMode | "buildings" | "buildingHighlight", ReturnType<typeof createPipelineSet>> = {
+    const roadsBias = () => getDebug().roadsBias ?? ROAD_DEPTH_BIAS
+    let currentRoadsBias = roadsBias()
+    /** 도로 파이프라인 둘: 법선 없는 조각(계단형 판·벽, 교량)은 면 법선, 법선 있는 조각(매끈한 면)은 지형처럼 정점 법선 보간 */
+    const createRoadsPipeline = () => createPipelineSet("roads", createRoadShader(), [float32x3Layout(0)], { depthBias: currentRoadsBias })
+    const createRoadsSmoothPipeline = () =>
+        createPipelineSet("roads smooth", createRoadSmoothShader(), [float32x3Layout(0), float32x3Layout(1)], { depthBias: currentRoadsBias })
+    const pipelines: Record<TerrainMode | "buildings" | "buildingHighlight" | "roads" | "roadsSmooth", ReturnType<typeof createPipelineSet>> = {
         tin: createPipelineSet("terrain tin", createSmoothTerrainShader(), [
             float32x3Layout(0),
             float32x3Layout(1),
@@ -397,6 +429,9 @@ const createTerrainDrawingPassAndUpdaters = (
         ]),
         buildings: createPipelineSet("buildings", createBuildingShader(), [float32x3Layout(0)]),
         buildingHighlight: createPipelineSet("building highlight", createBuildingHighlightShader(), [float32x3Layout(0)], { overlay: true }),
+        // 깊이 바이어스는 파이프라인 상태라 디버그 값이 바뀌면 다시 만든다(debugUpdater)
+        roads: createRoadsPipeline(),
+        roadsSmooth: createRoadsSmoothPipeline(),
     }
 
     type GpuChunk = {
@@ -407,7 +442,7 @@ const createTerrainDrawingPassAndUpdaters = (
         /** 원본 메쉬 인덱스 배열에서 이 조각이 시작하는 자리(조각이 삼각형 순서대로 나뉘므로). 건물 강조가 삼각형 범위를 조각 안 자리로 옮기는 데 쓴다 */
         indexStart: number
     }
-    const layerVisible: Record<LayerId, boolean> = { terrain: true, buildings: true }
+    const layerVisible: Record<LayerId, boolean> = { terrain: true, buildings: true, roads: true }
 
     /** GPU 에 상주하는 도엽 버퍼 바이트 합(메모리 측정, 2026-10-15) */
     let residentBytes = 0
@@ -561,11 +596,15 @@ const createTerrainDrawingPassAndUpdaters = (
      *
      * @param theme 색표 단계 STOP_COUNT 개(높이 오름차순)와 건물색을 가진 테마. 태양 고도는 디버그 설정(sun)이 있으면 그 값
      */
-    const paletteUpdater = (theme: Pick<TerrainTheme, "stops" | "buildingColor" | "sunAltitude" | "ui">) => {
+    const paletteUpdater = (theme: Pick<TerrainTheme, "stops" | "buildingColor" | "roadColor" | "sunAltitude" | "ui">) => {
         lastTheme = theme
         device.queue.writeBuffer(uniformBuffer, STOPS_OFFSET, stopsToUniform(theme.stops))
         const { r, g, b } = hexToRgb(theme.buildingColor)
         device.queue.writeBuffer(uniformBuffer, BUILDING_COLOR_OFFSET, new Float32Array([r, g, b, 1]))
+        // 도로색: 디버그 roadscolor= 가 있으면 그 값(Chrome 비교용), 없으면 테마
+        const debugRoad = getDebug().roadsColor
+        const road = hexToRgb(debugRoad && /^#[0-9a-fA-F]{6}$/.test(debugRoad) ? debugRoad : theme.roadColor)
+        device.queue.writeBuffer(uniformBuffer, ROAD_COLOR_OFFSET, new Float32Array([road.r, road.g, road.b, 1]))
         // 조준점 건물 강조색: UI 강조색(accent, 라이트 #0f6cbd · 다크 #bae6fd)을 0.45 로 덮는다
         const accent = hexToRgb(theme.ui.accent)
         device.queue.writeBuffer(uniformBuffer, HIGHLIGHT_COLOR_OFFSET, new Float32Array([accent.r, accent.g, accent.b, 0.45]))
@@ -583,7 +622,7 @@ const createTerrainDrawingPassAndUpdaters = (
      * 건물은 건물 파이프라인으로 그린다. 나가면 streamClearUpdater 로 모두 비운다. 선택 범위도 같은 도엽으로 온다(1K 도엽 통일, 계획서 7절 L)
      */
     type TileBounds = { min: [number, number]; max: [number, number] }
-    const streamTiles = new Map<string, { terrain: GpuChunk[]; buildings: GpuChunk[]; mode: TerrainMode; bounds: TileBounds | null }>()
+    const streamTiles = new Map<string, { terrain: GpuChunk[]; buildings: GpuChunk[]; roads: GpuChunk[]; mode: TerrainMode; bounds: TileBounds | null }>()
     /**
      * 거리 거르기 반경(m). 둘러보기 중에만 켜진다(cullRadiusUpdater). 카메라 xy 에서 도엽 xy 범위까지의 거리가 이보다 멀면
      * 장면 pass 에서 빼고, 그림자 pass 는 캐스케이드 반경의 2배 밖을 뺀다(빛 상자가 카메라 앞쪽으로 치우쳐 있어 여유를 둔다).
@@ -604,16 +643,17 @@ const createTerrainDrawingPassAndUpdaters = (
      * 도엽 하나를 올리거나(이전 것은 교체) 뺀다(null).
      *
      * @param id 도엽 id
-     * @param tile 지형 조각(계단형, 또는 법선이 있는 매끈한 면)과 건물 메쉬, 지형 표현 방식, 도엽 xy 범위(거리 거르기용). null 이면 뺀다
+     * @param tile 지형 조각(계단형, 또는 법선이 있는 매끈한 면)과 건물 메쉬, 도로 조각(띄움 적용된 것), 지형 표현 방식, 도엽 xy 범위(거리 거르기용). null 이면 뺀다
      */
     const streamTileUpdater = (
         id: string,
-        tile: { terrain: MeshChunk[]; buildings: TinMesh | null; mode: TerrainMode; bounds?: TileBounds } | null,
+        tile: { terrain: MeshChunk[]; buildings: TinMesh | null; roads?: MeshChunk[]; mode: TerrainMode; bounds?: TileBounds } | null,
     ) => {
         const prev = streamTiles.get(id)
         if (prev) {
             destroyChunks(prev.terrain)
             destroyChunks(prev.buildings)
+            destroyChunks(prev.roads)
             streamTiles.delete(id)
         }
         if (!tile) return
@@ -628,7 +668,8 @@ const createTerrainDrawingPassAndUpdaters = (
                 indexStart += c.indices.length
             }
         }
-        streamTiles.set(id, { terrain, buildings, mode: tile.mode, bounds: tile.bounds ?? null })
+        const roads = (tile.roads ?? []).filter((c) => c.indices.length > 0).map((c) => uploadChunk(`tile ${id} roads`, c))
+        streamTiles.set(id, { terrain, buildings, roads, mode: tile.mode, bounds: tile.bounds ?? null })
     }
     /**
      * 표고 색 범위(uniform offset 64)를 쓴다. 도엽이 하나씩 올라오며 범위가 넓어질 때마다 다시 쓴다
@@ -643,6 +684,7 @@ const createTerrainDrawingPassAndUpdaters = (
         for (const t of streamTiles.values()) {
             destroyChunks(t.terrain)
             destroyChunks(t.buildings)
+            destroyChunks(t.roads)
         }
         streamTiles.clear()
     }
@@ -658,6 +700,11 @@ const createTerrainDrawingPassAndUpdaters = (
             if (eye && t.bounds && distanceToBounds(eye, t.bounds) > radius!) continue
             if (layerVisible.terrain && t.terrain.length > 0) draws.push({ chunks: t.terrain, set: pipelines[t.mode] })
             if (layerVisible.buildings && t.buildings.length > 0) draws.push({ chunks: t.buildings, set: pipelines.buildings })
+            if (layerVisible.roads && getDebug().roads !== false && t.roads.length > 0) {
+                const smooth = t.roads.filter((c) => c.normalBuffer), flat = t.roads.filter((c) => !c.normalBuffer)
+                if (smooth.length > 0) draws.push({ chunks: smooth, set: pipelines.roadsSmooth })
+                if (flat.length > 0) draws.push({ chunks: flat, set: pipelines.roads })
+            }
         }
         return draws
     }
@@ -759,6 +806,13 @@ const createTerrainDrawingPassAndUpdaters = (
     const highlightUpdater = (next: { tileId: string; faceStart: number; faceEnd: number }[]) => {
         highlights = next
     }
+    /** 디버그 roadsbias= 가 바뀌었으면 도로 파이프라인을 새 바이어스로 다시 만든다(debugUpdater 가 부른다) */
+    const roadsBiasUpdater = () => {
+        if (roadsBias() === currentRoadsBias) return
+        currentRoadsBias = roadsBias()
+        pipelines.roads = createRoadsPipeline()
+        pipelines.roadsSmooth = createRoadsSmoothPipeline()
+    }
 
     return {
         scenePass,
@@ -773,6 +827,7 @@ const createTerrainDrawingPassAndUpdaters = (
         elevationRangeUpdater,
         cullRadiusUpdater,
         highlightUpdater,
+        roadsBiasUpdater,
         residentStats,
         layerVisibilityUpdater,
         cameraUpdater,
@@ -869,6 +924,7 @@ export const createTerrainRenderFunctionAndUpdateFunctions = async ({
         refreshPalette()
         sky.setSun(currentSun())
         ao.setParams({ radius: next.aoRadius, bias: next.aoBias })
+        sceneUpdaters.roadsBiasUpdater()
     }
 
     /**

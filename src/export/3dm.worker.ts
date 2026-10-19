@@ -2,6 +2,8 @@ import { ATTRIBUTION_LINE, attributionFileText, attributionPageUrl } from "../at
 import { WALL_SINK_M } from "../buildingsMesh"
 import { buildingAttributes, buildingLabel, buildingRings, NOT_BUILT } from "../buildingTable"
 import { LAYER_DEFS } from "../layers"
+import { roadExportSampler, roadGroupExportChunks } from "../roadsMesh"
+import { roadAttributes, roadGroups, roadLabel } from "../roadTable"
 import type { TinMesh } from "../terrainData"
 import type { TerrainMode } from "../webgpu/terrainRenderer"
 import type { ExportMesh, LayerMeshes } from "./stlClient"
@@ -37,6 +39,8 @@ type Attributes = InstanceType<RhinoModule["ObjectAttributes"]>
 
 /** 삼각형 메쉬는 이 면 수마다 진행률을 보낸다 */
 const PROGRESS_EVERY_FACES = 50_000
+/** 도로 계단화 조각의 버퍼 상한(바이트. Worker 메모리만 고려) */
+const STEPPED_CHUNK_BYTES = 64 * 1048576
 
 const post = (msg: Rhino3dmExportResponse, transfer: Transferable[] = []) => self.postMessage(msg, { transfer })
 
@@ -44,6 +48,7 @@ const post = (msg: Rhino3dmExportResponse, transfer: Transferable[] = []) => sel
 const LAYER_COLORS: Record<string, { r: number; g: number; b: number; a: number }> = {
     terrain: { r: 140, g: 170, b: 120, a: 255 },
     buildings: { r: 200, g: 200, b: 200, a: 255 },
+    roads: { r: 150, g: 150, b: 155, a: 255 },
 }
 
 /**
@@ -197,6 +202,20 @@ self.onmessage = async (e: MessageEvent<Rhino3dmExportRequest>) => {
                 if (k % 500 === 499) progress((k + 1) / table.count, w)
             }
             console.log(`3DM 건물: ${solids}동, ${Math.round(performance.now() - started)}ms`)
+        } else if (id === "roads" && mesh.roadTable) {
+            // 도로: 이은 중심선마다 메쉬 객체(이름 = 도로구분·폭·차로, 속성은 user text), 그룹 "roads". 띄움·계단화는 roadGroupExportChunks
+            const started = performance.now()
+            const table = mesh.roadTable
+            attributes.addToGroup(addGroup(rhino, doc, "roads"))
+            const zAt = roadExportSampler(layers.terrain)
+            const groups = roadGroups(table)
+            groups.forEach((g, i) => {
+                attributes.name = roadLabel(table, g.k0)
+                for (const [key, value] of Object.entries(roadAttributes(table, g.k0, g.k1))) attributes.setUserString(key, String(value))
+                for (const c of roadGroupExportChunks(mesh, table, g, mode, step, STEPPED_CHUNK_BYTES, zAt)) addMesh(c.positions, c.indices)
+                if (i % 200 === 199) progress((i + 1) / groups.length, w)
+            })
+            console.log(`3DM 도로: ${groups.length}구간, ${Math.round(performance.now() - started)}ms`)
         } else {
             addMesh(mesh.positions, mesh.indices, (done, all) => progress(done / all, w))
         }

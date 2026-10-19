@@ -2,6 +2,7 @@ import type { Extent } from "ol/extent"
 import proj4 from "proj4"
 
 import type { BuildingTable } from "./buildingTable"
+import { RoadTable, roadTableBuffers } from "./roadTable"
 import type { MeshChunk, TinMesh } from "./terrainData"
 import { getTtpSheetsInBbox, MB_PER_TILE, neighborReach, SELECTION_TILE_LIMITS } from "./terrainIndex"
 import type { BuildRequest, BuildResponse } from "./terrainTileBuild.worker"
@@ -29,6 +30,15 @@ export type TileStyle = {
     step: number
     /** 이웃 합치기의 경계 띠 폭(m, L5-C). 0 이면 이웃 3×3 전체(옛 동작). 없으면 보조 워커 기본값. 디버그 페이지 band= */
     band?: number
+    /** 도로 레이어 디버그 스위치(roadsMesh). 없으면 기본값 */
+    roads?: RoadsStyle
+}
+/** 도로 얹기 옵션(디버그 페이지 roadsclip=0·roadsbridge=0·roadslift=). clip·bridge 는 메쉬 캐시 키에 들어간다 */
+export type RoadsStyle = {
+    clip?: boolean
+    bridge?: boolean
+    /** 띄움(m). 없으면 ROAD_LIFT_M */
+    lift?: number
 }
 export type TerrainTilesRequest =
     | {
@@ -78,6 +88,14 @@ export type TileData = {
     buildingTable: BuildingTable | null
     /** 세운 건물 수 */
     built: number
+    /** 도로 메쉬(지형과 같은 평면, 띄움 없음. 내보내기·표 범위의 기준). 정점 법선은 워커 캐시와 매끈한 면 화면 조각에만 있고 여기엔 없다. 없으면 null */
+    roads: TinMesh | null
+    /** 그릴 도로 조각(띄움 적용. tin 이면 하나, stepped 면 계단화 조각들). GPU 에 올리면 버린다(releaseTerrain) */
+    roadChunks: MeshChunk[]
+    /** 도로 표(내보내기 속성·그룹용. 삼각형 범위는 roads 기준) */
+    roadTable: RoadTable | null
+    /** 얹은 도로 수(조각 + 띠), 그중 교량·고가, 터널·지하차도라 숨긴 수 */
+    roadStats: { built: number; bridges: number; hidden: number }
 }
 
 export type TerrainTilesResponse =
@@ -249,6 +267,16 @@ const postTile = (data: TileData) => {
             set.add(a.buffer as ArrayBuffer)
         }
     }
+    if (data.roads) {
+        set.add(data.roads.positions.buffer as ArrayBuffer)
+        set.add(data.roads.indices.buffer as ArrayBuffer)
+    }
+    for (const ch of data.roadChunks) {
+        set.add(ch.positions.buffer as ArrayBuffer)
+        set.add(ch.indices.buffer as ArrayBuffer)
+        if (ch.normals) set.add(ch.normals.buffer as ArrayBuffer)
+    }
+    if (data.roadTable) for (const b of roadTableBuffers(data.roadTable)) set.add(b)
     post({ type: "tile", tile: data }, [...set])
 }
 

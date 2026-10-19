@@ -69,6 +69,11 @@ export type TerrainTheme = {
     stops: ElevationStop[]
     /** 건물 레이어 색("#RRGGBB"). 지붕 기준이고 벽은 셰이더가 25% 어둡게 한다 */
     buildingColor: string
+    /**
+     * 도로 레이어 색("#RRGGBB", 종류 구분 없이 한 색. 2026-10-19 결정 by @nanangqq). 바탕 지도 타일(Positron·Dark Matter·Alidade)이 두 톤 모두
+     * 도로를 땅보다 밝게 그리므로 같은 규칙: 평지보다 밝게. 타일 픽셀을 재서 뽑은 값은 아니라 디버그 roadscolor= 로 Chrome 비교 뒤 정한다
+     */
+    roadColor: string
     /** 둘러보기 하늘의 태양 고도(°). 방위각은 그림자 빛(남동)과 같다. 음수면 지평선 아래(저녁) */
     sunAltitude: number
 }
@@ -138,6 +143,7 @@ export const TERRAIN_THEMES: Record<Theme, TerrainTheme> = {
             { z: 1000, hex: "#7E8486" }, // 고산
         ],
         buildingColor: "#CFC9C0", // 평지(#EEEFED)보다 조금 어두운 따뜻한 회색
+        roadColor: "#FAFAF8", // 평지(#EEEFED)보다 밝은 흰색에 가까운 회색(건물보다 밝아 구분)
     },
     dark: {
         basemap: "dark",
@@ -188,6 +194,7 @@ export const TERRAIN_THEMES: Record<Theme, TerrainTheme> = {
             { z: 1000, hex: "#787D80" }, // 고산
         ],
         buildingColor: "#6B7075", // 평지(#313335)보다 밝은 회색
+        roadColor: "#44484C", // 평지보다 밝고 건물보다 어두운 회색
     },
 }
 

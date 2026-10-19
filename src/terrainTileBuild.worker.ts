@@ -3,8 +3,12 @@ import proj4 from "proj4"
 
 import { Building, loadBuildingCodes, loadBuildings } from "./buildingsData"
 import { buildBuildingsMesh } from "./buildingsMesh"
+import { createTerrainSampler } from "./terrainSampler"
 import { BuildingTable, buildingTableBuffers, cloneBuildingTable } from "./buildingTable"
 import { computeVertexNormals, NORMAL_SMOOTH_ITERATIONS, positionsBounds, smoothVertexNormals } from "./meshNormals"
+import { loadRoadCodes, loadRoads, RoadFace, RoadLine } from "./roadsData"
+import { buildRoadsMesh, ROAD_LIFT_M, roadDisplayChunks, RoadMesh } from "./roadsMesh"
+import { cloneRoadTable, ROAD_LINE_FLAG, RoadTable, roadTableBuffers } from "./roadTable"
 import { ClippedMesh, clipMeshToConvexPolygon } from "./terrainClip"
 import { fetchGunzip, MeshChunk, TinMesh } from "./terrainData"
 import { TTP_BASE } from "./terrainIndex"
@@ -164,12 +168,46 @@ const buildingsOf5k = (id5k: string, bbox3857: Extent, origin: [number, number])
     return p
 }
 
+/**
+ * 도엽별 얹은 도로 결과 캐시(roadsMesh 는 지형 평면 그대로라 표현 방식과 무관. 화면 조각은 표현 방식마다 다시 만든다).
+ * 키는 도엽 id + 얹기 스위치(clip·bridge). transfer 전에 복사해 둔다
+ */
+const builtRoadsCache = new Map<string, { roads: RoadMesh | null; roadTable: RoadTable | null; stats: TileData["roadStats"] }>()
+let builtRoadsBytes = 0
+/** 5K 단위 도로 조각·선 목록(xy 범위 m 미리 계산): `${id5k}@${ox},${oy}` → 목록 */
+type WithBounds<T> = { item: T; x0: number; y0: number; x1: number; y1: number }
+const roads5kCache = new Map<string, Promise<{ faces: WithBounds<RoadFace>[]; lines: WithBounds<RoadLine>[] }>>()
+const xyBounds = <T extends { xy: Int32Array }>(item: T): WithBounds<T> => {
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity
+    for (let i = 0; i < item.xy.length; i += 2) {
+        const x = item.xy[i] / 1000, y = item.xy[i + 1] / 1000
+        if (x < x0) x0 = x
+        if (x > x1) x1 = x
+        if (y < y0) y0 = y
+        if (y > y1) y1 = y
+    }
+    return { item, x0, y0, x1, y1 }
+}
+const roadsOf5k = (id5k: string, bbox3857: Extent, origin: [number, number]) => {
+    const key = `${id5k}@${origin[0]},${origin[1]}`
+    let p = roads5kCache.get(key)
+    if (!p) {
+        p = loadRoads(bbox3857, origin).then(({ faces, lines }) => ({ faces: faces.map(xyBounds), lines: lines.map(xyBounds) }))
+        roads5kCache.set(key, p)
+        p.catch(() => roads5kCache.delete(key))
+    }
+    return p
+}
+
 const reset = () => {
     ttpCache.clear()
     tinCache.clear()
     tinCacheBytes = 0
     builtBuildingsCache.clear()
     buildings5kCache.clear()
+    builtRoadsCache.clear()
+    builtRoadsBytes = 0
+    roads5kCache.clear()
 }
 
 /**
@@ -203,6 +241,15 @@ const buildTile = async (job: BuildJob): Promise<{ data: TileData; transfer: Tra
         }
         return merged
     }
+    /** 합친 메쉬의 부드러운 정점 법선(매끈한 면의 자른 TIN 과 도로 정점 법선이 같이 쓴다). 필요할 때 한 번만 */
+    let mergedNormalsCache: Float32Array | null = null
+    const mergedNormals = () => {
+        if (!mergedNormalsCache) {
+            const m = mergedMesh()
+            mergedNormalsCache = smoothVertexNormals(computeVertexNormals(m.positions, m.indices), m.indices, NORMAL_SMOOTH_ITERATIONS)
+        }
+        return mergedNormalsCache
+    }
     const cachedTin = tinCacheGet(t.map_id)
     let tin: ClippedMesh
     let fromCache = false
@@ -212,10 +259,7 @@ const buildTile = async (job: BuildJob): Promise<{ data: TileData; transfer: Tra
     } else {
         // 매끈한 면: 법선은 이웃을 합친 메쉬에서 계산한 뒤 자를 때 같이 실어 경계 정점도 이웃 삼각형을 본 법선을 갖는다
         const m = mergedMesh()
-        const normals = needNormals
-            ? smoothVertexNormals(computeVertexNormals(m.positions, m.indices), m.indices, NORMAL_SMOOTH_ITERATIONS)
-            : undefined
-        tin = clipMeshToConvexPolygon(m, poly, normals)
+        tin = clipMeshToConvexPolygon(m, poly, needNormals ? mergedNormals() : undefined)
         tinCacheSet(t.map_id, tin)
     }
     const t1 = performance.now()
@@ -262,13 +306,77 @@ const buildTile = async (job: BuildJob): Promise<{ data: TileData; transfer: Tra
             console.warn(`도엽 ${t.name} 건물 실패:`, err)
         }
     }
+    const t3 = performance.now()
+
+    // 도로: 5K 단위 목록에서 무게중심이 이 도엽 안인 조각만(선은 교량 보간·띠용으로 전부 넘긴다). 높이는 이웃까지 합친 메쉬로(roadsMesh A + B).
+    // 얹은 메쉬는 표현 방식과 무관해 캐시하고, 화면 조각(띄움·계단화)은 표현 방식마다 만든다
+    let roads: RoadMesh | null = null
+    let roadTable: RoadTable | null = null
+    let roadStats: TileData["roadStats"] = { built: 0, bridges: 0, hidden: 0 }
+    let roadChunks: MeshChunk[] = []
+    const roadsStyle = style.roads ?? {}
+    const roadsKey = `${t.map_id}|${roadsStyle.clip !== false}|${roadsStyle.bridge !== false}`
+    const cachedRoads = builtRoadsCache.get(roadsKey)
+    let roadsNote = ""
+    /** 5K 도로 파일·코드표를 기다린 시간(ms. 처음 받는 5K 는 네트워크가 대부분) */
+    let roadsWait = 0
+    try {
+        if (cachedRoads) {
+            roads = cachedRoads.roads && {
+                ...cachedRoads.roads,
+                positions: cachedRoads.roads.positions.slice(),
+                indices: cachedRoads.roads.indices.slice(),
+                normals: cachedRoads.roads.normals.slice(),
+            }
+            roadTable = cachedRoads.roadTable && cloneRoadTable(cachedRoads.roadTable)
+            roadStats = cachedRoads.stats
+            roadsNote = "(캐시)"
+        } else {
+            const [codes, all] = await Promise.all([loadRoadCodes(), roadsOf5k(t.id5k, extentOf(t.corners.map(to3857)), origin)])
+            roadsWait = performance.now() - t3
+            const bx0 = Math.min(...poly.map((p) => p[0])), bx1 = Math.max(...poly.map((p) => p[0]))
+            const by0 = Math.min(...poly.map((p) => p[1])), by1 = Math.max(...poly.map((p) => p[1]))
+            // 도엽 범위에 걸치는 조각·면 밖 선을 모두 넘기고 roadsMesh 가 도엽 폴리곤으로 자른다(지형처럼. 2026-10-19 지적 by @nanangqq: 무게중심
+            // 기준이면 경계 조각이 도엽 밖으로 길게 튀어나갔다). 경계에 걸친 조각은 양쪽 도엽이 각자 자기 부분만 얹는다. 교량 보간용 선은 전부
+            const touches = (b: { x0: number; y0: number; x1: number; y1: number }) => b.x1 >= bx0 && b.x0 <= bx1 && b.y1 >= by0 && b.y0 <= by1
+            const inside: RoadFace[] = all.faces.filter(touches).map((b) => b.item)
+            const linesHere = all.lines.filter((b) => !(b.item.flags & ROAD_LINE_FLAG.outsideFace) || touches(b)).map((b) => b.item)
+            if (inside.length > 0 || linesHere.some((l) => l.flags & ROAD_LINE_FLAG.outsideFace)) {
+                const r = buildRoadsMesh(inside, linesHere, mergedMesh(), codes, {
+                    clip: roadsStyle.clip,
+                    bridge: roadsStyle.bridge,
+                    clipTo: poly,
+                    terrainNormals: mergedNormals(),
+                })
+                if (r.mesh.indices.length > 0) {
+                    roads = r.mesh
+                    roadTable = r.table
+                }
+                roadStats = { built: r.built, bridges: r.bridges, hidden: r.hidden }
+                roadsNote = r.skipped ? `(지형 밖 ${r.skipped})` : ""
+            }
+            builtRoadsCache.set(roadsKey, {
+                roads: roads && { ...roads, positions: roads.positions.slice(), indices: roads.indices.slice(), normals: roads.normals.slice() },
+                roadTable: roadTable && cloneRoadTable(roadTable),
+                stats: roadStats,
+            })
+            if (roads) builtRoadsBytes += roads.positions.byteLength + roads.indices.byteLength + roads.normals.byteLength
+        }
+        if (roads && roadTable) {
+            const lift = roadsStyle.lift ?? ROAD_LIFT_M
+            const zAt = style.mode === "stepped" ? (() => { const m = mergedMesh(); return createTerrainSampler(m.positions, m.indices) })() : null
+            roadChunks = roadDisplayChunks(roads, roadTable, style.mode, style.step, lift, maxBytes, zAt)
+        }
+    } catch (err) {
+        console.warn(`도엽 ${t.name} 도로 실패:`, err)
+    }
     console.log(
-        `도엽 ${t.name}${extra ? "(밖)" : ""}: ${fromCache ? "캐시" : `이웃 ${ttpTiles.length}개 ${mergeNote} 합침`} ${Math.round(t1 - t0)}ms, ${style.mode} ${Math.round(t2 - t1)}ms, 삼각형 ${tin.indices.length / 3}, 건물 ${built}${cached ? "(캐시)" : ""}, ${Math.round(performance.now() - t2)}ms`,
+        `도엽 ${t.name}${extra ? "(밖)" : ""}: ${fromCache ? "캐시" : `이웃 ${ttpTiles.length}개 ${mergeNote} 합침`} ${Math.round(t1 - t0)}ms, ${style.mode} ${Math.round(t2 - t1)}ms, 삼각형 ${tin.indices.length / 3}, 건물 ${built}${cached ? "(캐시)" : ""} ${Math.round(t3 - t2)}ms, 도로 ${roadStats.built}(교량 ${roadStats.bridges}, 숨김 ${roadStats.hidden})${roadsNote} ${roadsWait > 50 ? `받기 ${Math.round(roadsWait)}ms + ` : ""}${Math.round(performance.now() - t3 - roadsWait)}ms`,
     )
 
     builtCount++
     if (builtCount % 50 === 0) {
-        console.log(`메모리(보조 워커 캐시): 만든 도엽 ${builtCount}, 자른 TIN ${(tinCacheBytes / 1048576).toFixed(1)} MB(${tinCache.size}개), 건물 결과 ${(builtBuildingsBytes / 1048576).toFixed(1)} MB(${builtBuildingsCache.size}개), 5K 파일 ${ttpCache.size}개, 5K 건물 목록 ${buildings5kCache.size}개`)
+        console.log(`메모리(보조 워커 캐시): 만든 도엽 ${builtCount}, 자른 TIN ${(tinCacheBytes / 1048576).toFixed(1)} MB(${tinCache.size}개), 건물 결과 ${(builtBuildingsBytes / 1048576).toFixed(1)} MB(${builtBuildingsCache.size}개), 도로 결과 ${(builtRoadsBytes / 1048576).toFixed(1)} MB(${builtRoadsCache.size}개), 5K 파일 ${ttpCache.size}개, 5K 건물 목록 ${buildings5kCache.size}개, 5K 도로 목록 ${roads5kCache.size}개`)
     }
     const xy = positionsBounds(tin.positions)
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
@@ -289,6 +397,12 @@ const buildTile = async (job: BuildJob): Promise<{ data: TileData; transfer: Tra
         buildings,
         buildingTable,
         built,
+        // 메인 사본에는 법선을 보내지 않는다(쓰는 곳이 없다: 내보내기는 법선을 안 쓰고, 표현 방식 전환의 화면 조각은 워커 캐시에서 다시 만든다.
+        // 2026-10-19 지적 by @nanangqq). 법선은 워커 캐시와 매끈한 면 화면 조각에만
+        roads: roads && { origin: roads.origin, positions: roads.positions, indices: roads.indices },
+        roadChunks,
+        roadTable,
+        roadStats,
     }
     return { data, transfer: transferablesOf(data) }
 }
@@ -306,6 +420,16 @@ export const transferablesOf = (data: TileData): Transferable[] => {
         set.add(data.buildings.indices.buffer as ArrayBuffer)
     }
     if (data.buildingTable) for (const b of buildingTableBuffers(data.buildingTable)) set.add(b)
+    if (data.roads) {
+        set.add(data.roads.positions.buffer as ArrayBuffer)
+        set.add(data.roads.indices.buffer as ArrayBuffer)
+    }
+    for (const ch of data.roadChunks) {
+        set.add(ch.positions.buffer as ArrayBuffer)
+        set.add(ch.indices.buffer as ArrayBuffer)
+        if (ch.normals) set.add(ch.normals.buffer as ArrayBuffer)
+    }
+    if (data.roadTable) for (const b of roadTableBuffers(data.roadTable)) set.add(b)
     return [...set]
 }
 
