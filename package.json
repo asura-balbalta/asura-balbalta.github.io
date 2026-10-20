@@ -1,8 +1,14 @@
 {
-    "name": "fb_web",
-    "version": "1.0.0",
-    "description": "",
-    "main": "index.js",
+    "name": "asrbbt_web",
+    "version": "0.1.0",
+    "description": "WebGPU 지형·건물·도로 뷰어 — 한국 공공데이터 기반 3D 지형과 STL·SKP·3DM·GLB 내보내기",
+    "private": true,
+    "license": "MIT",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/asura-balbalta/asura-balbalta.github.io.git"
+    },
+    "homepage": "https://asura-balbalta.github.io",
     "scripts": {
         "prebuild": "mkdir -p dist/export && cp node_modules/rhino3dm/rhino3dm.min.js node_modules/rhino3dm/rhino3dm.wasm dist/export/",
         "build": "esbuild --bundle src/index.tsx src/*.worker.ts src/export/*.worker.ts --outdir=dist --minify",
@@ -15,8 +21,7 @@
         "band-check": "esbuild scripts/tileBandCheck.ts --bundle --platform=node --format=esm --log-level=warning --outfile=node_modules/.cache/fb_web/tileBandCheck.mjs && node node_modules/.cache/fb_web/tileBandCheck.mjs",
         "postinstall": "patch-package"
     },
-    "author": "",
-    "license": "ISC",
+    "author": "asura-balbalta",
     "prettier": {
         "semi": false,
         "tabWidth": 4,

@@ -5,5 +5,8 @@ node_modules
 .claude
 skills-lock.json
 
-# 렌더 확인 자동 캡처(scripts/render-check.mjs)의 PNG·지표. 보고서에 쓸 것만 docs/report-assets/ 로 복사한다
+# 렌더 확인 자동 캡처(scripts/render-check.mjs)의 PNG·지표
 docs/render-checks/
+
+# Firebase Hosting 배포 캐시(비공개 작업 저장소에서만 추적)
+.firebase/
