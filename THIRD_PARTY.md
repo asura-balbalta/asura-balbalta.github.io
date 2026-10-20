@@ -1,5 +1,7 @@
 # 서드파티 고지 (Third-party notices)
 
+> 이 문서는 Claude(Anthropic 의 AI)가 `package-lock.json` 과 `node_modules` 의 라이선스 필드를 읽고 작성했고 @nanangqq 가 검토했다.
+
 이 저장소의 코드는 MIT 라이선스([`LICENSE`](LICENSE))로 배포한다. 아래는 번들에 들어가거나 빌드·검증에 쓰이는 외부 코드와 그 라이선스다.
 버전은 `package-lock.json` 기준(2026-10-20). 라이선스 전문은 각 패키지의 `node_modules/<이름>/LICENSE*` 에 있다.
 

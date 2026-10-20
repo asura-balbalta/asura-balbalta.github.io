@@ -2,6 +2,8 @@
 
 [한국어](README.md)
 
+> This document was written by Claude (an AI by Anthropic) from the repository contents and reviewed by @nanangqq. Public documents in this repository carry this notice unless written by a person.
+
 A WebGPU viewer that renders Korean terrain, buildings and roads in 3D in the browser and exports them. Pick an area on the map, and the app
 downloads the 1K map sheets inside it, builds a terrain TIN, and drapes buildings and roads on top. You can walk around in first person and export
 to STL, SKP, 3DM or GLB. It runs from static files with no server of its own.
