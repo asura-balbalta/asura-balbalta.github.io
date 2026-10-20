@@ -139,7 +139,8 @@ button.ui-status-pill:focus-visible,
     left: 50%;
     bottom: calc(28px + 12px + 48px + 8px);
     transform: translateX(-50%);
-    z-index: 20;
+    /* 지도 안내 알약(.ui-pill, 20)보다 위. 둘 다 20 이면 DOM 뒤에 오는 알약이 패널을 덮었다(2026-10-20 확인 by @nanangqq) */
+    z-index: 21;
     width: 272px;
     max-height: calc(100vh - 96px - 12px);
     display: flex;
@@ -1350,4 +1351,68 @@ button.ui-status-pill {
         font-size: 9px;
         line-height: 12px;
     }
+}
+
+/* ---- 설정 패널 "색상표" 절(PaletteEditor.tsx, 2026-10-20 계획서 13절) ---- */
+.ui-palette {
+    padding: 4px 14px 10px;
+    font-size: 12px;
+    display: grid;
+    gap: 8px;
+}
+.ui-palette-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+}
+.ui-palette-note {
+    color: var(--ui-text-secondary);
+    font-size: 11px;
+}
+.ui-palette-head {
+    color: var(--ui-text-secondary);
+    font-size: 11px;
+    margin-top: 2px;
+}
+.ui-palette-grid {
+    display: grid;
+    grid-template-columns: auto 1fr auto 1fr auto 1fr;
+    align-items: center;
+    gap: 6px 8px;
+}
+.ui-palette-stops {
+    display: grid;
+    grid-template-columns: 1fr auto auto;
+    align-items: center;
+    gap: 4px 8px;
+}
+.ui-palette-sliders {
+    display: grid;
+    grid-template-columns: 64px 1fr 44px;
+    align-items: center;
+    gap: 2px 8px;
+}
+.ui-palette-value {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    color: var(--ui-text-secondary);
+}
+.ui-palette-color {
+    width: 36px;
+    height: 22px;
+    padding: 0;
+    border: 1px solid var(--ui-border);
+    border-radius: 4px;
+    background: transparent;
+    cursor: pointer;
+}
+.ui-quality-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    padding: 0 8px 6px;
+    font-size: 13px;
+}
+.ui-palette-dialog {
+    max-width: 440px;
 }

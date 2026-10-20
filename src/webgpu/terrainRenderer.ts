@@ -1,6 +1,7 @@
 import { LayerId } from "../layers"
 import { MeshChunk, TinMesh } from "../terrainData"
-import { hexToRgb, STOP_COUNT, stopsToUniform, TerrainTheme } from "../terrainTheme"
+import { DEFAULT_WALK_LIGHTING, QualitySettings, ScenePalette, WalkLightingStrength } from "../scenePalette"
+import { hexToRgb, STOP_COUNT, stopsToUniform } from "../terrainTheme"
 import { createAoPasses } from "./ao"
 import { createSkyPass, sunDirection } from "./sky"
 import type { AoDebugMode } from "./ao"
@@ -152,17 +153,34 @@ export const WALK_CULL_RADIUS = 5000
 /** 외곽선 기본 세기(0.18 = 18% 어둡게. 0.25 는 진했다, 2026-10-13). Chrome 에서 edge= 로 비교해 정하면 바꾼다 by @nanangqq */
 const EDGE_STRENGTH = 0.18
 /**
- * 둘러보기(걸어 보기) 조명. 디버그 설정으로 SSAO·그림자·하늘을 끄거나 외곽선 세기를 바꿀 수 있다
- *
- * @param debug 렌더 디버그 설정(운영은 {})
+ * 품질 설정(설정 패널의 그림자·SSAO·하늘·외곽선 켜고 끄기)을 렌더 디버그 설정에 합친다. 디버그 파라미터가 명시되어 있으면 그것이 우선이고,
+ * 없으면 품질 설정이 끈 효과를 끈다(외곽선은 edge=0)
  */
-export const walkLighting = (debug: RenderDebug = {}): Lighting => ({
-    ambient: 0.5,
-    diffuse: 0.5,
+export const effectiveDebug = (debug: RenderDebug = {}, quality?: QualitySettings): RenderDebug => {
+    if (!quality) return debug
+    return {
+        ...debug,
+        shadow: debug.shadow ?? quality.shadows,
+        ao: debug.ao ?? quality.ao,
+        sky: debug.sky ?? quality.sky,
+        edge: debug.edge ?? (quality.edge ? undefined : 0),
+    }
+}
+
+/**
+ * 둘러보기(걸어 보기) 조명. 디버그 설정으로 SSAO·그림자·하늘을 끄거나 외곽선 세기를 바꿀 수 있다. 세기(주변광·난반사·반구·안개 밀도)는
+ * 색상표(ScenePalette.walkLighting)에서 온다
+ *
+ * @param debug 렌더 디버그 설정(운영은 품질 설정을 합친 것. effectiveDebug)
+ * @param strength 색상표의 조명 세기. 없으면 기본값
+ */
+export const walkLighting = (debug: RenderDebug = {}, strength: WalkLightingStrength = DEFAULT_WALK_LIGHTING): Lighting => ({
+    ambient: strength.ambient,
+    diffuse: strength.diffuse,
     shadows: debug.shadow !== false,
     shadowRadius: 250,
-    fogDensity: 1 / 1200,
-    hemisphere: 0.35,
+    fogDensity: strength.fogDensity,
+    hemisphere: strength.hemisphere,
     ao: debug.ao !== false,
     sky: debug.sky !== false,
     edge: debug.edge ?? EDGE_STRENGTH,
@@ -591,30 +609,31 @@ const createTerrainDrawingPassAndUpdaters = (
     }
 
     /**
-     * 표고 색표(uniform offset STOPS_OFFSET)와 건물색(BUILDING_COLOR_OFFSET)을 쓴다. 테마 전환 때 부른다.
-     * 셰이더·파이프라인은 그대로다.
+     * 표고 색표(uniform offset STOPS_OFFSET)·건물색·도로색·강조색을 쓴다. 색상표 선택·편집·톤 전환 때 부른다(2026-10-20 계획서 13절).
+     * 셰이더·파이프라인은 그대로라 편집할 때마다 바로 반영된다.
      *
-     * @param theme 색표 단계 STOP_COUNT 개(높이 오름차순)와 건물색을 가진 테마. 태양 고도는 디버그 설정(sun)이 있으면 그 값
+     * @param palette 장면 색상표(색표 단계 STOP_COUNT 개 높이 오름차순, 건물색, 도로색, 태양 고도). 태양 고도는 디버그 설정(sun)이 있으면 그 값
+     * @param accentHex 톤의 UI 강조색("#RRGGBB"). 조준점 건물 강조색
      */
-    const paletteUpdater = (theme: Pick<TerrainTheme, "stops" | "buildingColor" | "roadColor" | "sunAltitude" | "ui">) => {
-        lastTheme = theme
-        device.queue.writeBuffer(uniformBuffer, STOPS_OFFSET, stopsToUniform(theme.stops))
-        const { r, g, b } = hexToRgb(theme.buildingColor)
+    const paletteUpdater = (palette: ScenePalette, accentHex: string) => {
+        lastPalette = [palette, accentHex]
+        device.queue.writeBuffer(uniformBuffer, STOPS_OFFSET, stopsToUniform(palette.stops))
+        const { r, g, b } = hexToRgb(palette.buildingColor)
         device.queue.writeBuffer(uniformBuffer, BUILDING_COLOR_OFFSET, new Float32Array([r, g, b, 1]))
-        // 도로색: 디버그 roadscolor= 가 있으면 그 값(Chrome 비교용), 없으면 테마
+        // 도로색: 디버그 roadscolor= 가 있으면 그 값(Chrome 비교용), 없으면 색상표
         const debugRoad = getDebug().roadsColor
-        const road = hexToRgb(debugRoad && /^#[0-9a-fA-F]{6}$/.test(debugRoad) ? debugRoad : theme.roadColor)
+        const road = hexToRgb(debugRoad && /^#[0-9a-fA-F]{6}$/.test(debugRoad) ? debugRoad : palette.roadColor)
         device.queue.writeBuffer(uniformBuffer, ROAD_COLOR_OFFSET, new Float32Array([road.r, road.g, road.b, 1]))
-        // 조준점 건물 강조색: UI 강조색(accent, 라이트 #0f6cbd · 다크 #bae6fd)을 0.45 로 덮는다
-        const accent = hexToRgb(theme.ui.accent)
+        // 조준점 건물 강조색: 톤의 UI 강조색(accent, 라이트 #0f6cbd · 다크 #bae6fd)을 0.45 로 덮는다
+        const accent = hexToRgb(accentHex)
         device.queue.writeBuffer(uniformBuffer, HIGHLIGHT_COLOR_OFFSET, new Float32Array([accent.r, accent.g, accent.b, 0.45]))
-        sunDir = sunDirection(getDebug().sun ?? theme.sunAltitude, [LIGHT_DIR[0], LIGHT_DIR[1]])
+        sunDir = sunDirection(getDebug().sun ?? palette.sunAltitude, [LIGHT_DIR[0], LIGHT_DIR[1]])
         writeSky()
     }
-    /** 마지막 테마. 디버그 설정이 바뀌면 같은 테마로 태양을 다시 쓴다(refreshPalette) */
-    let lastTheme: Parameters<typeof paletteUpdater>[0] | null = null
+    /** 마지막 색상표와 강조색. 디버그 설정이 바뀌면 같은 값으로 태양·도로색을 다시 쓴다(refreshPalette) */
+    let lastPalette: [ScenePalette, string] | null = null
     const refreshPalette = () => {
-        if (lastTheme) paletteUpdater(lastTheme)
+        if (lastPalette) paletteUpdater(...lastPalette)
     }
 
     /**
@@ -908,9 +927,9 @@ export const createTerrainRenderFunctionAndUpdateFunctions = async ({
         ao.setCamera(viewProj, invViewProj, eye)
         sky.setCamera(invViewProj, eye)
     })
-    /** 색표·건물색·태양 고도(테마)를 바꾼다. 하늘 pass 에도 태양을 알린다 */
-    const paletteUpdater = (theme: Parameters<typeof sceneUpdaters.paletteUpdater>[0]) => {
-        sceneUpdaters.paletteUpdater(theme)
+    /** 색상표(색표·건물색·도로색·태양 고도)와 톤의 강조색을 바꾼다. 하늘 pass 에도 태양을 알린다 */
+    const paletteUpdater = (palette: ScenePalette, accentHex: string) => {
+        sceneUpdaters.paletteUpdater(palette, accentHex)
         sky.setSun(currentSun())
     }
     /** 배경색(= 안개색)을 바꾼다(다음 프레임부터). 테마 전환용 */

@@ -18,6 +18,7 @@ import { SquarePhase, SquareTool } from "./squareTool"
 import type { RoadsStyle } from "./terrainTiles.worker"
 import { createTerrainTiles, TerrainTilesClient, TerrainTilesEvent } from "./terrainTilesClient"
 import { TERRAIN_THEMES, Theme } from "./terrainTheme"
+import { PaletteStore, usePalettes } from "./usePalettes"
 import { ExportPanel } from "./ui/ExportPanel"
 import { HintPill } from "./ui/HintPill"
 import { LayersPanel } from "./ui/LayersPanel"
@@ -185,7 +186,10 @@ export default function AppRoot({
     onDebugState,
     env,
 }: { preset?: AppPreset; renderDebug?: RenderDebug; onDebugState?: (state: AppDebugState) => void; env?: AppEnv } = {}) {
-    const [theme, setTheme] = useState<Theme>(INITIAL_THEME)
+    // 색상표(장면 색)가 톤(UI·지도 라이트/다크)을 정한다. 톤 버튼은 그 톤의 내장 색상표를 고르는 것(계획서 13절 P2)
+    const paletteStore = usePalettes(INITIAL_THEME)
+    const theme = paletteStore.palette.tone
+    const setTheme = (next: Theme) => paletteStore.select(next)
     const isMobile = useMediaQuery(MOBILE_QUERY)
     /** 리퀴드 글래스 프로토타입의 루트(유리 요소·3D 캔버스의 부모) */
     const rootRef = useRef<HTMLDivElement | null>(null)
@@ -194,6 +198,7 @@ export default function AppRoot({
             <App
                 theme={theme}
                 setTheme={setTheme}
+                paletteStore={paletteStore}
                 isMobile={isMobile}
                 rootRef={rootRef}
                 preset={preset}
@@ -224,6 +229,7 @@ export default function AppRoot({
 function App({
     theme,
     setTheme,
+    paletteStore,
     isMobile,
     rootRef,
     preset,
@@ -233,6 +239,8 @@ function App({
 }: {
     theme: Theme
     setTheme: (theme: Theme) => void
+    /** 색상표·품질 설정(usePalettes). 캔버스와 설정 패널에 넘긴다 */
+    paletteStore: PaletteStore
     isMobile: boolean
     rootRef: React.RefObject<HTMLDivElement | null>
     preset?: AppPreset
@@ -747,6 +755,8 @@ function App({
                     mode={mode}
                     stepInterval={stepInterval}
                     theme={theme}
+                    palette={paletteStore.palette}
+                    quality={paletteStore.quality}
                     hidden={view === "map"}
                     walking={walking}
                     walkFocused={walkFocused}
@@ -874,6 +884,7 @@ function App({
                     <SettingsPanel
                         theme={theme}
                         onTheme={setTheme}
+                        paletteStore={paletteStore}
                         basemap={basemap}
                         onBasemap={setBasemap}
                         mode={mode}

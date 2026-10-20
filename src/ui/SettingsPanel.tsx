@@ -1,9 +1,11 @@
-import { Button, Input } from "@fluentui/react-components"
+import { Button, Checkbox, Input } from "@fluentui/react-components"
 import React, { useEffect, useState } from "react"
 
 import { BASEMAP_PROVIDERS, BasemapProvider } from "../basemap"
 import { Theme } from "../terrainTheme"
+import type { PaletteStore } from "../usePalettes"
 import type { TerrainMode } from "../webgpu/terrainRenderer"
+import { PaletteSection } from "./PaletteEditor"
 
 /** 둘 중 하나를 고르는 세그먼트. 고른 쪽은 primary, 나머지는 secondary 버튼 */
 const Segment = <T extends string>({
@@ -40,15 +42,18 @@ const STEP_MIN = 0.3
 const STEP_MAX = 5
 
 /**
- * 설정 패널의 내용. 테마 · 바탕 지도 · 보기 모드 · 계단 간격. 테마·바탕 지도·보기는 누르면 즉시 적용되고,
+ * 설정 패널의 내용. 테마(톤) · 색상표(PaletteSection) · 바탕 지도 · 보기 모드 · 계단 간격 · 품질. 테마·색상표·바탕 지도·보기·품질은 즉시 적용되고,
  * 계단 간격은 숫자를 바꾼 뒤 "다시 만들기"(또는 Enter)를 눌러야 적용된다(계단형 지형을 다시 만드는 일이라 명시적으로).
+ * 테마 버튼은 그 톤의 내장 색상표를 고르는 것이고, 색상표를 고르면 톤이 따라간다(계획서 13절).
  *
+ * @param props.paletteStore 색상표·품질 설정(usePalettes)
  * @param props.modeDisabled 아직 3D 지형이 없어 보기 모드를 바꿀 수 없을 때
  * @param props.onAttribution 꼬리말의 "데이터 출처" 를 눌렀을 때(출처 창 열기)
  */
 export const SettingsPanel = ({
     theme,
     onTheme,
+    paletteStore,
     basemap,
     onBasemap,
     mode,
@@ -60,6 +65,7 @@ export const SettingsPanel = ({
 }: {
     theme: Theme
     onTheme: (theme: Theme) => void
+    paletteStore: PaletteStore
     basemap: BasemapProvider
     onBasemap: (basemap: BasemapProvider) => void
     mode: TerrainMode
@@ -92,6 +98,7 @@ export const SettingsPanel = ({
                     onChange={onTheme}
                 />
             </div>
+            <PaletteSection store={paletteStore} />
             <div className="ui-settings-row">
                 <span>바탕 지도</span>
                 <Segment
@@ -138,8 +145,29 @@ export const SettingsPanel = ({
                     </Button>
                 </span>
             </div>
+            <div className="ui-settings-divider" />
+            <div className="ui-settings-head ui-label">품질 (둘러보기)</div>
+            <div className="ui-quality-grid">
+                {(
+                    [
+                        ["shadows", "그림자"],
+                        ["ao", "주변광 차폐"],
+                        ["sky", "하늘"],
+                        ["edge", "외곽선"],
+                    ] as const
+                ).map(([key, label]) => (
+                    <Checkbox
+                        key={key}
+                        size="medium"
+                        label={label}
+                        checked={paletteStore.quality[key]}
+                        onChange={(_, data) => paletteStore.setQuality({ [key]: data.checked === true })}
+                    />
+                ))}
+            </div>
             <div className="ui-panel-footer">
-                계단 간격은 {STEP_MIN} ~ {STEP_MAX} m 입니다. 바꾼 뒤 "다시 만들기" 를 누르면 계단형 지형을 다시 만듭니다.
+                계단 간격은 {STEP_MIN} ~ {STEP_MAX} m 입니다. 바꾼 뒤 "다시 만들기" 를 누르면 계단형 지형을 다시 만듭니다. 내장 그래픽처럼 느린
+                기기에서 둘러보기 프레임이 낮으면 품질의 그림자·주변광 차폐부터 끄세요.
                 <div className="ui-panel-footer-line">
                     지형·건물은 공공데이터를 가공한 것입니다.{" "}
                     <button type="button" className="ui-link" onClick={onAttribution}>

@@ -5,7 +5,8 @@ import { createPlayer, Player, PlayerMove, WalkPhysics } from "../player"
 import { createHeightSampler, HeightSampler, nearestTriangleCentroid } from "../terrainHeight"
 import type { TerrainTilesClient } from "../terrainTilesClient"
 import type { TileData } from "../terrainTiles.worker"
-import { TERRAIN_THEMES, Theme } from "../terrainTheme"
+import { builtinPalette, DEFAULT_QUALITY, QualitySettings, ScenePalette } from "../scenePalette"
+import { hexToRgb, TERRAIN_THEMES, Theme } from "../terrainTheme"
 import { FpsCamera, fpsForward, OrbitCamera } from "../webgpu/camera"
 import { BuildingHit, createBuildingPicker } from "../buildingPick"
 
@@ -14,6 +15,7 @@ const PICK_RANGE_M = 1000
 import {
     createTerrainRenderFunctionAndUpdateFunctions,
     DEFAULT_LIGHTING,
+    effectiveDebug,
     MeshBounds,
     RenderDebug,
     TerrainMode,
@@ -107,6 +109,8 @@ export const TerrainViewCanvas = ({
     mode = "tin",
     stepInterval = 1,
     theme = "light",
+    palette = builtinPalette(theme),
+    quality = DEFAULT_QUALITY,
     hidden = false,
     walking = false,
     walkFocused = false,
@@ -128,6 +132,10 @@ export const TerrainViewCanvas = ({
     mode?: TerrainMode
     stepInterval?: number
     theme?: Theme
+    /** 장면 색상표(scenePalette). 기본은 톤의 내장 색상표. 바뀌면 uniform 만 다시 쓴다 */
+    palette?: ScenePalette
+    /** 품질 설정(그림자·SSAO·하늘·외곽선). 둘러보기 조명에 합친다(effectiveDebug) */
+    quality?: QualitySettings
     hidden?: boolean
     walking?: boolean
     walkFocused?: boolean
@@ -155,6 +163,12 @@ export const TerrainViewCanvas = ({
     onWalkTileCountRef.current = onWalkTileCount
     const renderDebugRef = useRef(renderDebug)
     renderDebugRef.current = renderDebug
+    const paletteRef = useRef(palette)
+    paletteRef.current = palette
+    const qualityRef = useRef(quality)
+    qualityRef.current = quality
+    /** 둘러보기 조명: 디버그 설정 + 품질 설정 + 색상표의 세기 */
+    const currentWalkLighting = () => walkLighting(effectiveDebug(renderDebugRef.current, qualityRef.current), paletteRef.current.walkLighting)
     const onErrorRef = useRef(onError)
     onErrorRef.current = onError
     const onBuildingLookRef = useRef(onBuildingLook)
@@ -213,7 +227,7 @@ export const TerrainViewCanvas = ({
             canvasId,
             width: Math.round(size.width * size.dpr),
             height: Math.round(size.height * size.dpr),
-            backgroundColor: TERRAIN_THEMES[theme].background,
+            backgroundColor: hexToRgb(paletteRef.current.background),
             debug: renderDebugRef.current,
         })
             .then((r) => {
@@ -279,9 +293,16 @@ export const TerrainViewCanvas = ({
 
     useEffect(() => {
         if (!renderer) return
-        renderer.updaters.paletteUpdater(TERRAIN_THEMES[theme])
-        renderer.updaters.backgroundUpdater(TERRAIN_THEMES[theme].background)
-    }, [renderer, theme])
+        renderer.updaters.paletteUpdater(palette, TERRAIN_THEMES[theme].ui.accent)
+        renderer.updaters.backgroundUpdater(hexToRgb(palette.background))
+        // 둘러보기 중이면 색상표의 조명 세기도 바로
+        if (walkRef.current) renderer.updaters.lightingUpdater(currentWalkLighting())
+    }, [renderer, theme, palette])
+    // 품질 설정이 바뀌면 둘러보기 조명(효과 켜고 끄기)을 다시 쓴다
+    useEffect(() => {
+        if (!renderer || !walkRef.current) return
+        renderer.updaters.lightingUpdater(currentWalkLighting())
+    }, [renderer, quality])
 
     useEffect(() => {
         if (!renderer) return
@@ -504,7 +525,7 @@ export const TerrainViewCanvas = ({
         })
         walkRef.current = player
         pointersRef.current.clear()
-        renderer.updaters.lightingUpdater(walkLighting(renderDebugRef.current))
+        renderer.updaters.lightingUpdater(currentWalkLighting())
         // 거리 거르기(L4): 반경 밖 도엽은 그리지 않는다. 궤도 보기로 돌아가면 끈다
         renderer.updaters.cullRadiusUpdater(renderDebugRef.current?.walkRadius ?? WALK_CULL_RADIUS)
         player.attach(canvas)
@@ -560,7 +581,7 @@ export const TerrainViewCanvas = ({
         if (!renderer) return
         renderer.updaters.debugUpdater(renderDebug ?? {})
         if (walkRef.current) {
-            renderer.updaters.lightingUpdater(walkLighting(renderDebug))
+            renderer.updaters.lightingUpdater(currentWalkLighting())
             renderer.updaters.cullRadiusUpdater(renderDebug?.walkRadius ?? WALK_CULL_RADIUS)
         }
     }, [renderer, renderDebug])
