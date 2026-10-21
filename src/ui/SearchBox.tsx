@@ -35,10 +35,13 @@ const Highlight = ({ text, query }: { text: string; query: string }) => {
 /**
  * 주소 검색 알약(위 가운데 유리)과 그 아래 결과 패널(화면 시안 "주소 검색"). 지도 화면에서만 쓴다.
  *
- * 패널은 입력란에 포커스가 있는 동안 열린다. 검색어가 비어 있으면 "현재 위치로 이동" 과 입력 안내, 검색 중이면 진행 막대,
- * 결과가 없으면 안내 문구, 있으면 행(이름 + 주소). ↑↓ 로 행을 고르고 Enter 로 선택, Esc 는 검색어가 있으면 지우고 없으면
- * 닫는다. 입력 중이 아닐 때 "/" 를 누르면 입력란으로 포커스. 행은 pointerdown 에서 preventDefault 해 입력란의 포커스를
- * 유지한 채 클릭된다. 모양은 ui.css(.ui-search, .ui-search-panel)
+ * 패널은 입력란에 포커스가 오면 열리고, **선택·Esc·알약과 패널 바깥을 누를 때(document pointerdown)** 닫힌다. blur 로는 닫지
+ * 않는다: 카카오톡 내장 브라우저(WebView)는 행을 탭할 때 pointerdown 의 preventDefault 를 존중하지 않아 손을 떼는 순간 입력란이
+ * blur 되고, blur 로 패널을 닫으면 click 이 오기 전에 행이 사라져 선택이 안 됐다(2026-10-21 보고 by @nanangqq. 데스크톱·Chrome 은
+ * 정상). 검색어가 비어 있으면 "현재 위치로 이동" 과 입력 안내, 검색 중이면 진행 막대, 결과가 없으면 안내 문구, 있으면
+ * 행(이름 + 주소). ↑↓ 로 행을 고르고 Enter 로 선택, Esc 는 검색어가 있으면 지우고 없으면 닫는다. 입력 중이 아닐 때 "/" 를
+ * 누르면 입력란으로 포커스. 행은 pointerdown 에서 preventDefault 해 입력란의 포커스를 유지한 채 클릭된다(데스크톱).
+ * 모양은 ui.css(.ui-search, .ui-search-panel)
  *
  * @param props.query 입력란의 글자(app 상태). 선택하면 app 이 선택한 이름으로 바꾼다
  * @param props.onQueryChange 글자가 바뀔 때
@@ -63,6 +66,9 @@ export const SearchBox = ({
     onClear: () => void
 }) => {
     const inputRef = useRef<HTMLInputElement | null>(null)
+    /** 검색 알약과 결과 패널. 이 둘 바깥을 누르면 닫는다 */
+    const pillRef = useRef<HTMLDivElement | null>(null)
+    const panelRef = useRef<HTMLDivElement | null>(null)
     const [open, setOpen] = useState(false)
     /** 키보드로 고른 행의 번호(검색어가 비어 있으면 0 = 현재 위치) */
     const [active, setActive] = useState(0)
@@ -83,6 +89,23 @@ export const SearchBox = ({
         return () => document.removeEventListener("keydown", onKey)
     }, [])
 
+    // 열려 있는 동안만: 알약·패널 바깥의 pointerdown 으로 닫는다(머리말). 안쪽은 행의 keepFocus 가 따로 처리한다
+    useEffect(() => {
+        if (!open) return
+        const onDown = (e: PointerEvent) => {
+            const t = e.target as Node
+            if (pillRef.current?.contains(t) || panelRef.current?.contains(t)) return
+            setOpen(false)
+        }
+        document.addEventListener("pointerdown", onDown)
+        return () => document.removeEventListener("pointerdown", onDown)
+    }, [open])
+
+    const close = () => {
+        setOpen(false)
+        inputRef.current?.blur()
+    }
+
     const choose = (index: number) => {
         if (empty) {
             onLocate()
@@ -90,7 +113,7 @@ export const SearchBox = ({
             const r = results[index]
             if (r) onSelect(r)
         }
-        inputRef.current?.blur()
+        close()
     }
 
     const onKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -107,7 +130,7 @@ export const SearchBox = ({
         } else if (e.key === "Escape") {
             e.preventDefault()
             if (query) onClear()
-            else inputRef.current?.blur()
+            else close()
         }
     }
 
@@ -115,7 +138,7 @@ export const SearchBox = ({
 
     return (
         <>
-            <div className={open ? "ui-search ui-glass ui-search-focused" : "ui-search ui-glass"}>
+            <div ref={pillRef} className={open ? "ui-search ui-glass ui-search-focused" : "ui-search ui-glass"}>
                 <SearchRegular fontSize={16} />
                 <input
                     ref={inputRef}
@@ -131,7 +154,6 @@ export const SearchBox = ({
                     spellCheck={false}
                     onChange={(e) => onQueryChange(e.target.value)}
                     onFocus={() => setOpen(true)}
-                    onBlur={() => setOpen(false)}
                     onKeyDown={onKeyDown}
                 />
                 {query ? (
@@ -154,7 +176,7 @@ export const SearchBox = ({
                 )}
             </div>
             {open && (
-                <div id="search-results" className="ui-panel ui-search-panel" role="listbox" onPointerDown={keepFocus}>
+                <div ref={panelRef} id="search-results" className="ui-panel ui-search-panel" role="listbox" onPointerDown={keepFocus}>
                     {status.kind === "error" ? (
                         <div className="ui-search-note">
                             <div className="ui-search-note-strong">{status.message}</div>
