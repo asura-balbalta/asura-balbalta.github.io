@@ -47,7 +47,7 @@ export const PaletteSection = ({ store }: { store: PaletteStore }) => {
 }
 
 /**
- * 색상표 편집 창(Fluent Dialog, 출처 창과 같은 틀). 복제·이름·내장값으로·삭제, 배경·건물·도로 색, 표고 색표 6단계(높이와 색), 태양 고도,
+ * 색상표 편집 창(Fluent Dialog, 출처 창과 같은 틀). 복제·이름·기본값으로(같은 톤의 내장 값으로 되돌림. 문구는 2026-10-21 결정 by @nanangqq)·삭제, 배경·건물·도로 색, 표고 색표 6단계(높이와 색), 태양 고도,
  * 둘러보기 조명 세기 4개. 바꾸면 바로 uniform 에 반영되고(캔버스 effect) localStorage 에 저장된다(usePalettes). 창은 모달이 아니라서
  * (modalType non-modal) 열어 둔 채 3D 화면을 보며 값을 고를 수 있다. 내장 색상표를 고치면 자동으로 사본이 만들어져 그것을 고른다
  */
@@ -113,7 +113,7 @@ export const PaletteDialog = ({ store, open, onClose }: { store: PaletteStore; o
                                             이름
                                         </Button>
                                         <Button size="small" disabled={builtin} onClick={() => store.resetToBuiltin()}>
-                                            내장값으로
+                                            기본값으로
                                         </Button>
                                         <Button size="small" disabled={builtin} onClick={() => store.remove(palette.id)}>
                                             삭제

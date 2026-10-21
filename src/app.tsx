@@ -598,7 +598,9 @@ function App({
         initOlMap({
             onSquareConfirmed: startTerrainLoad,
             onSheets: setSheetCount,
-            theme: TERRAIN_THEMES[INITIAL_THEME],
+            // 마운트 시점의 톤(저장된 색상표의 tone). INITIAL_THEME 으로 두면 저장된 다크가 바탕 지도에는 안 실려 첫 화면은 라이트,
+            // 지형은 다크로 어긋났다(2026-10-21 보고 by @nanangqq. 아래 applyMapTheme effect 는 지도가 생기기 전에 한 번 돌고 끝난다)
+            theme: TERRAIN_THEMES[theme],
             basemap: INITIAL_BASEMAP,
             onSelectingChange: setSelecting,
             onSelectPhaseChange: setSelectPhase,
