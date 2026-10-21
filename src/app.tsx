@@ -585,6 +585,10 @@ function App({
             setBusy(false)
             setTerrainProgress(null)
             if (event.kind === "too-large") toast.error("범위가 너무 넓습니다", event.message)
+            // 데이터 버킷은 Cloudflare WAF 로 국내 IP 만 허용한다(2026-10-21 설정 by @nanangqq). 해외에서는 첫 요청(인덱스)이 403 이라
+            // 지형이 조용히 안 뜨므로 이유를 알린다. 메시지는 terrainIndex/terrainData/buildingsData 의 `${status} ${url}` 형식
+            else if (/^403 https:\/\/layers\.asrbbt\.world\//.test(event.message))
+                toast.error("국내에서만 제공됩니다", "지형·건물 데이터 서버가 이 접속을 거부했습니다(403). 대한민국에서 접속할 때만 받을 수 있습니다.")
             else toast.error("지형 데이터를 받지 못했습니다", event.message)
         }
     }
