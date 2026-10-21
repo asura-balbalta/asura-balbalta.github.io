@@ -10,3 +10,5 @@ docs/render-checks/
 
 # Firebase Hosting 배포 캐시(비공개 작업 저장소에서만 추적)
 .firebase/
+# 클라우드 평가 CLI 의 API 키 파일
+src/llm/eval/.env
