@@ -21,6 +21,9 @@ import type { RenderDebug } from "../webgpu/terrainRenderer"
  * - band: 도엽 생성 때 이웃을 합치는 경계 띠 폭(m). 0 이면 이웃 3×3 전체(옛 동작). 없으면 기본값. 범위 확정 때만 적용된다
  * - roads=0: 도로 레이어를 그리지 않음(회귀 비교). roadsclip=0: 도로 얹기의 B(지형 삼각형으로 자르기) 끔. roadsbridge=0: 교량·고가도 지형을 따라감.
  *   roadslift: 띄움(m, 기본 0.1). roadsbias: 깊이 바이어스(0 이면 끔, 기본 1). roadscolor: 도로색 RRGGBB(# 없이). clip·bridge 는 범위 확정 때만 적용
+ * - water=0: 물 레이어를 그리지 않음. waterz=flat|drape: 높이 경로(기본 flat = 자체 면, drape = 지형에 얹음. 비교용). waterclip=0: drape 의 B 끔. waterlines=0: 하천선 띠 끔.
+ *   waterlift: 띄움(m, 기본 0.05). waterwidth: 띠 폭(m, 전부 같은 값). waterq: 수면 높이 분위수(0 ~ 1, 기본 0.5 중앙값). watercolor: 물색 RRGGBB 또는
+ *   RRGGBBAA(# 없이). clip·z·lines·width·q 는 범위 확정 때만
  * - lock=0: 포인터 잠금 없이 흉내(내장 브라우저·Playwright. 마우스는 어디서 움직여도 시점, Esc 가 포커스 끔)
  * - look=0: 마우스로 시점을 돌리지 않음(자동 캡처. 보이는 창 위를 실제 마우스가 지나가도 시점이 그대로)
  * 해시를 고치면(새로고침 없이) 렌더 디버그 설정은 바로 반영되고, 프리셋(bbox·spawn·yaw·pitch)은 처음 한 번만 적용된다.
@@ -86,6 +89,14 @@ export const parseWalkParams = (params: URLSearchParams): { preset: AppPreset; r
         roadsLift: number(params, "roadslift"),
         roadsBias: number(params, "roadsbias"),
         roadsColor: params.has("roadscolor") ? `#${params.get("roadscolor")}` : undefined,
+        water: flag(params, "water"),
+        waterClip: flag(params, "waterclip"),
+        waterZ: params.get("waterz") === "drape" ? "drape" : params.has("waterz") ? "flat" : undefined,
+        waterLines: flag(params, "waterlines"),
+        waterLift: number(params, "waterlift"),
+        waterWidth: number(params, "waterwidth"),
+        waterQ: number(params, "waterq"),
+        waterColor: params.has("watercolor") ? `#${params.get("watercolor")}` : undefined,
     }
     return { preset, renderDebug, notes }
 }

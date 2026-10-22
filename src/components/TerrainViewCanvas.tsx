@@ -393,12 +393,18 @@ export const TerrainViewCanvas = ({
                             terrain: event.tile.terrain,
                             buildings: event.tile.buildings,
                             roads: event.tile.roadChunks,
+                            water: event.tile.waterChunks,
                             mode: event.tile.mode,
                             bounds: { min: [event.tile.bounds.min[0], event.tile.bounds.min[1]], max: [event.tile.bounds.max[0], event.tile.bounds.max[1]] },
                         })
                         residentRef.current.add(event.tile.id)
                         // GPU 에 올렸으면 메인 사본의 조각은 버린다(메모리 M-A). 조각이 없는 도엽(되풀이)은 워커가 다시 만들어 보낸다
                         tiles.releaseTerrain(event.tile.id)
+                    }
+                } else if (event.type === "water") {
+                    // 수면 맞추기로 물 메쉬가 바뀐 도엽: GPU 에 있는 것만 물 조각을 다시 올린다
+                    for (const id of event.ids) {
+                        if (residentRef.current.has(id)) renderer.updaters.waterTileUpdater(id, tiles.waterChunks(id, renderDebugRef.current?.waterLift))
                     }
                 } else if (event.type === "remove") {
                     renderer.updaters.streamTileUpdater(event.id, null)

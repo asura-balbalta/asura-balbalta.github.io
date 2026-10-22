@@ -40,6 +40,7 @@ const commonWgsl = /* wgsl */ `
         sky: vec4f, // xyz 태양 방향(하늘·안개용), w 하늘 켬(0/1)
         highlightColor: vec4f, // 조준점 건물 강조색(테마 accent) rgb + 투명도
         roadColor: vec4f, // 도로 레이어 색 (r, g, b, 1)
+        waterColor: vec4f, // 물 레이어 색 (r, g, b, 투명도)
     };
     @group(0) @binding(0) var<uniform> u: Uniforms;
     @group(0) @binding(1) var shadowMap: texture_depth_2d;
@@ -315,6 +316,77 @@ export const createRoadSmoothShader = () => ({
     fn fragmentMain(input: VertexOutput) -> @location(0) vec4f {
         let n = normalize(input.normal);
         return vec4f(shade(u.roadColor.rgb, n, input.world), 1);
+    }
+    `,
+})
+
+/**
+ * 물 레이어 셰이더 descriptor(법선 없는 조각: 계단형 판·벽). 도로 셰이더와 같은 입력·조명이고 색은 uniform waterColor, 알파는 waterColor.a
+ * (2026-10-22 결정 D6 by @nanangqq: 1차에 투명 하나. 파이프라인이 알파 블렌딩 + 깊이 쓰기 끔으로 그린다. 물결·반사는 2차)
+ *
+ * @returns `{ label, code }` 형태의 GPUShaderModuleDescriptor
+ */
+export const createWaterShader = () => ({
+    label: "water shader",
+    code: /* wgsl */ `
+    ${commonWgsl}
+
+    struct VertexOutput {
+        @builtin(position) p: vec4f,
+        @location(0) world: vec3f,
+        @location(1) rel: vec3f,
+    };
+
+    @vertex
+    fn vertexMain(@location(0) pos: vec3f) -> VertexOutput {
+        var output: VertexOutput;
+        output.p = u.viewProj * vec4f(pos, 1);
+        output.world = pos;
+        output.rel = pos - u.eye;
+        return output;
+    }
+
+    @fragment
+    fn fragmentMain(input: VertexOutput) -> @location(0) vec4f {
+        let v = normalize(u.eye - input.world);
+        let faceNormal = normalize(cross(dpdx(input.rel), dpdy(input.rel)));
+        let n = select(-faceNormal, faceNormal, dot(faceNormal, v) >= 0.0);
+        let wallShade = 1.0 - 0.25 * (1.0 - abs(n.z));
+        let base = u.waterColor.rgb * wallShade;
+        return vec4f(shade(base, n, input.world), u.waterColor.a);
+    }
+    `,
+})
+
+/**
+ * 매끈한 면 모드의 물 셰이더 descriptor. 도로 smooth 셰이더처럼 정점 법선(지형 법선 보간)을 받고 색은 waterColor, 알파는 waterColor.a
+ *
+ * @returns `{ label, code }` 형태의 GPUShaderModuleDescriptor
+ */
+export const createWaterSmoothShader = () => ({
+    label: "water smooth shader",
+    code: /* wgsl */ `
+    ${commonWgsl}
+
+    struct VertexOutput {
+        @builtin(position) p: vec4f,
+        @location(0) world: vec3f,
+        @location(1) normal: vec3f,
+    };
+
+    @vertex
+    fn vertexMain(@location(0) pos: vec3f, @location(1) normal: vec3f) -> VertexOutput {
+        var output: VertexOutput;
+        output.p = u.viewProj * vec4f(pos, 1);
+        output.world = pos;
+        output.normal = normal;
+        return output;
+    }
+
+    @fragment
+    fn fragmentMain(input: VertexOutput) -> @location(0) vec4f {
+        let n = normalize(input.normal);
+        return vec4f(shade(u.waterColor.rgb, n, input.world), u.waterColor.a);
     }
     `,
 })

@@ -1,5 +1,6 @@
 import { LAYER_DEFS } from "../layers"
 import { roadExportChunks, roadExportSampler } from "../roadsMesh"
+import { waterExportChunks } from "../waterMesh"
 import type { TinMesh } from "../terrainData"
 import { buildSteppedMeshChunks } from "../terrainSteps"
 import type { TerrainMode } from "../webgpu/terrainRenderer"
@@ -70,6 +71,13 @@ self.onmessage = (e: MessageEvent<StlExportRequest>) => {
         } else if (id === "roads" && mesh.roadTable) {
             // 도로: 띄움(과 지형이 계단형이면 같은 계단화)을 거친 조각들. 벽 방향 판정은 파일에 지형이 있을 때만
             const chunks = roadExportChunks(mesh, mesh.roadTable, mode, step, STEPPED_CHUNK_BYTES, roadExportSampler(layers.terrain))
+            for (const chunk of chunks) {
+                postPart(encodeStlTriangles(chunk.positions, chunk.indices), Math.floor(chunk.indices.length / 3))
+            }
+            progress(1, weight(mesh))
+        } else if (id === "water" && mesh.waterTable) {
+            // 물: 띄움(과 지형이 계단형이면 같은 계단화)을 거친 조각들
+            const chunks = waterExportChunks(mesh)
             for (const chunk of chunks) {
                 postPart(encodeStlTriangles(chunk.positions, chunk.indices), Math.floor(chunk.indices.length / 3))
             }

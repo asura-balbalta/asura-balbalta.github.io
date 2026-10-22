@@ -15,6 +15,9 @@ import { TTP_BASE } from "./terrainIndex"
 import { mergeTtpTilesForTile, parseTtp, TtpTile } from "./terrainPslg"
 import { buildSteppedMeshChunks } from "./terrainSteps"
 import type { QueryTile, TileData, TileStyle } from "./terrainTiles.worker"
+import { loadWater, loadWaterCodes, WaterLine, WaterNames, WaterPiece } from "./waterData"
+import { buildWaterMesh, WATER_LIFT_M, waterDisplayChunks, WaterMesh } from "./waterMesh"
+import { cloneWaterTable, WaterTable, waterTableBuffers } from "./waterTable"
 
 /**
  * 도엽 생성 보조 Worker(계획 문서 7절 L5-B, 2026-10-14). 조정자(terrainTiles.worker.ts)가 도엽 하나를 만들라고 보내면
@@ -199,6 +202,24 @@ const roadsOf5k = (id5k: string, bbox3857: Extent, origin: [number, number]) => 
     return p
 }
 
+/**
+ * 도엽별 얹은 물 결과 캐시(waterMesh 는 지형 평면 그대로. 화면 조각은 표현 방식마다). 키는 도엽 id + 얹기 스위치(clip·zMode·lines·폭).
+ * 5K 단위 물 조각·선 목록은 waterOf5k(`${id5k}@${ox},${oy}`)
+ */
+const builtWaterCache = new Map<string, { water: WaterMesh | null; waterTable: WaterTable | null; stats: TileData["waterStats"] }>()
+let builtWaterBytes = 0
+const water5kCache = new Map<string, Promise<{ pieces: WaterPiece[]; lines: WaterLine[]; names: WaterNames }>>()
+const waterOf5k = (id5k: string, bbox3857: Extent, origin: [number, number]) => {
+    const key = `${id5k}@${origin[0]},${origin[1]}`
+    let p = water5kCache.get(key)
+    if (!p) {
+        p = loadWater(bbox3857, origin).then(({ pieces, lines, names }) => ({ pieces, lines, names }))
+        water5kCache.set(key, p)
+        p.catch(() => water5kCache.delete(key))
+    }
+    return p
+}
+
 const reset = () => {
     ttpCache.clear()
     tinCache.clear()
@@ -208,6 +229,9 @@ const reset = () => {
     builtRoadsCache.clear()
     builtRoadsBytes = 0
     roads5kCache.clear()
+    builtWaterCache.clear()
+    builtWaterBytes = 0
+    water5kCache.clear()
 }
 
 /**
@@ -370,13 +394,69 @@ const buildTile = async (job: BuildJob): Promise<{ data: TileData; transfer: Tra
     } catch (err) {
         console.warn(`도엽 ${t.name} 도로 실패:`, err)
     }
+    const t4 = performance.now()
+
+    // 물: 5K 단위 목록의 조각·선을 전부 넘기고 waterMesh 가 도엽 범위에 걸친 것만 얹어 도엽 폴리곤으로 자른다(D2. 폴리곤 안 선분 판정에는 조각 전부가
+    // 필요하다). 높이는 이웃까지 합친 메쉬로(A + B, D1 경로). 얹은 메쉬는 캐시하고 화면 조각(띄움·계단화)은 표현 방식마다 만든다
+    let water: WaterMesh | null = null
+    let waterTable: WaterTable | null = null
+    let waterStats: TileData["waterStats"] = { built: 0, rivers: 0, lakes: 0, ribbons: 0 }
+    let waterChunks: MeshChunk[] = []
+    const waterStyle = style.water ?? {}
+    const waterKey = `${t.map_id}|${waterStyle.clip !== false}|${waterStyle.zMode ?? "flat"}|${waterStyle.lines !== false}|${waterStyle.ribbonWidth ?? ""}|${waterStyle.levelQuantile ?? ""}`
+    const cachedWater = builtWaterCache.get(waterKey)
+    let waterNote = ""
+    let waterWait = 0
+    try {
+        if (cachedWater) {
+            water = cachedWater.water && {
+                ...cachedWater.water,
+                positions: cachedWater.water.positions.slice(),
+                indices: cachedWater.water.indices.slice(),
+                normals: cachedWater.water.normals.slice(),
+            }
+            waterTable = cachedWater.waterTable && cloneWaterTable(cachedWater.waterTable)
+            waterStats = cachedWater.stats
+            waterNote = "(캐시)"
+        } else {
+            const [codes, all] = await Promise.all([loadWaterCodes(), waterOf5k(t.id5k, extentOf(t.corners.map(to3857)), origin)])
+            waterWait = performance.now() - t4
+            if (all.pieces.length > 0 || all.lines.length > 0) {
+                const r = buildWaterMesh(all.pieces, all.lines, mergedMesh(), codes, all.names, {
+                    clip: waterStyle.clip,
+                    zMode: waterStyle.zMode,
+                    lines: waterStyle.lines,
+                    ribbonWidth: waterStyle.ribbonWidth,
+                    levelQuantile: waterStyle.levelQuantile,
+                    clipTo: poly,
+                    terrainNormals: mergedNormals(),
+                })
+                if (r.mesh.indices.length > 0) {
+                    water = r.mesh
+                    waterTable = r.table
+                }
+                waterStats = { built: r.built, rivers: r.rivers, lakes: r.lakes, ribbons: r.ribbons }
+                waterNote = r.skipped ? `(지형 밖 ${r.skipped})` : ""
+            }
+            builtWaterCache.set(waterKey, {
+                water: water && { ...water, positions: water.positions.slice(), indices: water.indices.slice(), normals: water.normals.slice() },
+                waterTable: waterTable && cloneWaterTable(waterTable),
+                stats: waterStats,
+            })
+            if (water) builtWaterBytes += water.positions.byteLength + water.indices.byteLength + water.normals.byteLength
+        }
+        // 수면은 자체 면이라 표현 방식과 무관하게 같은 조각(계단화 없음)
+        if (water && waterTable) waterChunks = waterDisplayChunks(water, waterStyle.lift ?? WATER_LIFT_M)
+    } catch (err) {
+        console.warn(`도엽 ${t.name} 물 실패:`, err)
+    }
     console.log(
-        `도엽 ${t.name}${extra ? "(밖)" : ""}: ${fromCache ? "캐시" : `이웃 ${ttpTiles.length}개 ${mergeNote} 합침`} ${Math.round(t1 - t0)}ms, ${style.mode} ${Math.round(t2 - t1)}ms, 삼각형 ${tin.indices.length / 3}, 건물 ${built}${cached ? "(캐시)" : ""} ${Math.round(t3 - t2)}ms, 도로 ${roadStats.built}(교량 ${roadStats.bridges}, 숨김 ${roadStats.hidden})${roadsNote} ${roadsWait > 50 ? `받기 ${Math.round(roadsWait)}ms + ` : ""}${Math.round(performance.now() - t3 - roadsWait)}ms`,
+        `도엽 ${t.name}${extra ? "(밖)" : ""}: ${fromCache ? "캐시" : `이웃 ${ttpTiles.length}개 ${mergeNote} 합침`} ${Math.round(t1 - t0)}ms, ${style.mode} ${Math.round(t2 - t1)}ms, 삼각형 ${tin.indices.length / 3}, 건물 ${built}${cached ? "(캐시)" : ""} ${Math.round(t3 - t2)}ms, 도로 ${roadStats.built}(교량 ${roadStats.bridges}, 숨김 ${roadStats.hidden})${roadsNote} ${roadsWait > 50 ? `받기 ${Math.round(roadsWait)}ms + ` : ""}${Math.round(t4 - t3 - roadsWait)}ms, 물 ${waterStats.built}(하천 ${waterStats.rivers}, 호소 ${waterStats.lakes}, 띠 ${waterStats.ribbons})${waterNote} ${waterWait > 50 ? `받기 ${Math.round(waterWait)}ms + ` : ""}${Math.round(performance.now() - t4 - waterWait)}ms`,
     )
 
     builtCount++
     if (builtCount % 50 === 0) {
-        console.log(`메모리(보조 워커 캐시): 만든 도엽 ${builtCount}, 자른 TIN ${(tinCacheBytes / 1048576).toFixed(1)} MB(${tinCache.size}개), 건물 결과 ${(builtBuildingsBytes / 1048576).toFixed(1)} MB(${builtBuildingsCache.size}개), 도로 결과 ${(builtRoadsBytes / 1048576).toFixed(1)} MB(${builtRoadsCache.size}개), 5K 파일 ${ttpCache.size}개, 5K 건물 목록 ${buildings5kCache.size}개, 5K 도로 목록 ${roads5kCache.size}개`)
+        console.log(`메모리(보조 워커 캐시): 만든 도엽 ${builtCount}, 자른 TIN ${(tinCacheBytes / 1048576).toFixed(1)} MB(${tinCache.size}개), 건물 결과 ${(builtBuildingsBytes / 1048576).toFixed(1)} MB(${builtBuildingsCache.size}개), 도로 결과 ${(builtRoadsBytes / 1048576).toFixed(1)} MB(${builtRoadsCache.size}개), 물 결과 ${(builtWaterBytes / 1048576).toFixed(1)} MB(${builtWaterCache.size}개), 5K 파일 ${ttpCache.size}개, 5K 건물 목록 ${buildings5kCache.size}개, 5K 도로 목록 ${roads5kCache.size}개, 5K 물 목록 ${water5kCache.size}개`)
     }
     const xy = positionsBounds(tin.positions)
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
@@ -403,6 +483,10 @@ const buildTile = async (job: BuildJob): Promise<{ data: TileData; transfer: Tra
         roadChunks,
         roadTable,
         roadStats,
+        water: water && { origin: water.origin, positions: water.positions, indices: water.indices },
+        waterChunks,
+        waterTable,
+        waterStats,
     }
     return { data, transfer: transferablesOf(data) }
 }
@@ -430,6 +514,16 @@ export const transferablesOf = (data: TileData): Transferable[] => {
         if (ch.normals) set.add(ch.normals.buffer as ArrayBuffer)
     }
     if (data.roadTable) for (const b of roadTableBuffers(data.roadTable)) set.add(b)
+    if (data.water) {
+        set.add(data.water.positions.buffer as ArrayBuffer)
+        set.add(data.water.indices.buffer as ArrayBuffer)
+    }
+    for (const ch of data.waterChunks) {
+        set.add(ch.positions.buffer as ArrayBuffer)
+        set.add(ch.indices.buffer as ArrayBuffer)
+        if (ch.normals) set.add(ch.normals.buffer as ArrayBuffer)
+    }
+    if (data.waterTable) for (const b of waterTableBuffers(data.waterTable)) set.add(b)
     return [...set]
 }
 

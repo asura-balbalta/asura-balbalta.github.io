@@ -4,6 +4,8 @@ import { buildingAttributes, buildingLabel, buildingRings, NOT_BUILT } from "../
 import { LAYER_DEFS } from "../layers"
 import { roadExportSampler, roadGroupExportChunks } from "../roadsMesh"
 import { roadAttributes, roadGroups, roadLabel } from "../roadTable"
+import { waterGroupExportChunks } from "../waterMesh"
+import { waterAttributes, waterGroups, waterLabel } from "../waterTable"
 import type { TinMesh } from "../terrainData"
 import type { TerrainMode } from "../webgpu/terrainRenderer"
 import type { ExportMesh, LayerMeshes } from "./stlClient"
@@ -49,6 +51,7 @@ const LAYER_COLORS: Record<string, { r: number; g: number; b: number; a: number 
     terrain: { r: 140, g: 170, b: 120, a: 255 },
     buildings: { r: 200, g: 200, b: 200, a: 255 },
     roads: { r: 150, g: 150, b: 155, a: 255 },
+    water: { r: 156, g: 195, b: 230, a: 255 },
 }
 
 /**
@@ -216,6 +219,19 @@ self.onmessage = async (e: MessageEvent<Rhino3dmExportRequest>) => {
                 if (i % 200 === 199) progress((i + 1) / groups.length, w)
             })
             console.log(`3DM 도로: ${groups.length}구간, ${Math.round(performance.now() - started)}ms`)
+        } else if (id === "water" && mesh.waterTable) {
+            // 물: 수역(또는 하천선)마다 메쉬 객체(이름 = 수역 이름, 속성은 user text), 그룹 "water". 여러 도엽의 조각을 weld 해 한 메쉬로
+            const started = performance.now()
+            const table = mesh.waterTable
+            attributes.addToGroup(addGroup(rhino, doc, "water"))
+            const groups = waterGroups(table)
+            groups.forEach((g, i) => {
+                attributes.name = waterLabel(table, g.k0)
+                for (const [key, value] of Object.entries(waterAttributes(table, g))) attributes.setUserString(key, String(value))
+                for (const c of waterGroupExportChunks(mesh, g)) addMesh(c.positions, c.indices)
+                if (i % 200 === 199) progress((i + 1) / groups.length, w)
+            })
+            console.log(`3DM 물: ${groups.length}수역, ${Math.round(performance.now() - started)}ms`)
         } else {
             addMesh(mesh.positions, mesh.indices, (done, all) => progress(done / all, w))
         }

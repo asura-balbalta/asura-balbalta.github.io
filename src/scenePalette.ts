@@ -34,6 +34,9 @@ export type ScenePalette = {
     stops: ElevationStop[]
     buildingColor: string
     roadColor: string
+    /** 물(수면) 색과 투명도(0 ~ 1. 2026-10-22 D6) */
+    waterColor: string
+    waterAlpha: number
     /** 하늘·그림자 빛의 태양 고도(°). 음수면 지평선 아래(저녁) */
     sunAltitude: number
     walkLighting: WalkLightingStrength
@@ -70,6 +73,8 @@ export const BUILTIN_PALETTES: ScenePalette[] = [
         ],
         buildingColor: "#CFC9C0", // 평지(#EEEFED)보다 조금 어두운 따뜻한 회색
         roadColor: "#FAFAF8", // 평지보다 밝은 흰색에 가까운 회색(후보. 평평한 시가지에서 묻히면 #E4E6E3 같은 어두운 쪽을 견준다)
+        waterColor: "#9CC3E6", // 수면 색표(#B3BDC1)보다 푸른 하늘색(후보. watercolor= 로 Chrome 비교)
+        waterAlpha: 0.8, // 0.6 은 물 아래 지형 삼각형 선이 비쳐 산만했다(2026-10-22 지적 by @nanangqq)
         walkLighting: DEFAULT_WALK_LIGHTING,
     },
     {
@@ -88,6 +93,8 @@ export const BUILTIN_PALETTES: ScenePalette[] = [
         ],
         buildingColor: "#6B7075", // 평지(#313335)보다 밝은 회색
         roadColor: "#44484C", // 평지보다 밝고 건물보다 어두운 회색
+        waterColor: "#2B4A66", // 어두운 바탕 위 짙은 청색(후보)
+        waterAlpha: 0.75,
         walkLighting: DEFAULT_WALK_LIGHTING,
     },
 ]
@@ -147,6 +154,8 @@ export const sanitizePalette = (raw: unknown): ScenePalette | null => {
         stops,
         buildingColor: isHex(r.buildingColor) ? r.buildingColor : base.buildingColor,
         roadColor: isHex(r.roadColor) ? r.roadColor : base.roadColor,
+        waterColor: isHex(r.waterColor) ? r.waterColor : base.waterColor,
+        waterAlpha: num(r.waterAlpha, base.waterAlpha, 0, 1),
         sunAltitude: num(r.sunAltitude, base.sunAltitude, -30, 90),
         walkLighting: {
             ambient: num(wl.ambient, base.walkLighting.ambient, 0, 1),

@@ -1,6 +1,7 @@
 import { BuildingTable, buildingTableBuffers, cloneBuildingTable } from "../buildingTable"
 import type { LayerId } from "../layers"
 import { cloneRoadTable, RoadTable, roadTableBuffers } from "../roadTable"
+import { cloneWaterTable, WaterTable, waterTableBuffers } from "../waterTable"
 import type { TinMesh } from "../terrainData"
 import type { TerrainMode } from "../webgpu/terrainRenderer"
 import { encodeStlHeader } from "./stl"
@@ -13,7 +14,7 @@ const STL_WORKER_URL = "export/stl.worker.js"
  * 내보낼 메쉬. 건물 레이어는 table(건물 표)을 함께 주면 SKP·3DM·GLB 가 건물마다 그룹과 속성을 만들고, 도로 레이어는 roadTable(도로 표)을
  * 함께 주면 이은 중심선마다 그룹과 속성을 만든다(도로 메쉬는 지형 평면 그대로라 Worker 가 띄움·계단화를 한다). 다른 형식은 무시한다
  */
-export type ExportMesh = TinMesh & { table?: BuildingTable; roadTable?: RoadTable }
+export type ExportMesh = TinMesh & { table?: BuildingTable; roadTable?: RoadTable; waterTable?: WaterTable }
 
 /** 내보낼 레이어별 메쉬. null 이면 그 레이어는 뺀다. 모두 같은 원점이어야 한다 */
 export type LayerMeshes = Record<LayerId, ExportMesh | null>
@@ -46,6 +47,10 @@ export const copyLayerMeshes = (layers: LayerMeshes, transfer: ArrayBuffer[]): L
         if (mesh.roadTable) {
             c.roadTable = cloneRoadTable(mesh.roadTable)
             transfer.push(...roadTableBuffers(c.roadTable))
+        }
+        if (mesh.waterTable) {
+            c.waterTable = cloneWaterTable(mesh.waterTable)
+            transfer.push(...waterTableBuffers(c.waterTable))
         }
         out[id] = c
     }

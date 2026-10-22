@@ -2,6 +2,9 @@ import type { Extent } from "ol/extent"
 
 import { BuildingTable, buildingTableBuffers, mergeBuildingTables } from "./buildingTable"
 import { mergeRoadTables, RoadTable, roadTableBuffers } from "./roadTable"
+import { WATER_LIFT_M, waterDisplayChunks } from "./waterMesh"
+import { mergeWaterTables, NOT_BUILT, WATER_KIND, WaterTable, waterTableBuffers } from "./waterTable"
+import type { MeshChunk } from "./terrainData"
 import type { TinMesh } from "./terrainData"
 import type { TerrainTilesRequest, TerrainTilesResponse, TileData, TileStyle, TileSummary } from "./terrainTiles.worker"
 import type { MeshBounds } from "./webgpu/terrainRenderer"
@@ -22,6 +25,8 @@ export type TerrainTilesEvent =
     /** 표고 범위가 넓어졌을 때(도엽이 올라오며) */
     | { type: "bounds"; bounds: MeshBounds }
     | { type: "done" }
+    /** 수면 높이 맞추기(levelWater)로 물 메쉬가 바뀐 도엽들. 캔버스가 그 도엽의 물 조각만 다시 올린다 */
+    | { type: "water"; ids: string[] }
     | { type: "error"; message: string; kind?: "too-large" }
 
 export type TerrainTilesClient = ReturnType<typeof createTerrainTiles>
@@ -42,7 +47,10 @@ const tileBytes = (t: TileData) => {
     let roads = t.roads ? t.roads.positions.byteLength + t.roads.indices.byteLength : 0
     for (const c of t.roadChunks) roads += c.positions.byteLength + c.indices.byteLength + (c.normals?.byteLength ?? 0)
     if (t.roadTable) for (const b of roadTableBuffers(t.roadTable)) roads += b.byteLength
-    return { chunks, tin, buildings, table, roads }
+    let water = t.water ? t.water.positions.byteLength + t.water.indices.byteLength : 0
+    for (const c of t.waterChunks) water += c.positions.byteLength + c.indices.byteLength + (c.normals?.byteLength ?? 0)
+    if (t.waterTable) for (const b of waterTableBuffers(t.waterTable)) water += b.byteLength
+    return { chunks, tin, buildings, table, roads, water }
 }
 
 export const createTerrainTiles = () => {
@@ -68,7 +76,7 @@ export const createTerrainTiles = () => {
     let currentStyle: TileStyle | null = null
     /** 들고 있는 도엽 사본의 바이트 합(선택 도엽·밖 도엽 수 포함) */
     const memoryStats = () => {
-        const sum = { tiles: 0, extra: 0, chunks: 0, tin: 0, buildings: 0, table: 0, roads: 0 }
+        const sum = { tiles: 0, extra: 0, chunks: 0, tin: 0, buildings: 0, table: 0, roads: 0, water: 0 }
         for (const t of tiles.values()) {
             const b = tileBytes(t)
             sum.tiles++
@@ -78,13 +86,101 @@ export const createTerrainTiles = () => {
             sum.buildings += b.buildings
             sum.table += b.table
             sum.roads += b.roads
+            sum.water += b.water
         }
-        return { ...sum, total: sum.chunks + sum.tin + sum.buildings + sum.table + sum.roads }
+        return { ...sum, total: sum.chunks + sum.tin + sum.buildings + sum.table + sum.roads + sum.water }
     }
     const mb = (n: number) => (n / 1048576).toFixed(1)
     const logMemory = () => {
         const m = memoryStats()
-        console.log(`메모리(메인 도엽 사본): 도엽 ${m.tiles}(밖 ${m.extra}), ${mb(m.total)} MB = 조각 ${mb(m.chunks)} + TIN ${mb(m.tin)} + 건물 ${mb(m.buildings)} + 표 ${mb(m.table)} + 도로 ${mb(m.roads)}`)
+        console.log(`메모리(메인 도엽 사본): 도엽 ${m.tiles}(밖 ${m.extra}), ${mb(m.total)} MB = 조각 ${mb(m.chunks)} + TIN ${mb(m.tin)} + 건물 ${mb(m.buildings)} + 표 ${mb(m.table)} + 도로 ${mb(m.roads)} + 물 ${mb(m.water)}`)
+    }
+
+    /**
+     * 수면 높이 맞추기(2026-10-22 요청 by @nanangqq). 도엽은 1K 단위로 따로 만들어지는데 넓은 수역의 둘레 정점 중 그 도엽의 지형(이웃 합친 메쉬) 밖에
+     * 있는 것은 높이를 못 읽어 빠지므로 도엽마다 정점 집합이 달라 수위가 조금씩 어긋났다(도엽 경계에 틈). 선택 범위가 다 만들어진 뒤 메인에서
+     * 물 메쉬끼리만 맞춘다: (1) 호소는 같은 수역(srcId)의 행이 있는 도엽들의 수위 중앙값 하나로 모든 정점 z 를 바꾸고, (2) 하천·띠는 둘 이상의
+     * 도엽에 같은 xy(정수 mm)로 나타나는 경계 정점의 z 를 평균해 양쪽에 쓴다(안쪽은 그대로. 미세한 꺾임은 남고 틈은 없어진다). 바뀐 도엽 id 를
+     * "water" 이벤트로 알린다. 둘러보기 중 밖 도엽이 들어와도 잠시 뒤 다시 돈다(scheduleLevelWater)
+     */
+    const levelWater = () => {
+        const changed = new Set<string>()
+        const withWater = [...tiles.values()].filter((t): t is TileData & { water: TinMesh; waterTable: WaterTable } => !!t.water && !!t.waterTable)
+        if (withWater.length === 0) return
+        /** 행의 삼각형 범위가 참조하는 정점 번호(중복 없이) */
+        const rowVertices = (t: TileData & { water: TinMesh; waterTable: WaterTable }, k: number) => {
+            const set = new Set<number>()
+            const idx = t.water.indices
+            for (let f = t.waterTable.faceBase[k]; f < t.waterTable.faceBase[k] + t.waterTable.faceCount[k]; f++) set.add(idx[3 * f]).add(idx[3 * f + 1]).add(idx[3 * f + 2])
+            return set
+        }
+        // (1) 호소: srcId → 도엽별 수위(행은 평면이라 첫 정점 z)
+        const levels = new Map<number, number[]>()
+        for (const t of withWater) {
+            for (let k = 0; k < t.waterTable.count; k++) {
+                if (t.waterTable.kind[k] !== WATER_KIND.lake || t.waterTable.faceBase[k] === NOT_BUILT || t.waterTable.faceCount[k] === 0) continue
+                const v = t.water.indices[3 * t.waterTable.faceBase[k]]
+                const id = t.waterTable.ids[k]
+                let list = levels.get(id)
+                if (!list) levels.set(id, (list = []))
+                list.push(t.water.positions[3 * v + 2])
+            }
+        }
+        const level = new Map<number, number>()
+        for (const [id, list] of levels) {
+            list.sort((a, b) => a - b)
+            level.set(id, list[Math.floor(list.length / 2)])
+        }
+        for (const t of withWater) {
+            for (let k = 0; k < t.waterTable.count; k++) {
+                if (t.waterTable.kind[k] !== WATER_KIND.lake || t.waterTable.faceBase[k] === NOT_BUILT) continue
+                const z = level.get(t.waterTable.ids[k])
+                if (z === undefined) continue
+                for (const v of rowVertices(t, k)) {
+                    if (t.water.positions[3 * v + 2] !== z) {
+                        t.water.positions[3 * v + 2] = z
+                        changed.add(t.id)
+                    }
+                }
+            }
+        }
+        // (2) 하천·띠: 같은 xy 가 둘 이상의 도엽에 있으면 z 평균
+        const byXY = new Map<string, { sum: number; refs: { t: TileData & { water: TinMesh }; v: number }[]; tileIds: Set<string> }>()
+        for (const t of withWater) {
+            for (let k = 0; k < t.waterTable.count; k++) {
+                if (t.waterTable.kind[k] === WATER_KIND.lake || t.waterTable.faceBase[k] === NOT_BUILT) continue
+                for (const v of rowVertices(t, k)) {
+                    const p = t.water.positions
+                    const key = `${Math.round(p[3 * v] * 1000)},${Math.round(p[3 * v + 1] * 1000)}`
+                    let e = byXY.get(key)
+                    if (!e) byXY.set(key, (e = { sum: 0, refs: [], tileIds: new Set() }))
+                    if (e.refs.some((r) => r.t === t && r.v === v)) continue
+                    e.sum += p[3 * v + 2]
+                    e.refs.push({ t, v })
+                    e.tileIds.add(t.id)
+                }
+            }
+        }
+        for (const e of byXY.values()) {
+            if (e.tileIds.size < 2) continue
+            const z = e.sum / e.refs.length
+            for (const { t, v } of e.refs) {
+                if (t.water.positions[3 * v + 2] !== z) {
+                    t.water.positions[3 * v + 2] = z
+                    changed.add(t.id)
+                }
+            }
+        }
+        if (changed.size > 0) dispatch({ type: "water", ids: [...changed] })
+    }
+    let levelTimer: ReturnType<typeof setTimeout> | null = null
+    /** 도엽이 더 들어온 뒤 잠잠해지면(둘러보기 스트리밍) 수면 맞추기를 다시 돈다 */
+    const scheduleLevelWater = (delayMs: number) => {
+        if (levelTimer) clearTimeout(levelTimer)
+        levelTimer = setTimeout(() => {
+            levelTimer = null
+            levelWater()
+        }, delayMs)
     }
 
     worker.onmessage = (e: MessageEvent<TerrainTilesResponse>) => {
@@ -130,6 +226,7 @@ export const createTerrainTiles = () => {
             }
             if (widened && bounds) dispatch({ type: "bounds", bounds: { min: [...bounds.min], max: [...bounds.max] } })
             dispatch({ type: "tile", tile: msg.tile, first })
+            if (msg.tile.water) scheduleLevelWater(400)
         } else if (msg.type === "remove") {
             const prev = tiles.get(msg.id)
             if (prev?.extra) extraCount--
@@ -139,6 +236,9 @@ export const createTerrainTiles = () => {
             dispatch(msg)
         } else if (msg.type === "done") {
             logMemory()
+            if (levelTimer) clearTimeout(levelTimer)
+            levelTimer = null
+            levelWater()
             dispatch({ type: "done" })
         } else {
             dispatch({ type: "error", message: msg.message, kind: msg.kind })
@@ -216,7 +316,13 @@ export const createTerrainTiles = () => {
             if (t) {
                 t.terrain = []
                 t.roadChunks = []
+                t.waterChunks = []
             }
+        },
+        /** 수면 맞추기(levelWater) 뒤 도엽의 물 조각을 다시 만든다(띄움 적용). 캔버스가 GPU 의 물 조각만 바꿔 끼운다. 물이 없으면 빈 배열 */
+        waterChunks: (id: string, lift = WATER_LIFT_M): MeshChunk[] => {
+            const t = tiles.get(id)
+            return t?.water ? waterDisplayChunks(t.water, lift) : []
         },
         /** 도엽 id 목록을 워커가 다시 만들어 보내게 한다(GPU 에서 내렸던 도엽을 다시 올릴 때. 캐시라 빠르다) */
         rebuild: (ids: string[]) => {
@@ -232,6 +338,7 @@ export const createTerrainTiles = () => {
             let buildings = 0
             let count = 0
             const roads = { built: 0, bridges: 0, hidden: 0 }
+            const water = { built: 0, rivers: 0, lakes: 0, ribbons: 0 }
             for (const t of tiles.values()) {
                 if (t.extra) continue
                 count++
@@ -240,8 +347,12 @@ export const createTerrainTiles = () => {
                 roads.built += t.roadStats.built
                 roads.bridges += t.roadStats.bridges
                 roads.hidden += t.roadStats.hidden
+                water.built += t.waterStats.built
+                water.rivers += t.waterStats.rivers
+                water.lakes += t.waterStats.lakes
+                water.ribbons += t.waterStats.ribbons
             }
-            return { count, triangles, buildings, roads }
+            return { count, triangles, buildings, roads, water }
         },
         memory: memoryStats,
         /**
@@ -252,8 +363,9 @@ export const createTerrainTiles = () => {
             terrain: TinMesh | null
             buildings: (TinMesh & { table?: BuildingTable }) | null
             roads: (TinMesh & { roadTable?: RoadTable }) | null
+            water: (TinMesh & { waterTable?: WaterTable }) | null
         } => {
-            if (!origin) return { terrain: null, buildings: null, roads: null }
+            if (!origin) return { terrain: null, buildings: null, roads: null, water: null }
             /** 메쉬들을 잇고 각 조각이 시작하는 정점·삼각형 번호를 돌려준다 */
             const concat = (parts: TinMesh[]): { mesh: TinMesh; offsets: { vertex: number; face: number }[] } | null => {
                 if (parts.length === 0) return null
@@ -295,10 +407,18 @@ export const createTerrainTiles = () => {
             if (roads && withRoads.every((t) => t.roadTable)) {
                 roadTable = mergeRoadTables(withRoads.map((t, i) => ({ table: t.roadTable!, faceOffset: roads.offsets[i].face })))
             }
+            // 물(지형 평면 그대로의 메쉬 + 표. 띄움·계단화·수역별 weld 는 내보내기 Worker 가 한다)
+            const withWater = selected.filter((t): t is TileData & { water: TinMesh } => !!t.water)
+            const water = concat(withWater.map((t) => t.water))
+            let waterTable: WaterTable | null = null
+            if (water && withWater.every((t) => t.waterTable)) {
+                waterTable = mergeWaterTables(withWater.map((t, i) => ({ table: t.waterTable!, faceOffset: water.offsets[i].face })))
+            }
             return {
                 terrain: terrain?.mesh ?? null,
                 buildings: buildings ? (table ? { ...buildings.mesh, table } : buildings.mesh) : null,
                 roads: roads ? (roadTable ? { ...roads.mesh, roadTable } : roads.mesh) : null,
+                water: water ? (waterTable ? { ...water.mesh, waterTable } : water.mesh) : null,
             }
         },
         terminate: () => {

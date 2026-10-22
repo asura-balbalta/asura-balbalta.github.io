@@ -84,6 +84,14 @@ npm run render-check -- --params "bbox=14135700,4513980,14136500,4514780&yaw=90&
 | `roadslift=0.3` | 도로 띄움(m, 기본 0.1. `roadsMesh.ts` ROAD_LIFT_M). 표현 방식 전환 때 반영 |
 | `roadsbias=0` | 도로 파이프라인 깊이 바이어스(기본 1. 0 이면 끔). 멀리서 비스듬히 볼 때의 깊이 싸움을 가를 때 |
 | `roadscolor=DADDDC` | 도로색(RRGGBB, # 없이. 기본은 테마 roadColor). Chrome 에서 후보를 견줄 때 |
+| `water=0` | 물 레이어를 그리지 않음(회귀 비교. `docs/water-layer-plan.md`) |
+| `waterz=drape` | 물 높이 경로를 지형에 얹기(도로식 A + B)로. 기본 `flat` 은 자체 면(정점 z = 둘레 ±100 m 지형 높이의 하위 10%, 계단화 없음). 비교용. 범위 확정 때만 적용 |
+| `waterclip=0` | drape 경로의 B(지형 삼각형으로 자르기)를 끔. 범위 확정 때만 적용 |
+| `waterlines=0` | 하천선 띠(수면 폴리곤 밖 구간)를 만들지 않음. 범위 확정 때만 적용 |
+| `waterlift=0.3` | 물 띄움(m, 기본 0.05. `waterMesh.ts` WATER_LIFT_M). 표현 방식 전환 때 반영 |
+| `waterwidth=4` | 하천선 띠 폭(m, 전부 같은 값. 기본은 등급별 8·5·3·2). 범위 확정 때만 적용 |
+| `waterq=0.7` | 수면 높이 = 둘레 정점 지형 높이의 분위수(기본 0.5 중앙값. 호소는 조각 둘레 전체, 하천은 반지름 200 m). 수위를 견줄 때. 범위 확정 때만 적용 |
+| `watercolor=9CC3E699` | 물색(RRGGBB 또는 RRGGBBAA, # 없이. 기본은 색상표 waterColor·waterAlpha). Chrome 비교용 |
 | `ao=0` | SSAO 끄기 |
 | `shadow=0` | 그림자 끄기 |
 | `sky=0` | 절차적 하늘 끄기(안개는 배경색으로) |
@@ -128,6 +136,7 @@ npm run render-check -- --compare docs/render-checks/$(date +%F)-before docs/ren
 - 증상을 본 자리 by @nanangqq 가 있으면 그 bbox·spawn·yaw·pitch 를 세트에 더한다(계획서 해당 절에 주소를 적어 둔다).
 - 새 효과를 더하면 그 효과를 **끈 조합**을 세트에 더한다(끄는 파라미터는 4절 표·`RenderDebug`·`walk.tsx` 에 같이).
 - 도로 레이어 장면(2026-10-19, 계획서 12절): 교량 `--params "bbox=14116141,4529628,14116941,4530428&yaw=90&pitch=-10"`(37608033 고속국도), 터널 `--params "bbox=14136849,4515567,14137649,4516367&yaw=90&pitch=-10"`(남산). 교량 장면은 bbox 중심이 교량 위라 플레이어가 그 아래 서서 before/after 가 76 % 다르게 나온다. 회귀용으로는 `spawn` 으로 옆에 세우는 것이 낫다.
+- 물 레이어 장면(2026-10-22, 계획서 14절): 한강 여의도 `--params "bbox=14127729,4511702,14130234,4514248&yaw=90&pitch=-15"`(샛강 하중도·한강), 소양호 `--params "bbox=14232497,4567899,14235040,4570432&yaw=90&pitch=-15"`(호소 30개). 끈 조합 `water=0`, 높이 경로 비교 `waterz=low`. 기준은 `docs/render-checks/2026-10-22-water/`.
 - **끄는 파라미터를 더하면 캡처의 왼쪽 위 파라미터 표가 한 줄 늘어** `[walking tiles=N]` 줄이 기본 마스크(140 px) 아래로 내려온다. 끈 조합을 before(이름에 `_<param>-0` 을 붙여 복사한 폴더)와 견줄 때는 `--mask 0,0,400,200` 을 준다(2026-10-19 `roads=0` 비교: 이것 없이는 0.14 ~ 0.99 % "다름", 가리면 12쌍 모두 같음).
 
 ### 순서

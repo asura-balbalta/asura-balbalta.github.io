@@ -19,6 +19,7 @@ import {
     Vec3,
 } from "./camera"
 import { initWebGPU } from "./device"
+import { createWaterShader, createWaterSmoothShader } from "./shaders"
 import {
     createBuildingHighlightShader,
     createBuildingShader,
@@ -45,7 +46,8 @@ const LIGHT_VP_NEAR_OFFSET = HEMI_OFFSET + 16 // 가까운 캐스케이드의 �
 const SKY_OFFSET = LIGHT_VP_NEAR_OFFSET + 64 // vec4f: 태양 방향 xyz + 하늘 켬
 const HIGHLIGHT_COLOR_OFFSET = SKY_OFFSET + 16 // vec4f: 조준점 건물 강조색(테마 accent) + 투명도
 const ROAD_COLOR_OFFSET = HIGHLIGHT_COLOR_OFFSET + 16 // vec4f: 도로색
-const UNIFORM_SIZE = ROAD_COLOR_OFFSET + 16 // viewProj(0~64) + zRange(64~72) + eye(80~92) + stops + buildingColor + lightViewProj + lighting + fogColor + hemi + lightViewProjNear + sky + highlightColor + roadColor
+const WATER_COLOR_OFFSET = ROAD_COLOR_OFFSET + 16 // vec4f: 물색 + 투명도
+const UNIFORM_SIZE = WATER_COLOR_OFFSET + 16 // viewProj(0~64) + zRange(64~72) + eye(80~92) + stops + buildingColor + lightViewProj + lighting + fogColor + hemi + lightViewProjNear + sky + highlightColor + roadColor + waterColor
 /**
  * 도로 파이프라인의 깊이 바이어스(상수·기울기 배수). 도로는 지형과 같은 평면에 띄움 0.1 m 로 놓이는데 아주 멀리서 비스듬히 보면 그 차이가
  * 1픽셀 깊이 아래로 내려가 다시 깊이 싸움이 나므로 비교에 쓰는 깊이만 카메라 쪽으로 치우친다(2026-10-19 결정 by @nanangqq: 띄움 + bias 둘 다).
@@ -144,6 +146,22 @@ export type RenderDebug = {
     roadsBias?: number
     /** 도로색("#RRGGBB"). 없으면 테마 roadColor */
     roadsColor?: string
+    /** false 면 물 레이어를 그리지 않는다(water=0. 회귀 비교용) */
+    water?: boolean
+    /** false 면 물 얹기(drape 경로)의 B(지형 삼각형으로 자르기)를 끈다(waterclip=0. 범위 확정 때만 적용) */
+    waterClip?: boolean
+    /** 물 높이 경로(waterz=flat|drape. 범위 확정 때만 적용). 없으면 flat(자체 면) */
+    waterZ?: "flat" | "drape"
+    /** false 면 하천선 띠를 만들지 않는다(waterlines=0. 범위 확정 때만 적용) */
+    waterLines?: boolean
+    /** 물 띄움(m). 없으면 waterMesh WATER_LIFT_M */
+    waterLift?: number
+    /** 하천선 띠 폭(m, 전부 같은 값. waterwidth=). 없으면 riverSe 별 기본값. 범위 확정 때만 적용 */
+    waterWidth?: number
+    /** 수면 높이 분위수(0 ~ 1. waterq=. 기본 0.5 = 둘레 지형 높이의 중앙값). 범위 확정 때만 적용 */
+    waterQ?: number
+    /** 물색("#RRGGBB" 또는 "#RRGGBBAA"). 없으면 색상표 waterColor·waterAlpha */
+    waterColor?: string
 }
 /**
  * 둘러보기 중 장면에 그릴 반경(m). 이보다 먼 도엽은 그리지 않는다(L4, 2026-10-14). 안개 1/1200 에서 5 km 의 가시도는 약 1.5 % 라
@@ -358,7 +376,7 @@ const createTerrainDrawingPassAndUpdaters = (
          * overlay: 반투명으로 덮어 그리는 파이프라인(건물 강조). 알파 블렌딩, 깊이는 읽기만(같은 면을 통과하도록 greater-equal).
          * depthBias: 깊이 비교 값을 카메라 쪽으로 치우치는 상수·기울기 배수(도로. 역순 깊이라 양수)
          */
-        options: { overlay?: boolean; depthBias?: number } = {},
+        options: { overlay?: boolean; depthBias?: number; transparent?: boolean } = {},
     ) => {
         const shaderModule = device.createShaderModule(shader)
         const pipeline = device.createRenderPipeline({
@@ -369,7 +387,7 @@ const createTerrainDrawingPassAndUpdaters = (
                 module: shaderModule,
                 entryPoint: "fragmentMain",
                 targets: [
-                    options.overlay
+                    options.overlay || options.transparent
                         ? {
                               format,
                               blend: {
@@ -383,7 +401,8 @@ const createTerrainDrawingPassAndUpdaters = (
             primitive: { topology: "triangle-list", cullMode: "none" },
             depthStencil: {
                 format: DEPTH_FORMAT,
-                depthWriteEnabled: !options.overlay,
+                // transparent(물): 알파 블렌딩, 깊이는 읽기만(불투명한 것을 다 그린 뒤 마지막에 그린다. 수면은 한 자리에 한 겹이라 물끼리 정렬 불필요)
+                depthWriteEnabled: !options.overlay && !options.transparent,
                 depthCompare: options.overlay ? "greater-equal" : "greater", // 역순 깊이
                 depthBias: options.depthBias ?? 0,
                 depthBiasSlopeScale: options.depthBias ?? 0,
@@ -437,7 +456,11 @@ const createTerrainDrawingPassAndUpdaters = (
     const createRoadsPipeline = () => createPipelineSet("roads", createRoadShader(), [float32x3Layout(0)], { depthBias: currentRoadsBias })
     const createRoadsSmoothPipeline = () =>
         createPipelineSet("roads smooth", createRoadSmoothShader(), [float32x3Layout(0), float32x3Layout(1)], { depthBias: currentRoadsBias })
-    const pipelines: Record<TerrainMode | "buildings" | "buildingHighlight" | "roads" | "roadsSmooth", ReturnType<typeof createPipelineSet>> = {
+    /** 물 파이프라인 둘(도로처럼 면 법선 / 정점 법선). 투명(D6) + 도로와 같은 깊이 바이어스 */
+    const createWaterPipeline = () => createPipelineSet("water", createWaterShader(), [float32x3Layout(0)], { depthBias: currentRoadsBias, transparent: true })
+    const createWaterSmoothPipeline = () =>
+        createPipelineSet("water smooth", createWaterSmoothShader(), [float32x3Layout(0), float32x3Layout(1)], { depthBias: currentRoadsBias, transparent: true })
+    const pipelines: Record<TerrainMode | "buildings" | "buildingHighlight" | "roads" | "roadsSmooth" | "water" | "waterSmooth", ReturnType<typeof createPipelineSet>> = {
         tin: createPipelineSet("terrain tin", createSmoothTerrainShader(), [
             float32x3Layout(0),
             float32x3Layout(1),
@@ -450,6 +473,8 @@ const createTerrainDrawingPassAndUpdaters = (
         // 깊이 바이어스는 파이프라인 상태라 디버그 값이 바뀌면 다시 만든다(debugUpdater)
         roads: createRoadsPipeline(),
         roadsSmooth: createRoadsSmoothPipeline(),
+        water: createWaterPipeline(),
+        waterSmooth: createWaterSmoothPipeline(),
     }
 
     type GpuChunk = {
@@ -460,7 +485,7 @@ const createTerrainDrawingPassAndUpdaters = (
         /** 원본 메쉬 인덱스 배열에서 이 조각이 시작하는 자리(조각이 삼각형 순서대로 나뉘므로). 건물 강조가 삼각형 범위를 조각 안 자리로 옮기는 데 쓴다 */
         indexStart: number
     }
-    const layerVisible: Record<LayerId, boolean> = { terrain: true, buildings: true, roads: true }
+    const layerVisible: Record<LayerId, boolean> = { terrain: true, buildings: true, roads: true, water: true }
 
     /** GPU 에 상주하는 도엽 버퍼 바이트 합(메모리 측정, 2026-10-15) */
     let residentBytes = 0
@@ -624,6 +649,12 @@ const createTerrainDrawingPassAndUpdaters = (
         const debugRoad = getDebug().roadsColor
         const road = hexToRgb(debugRoad && /^#[0-9a-fA-F]{6}$/.test(debugRoad) ? debugRoad : palette.roadColor)
         device.queue.writeBuffer(uniformBuffer, ROAD_COLOR_OFFSET, new Float32Array([road.r, road.g, road.b, 1]))
+        // 물색 + 투명도: 디버그 watercolor=(RRGGBB 또는 RRGGBBAA)가 있으면 그 값, 없으면 색상표
+        const debugWater = getDebug().waterColor
+        const waterHex = debugWater && /^#[0-9a-fA-F]{6}([0-9a-fA-F]{2})?$/.test(debugWater) ? debugWater : palette.waterColor
+        const water = hexToRgb(waterHex.slice(0, 7))
+        const waterAlpha = debugWater && debugWater.length === 9 ? parseInt(debugWater.slice(7, 9), 16) / 255 : palette.waterAlpha
+        device.queue.writeBuffer(uniformBuffer, WATER_COLOR_OFFSET, new Float32Array([water.r, water.g, water.b, waterAlpha]))
         // 조준점 건물 강조색: 톤의 UI 강조색(accent, 라이트 #0f6cbd · 다크 #bae6fd)을 0.45 로 덮는다
         const accent = hexToRgb(accentHex)
         device.queue.writeBuffer(uniformBuffer, HIGHLIGHT_COLOR_OFFSET, new Float32Array([accent.r, accent.g, accent.b, 0.45]))
@@ -641,7 +672,7 @@ const createTerrainDrawingPassAndUpdaters = (
      * 건물은 건물 파이프라인으로 그린다. 나가면 streamClearUpdater 로 모두 비운다. 선택 범위도 같은 도엽으로 온다(1K 도엽 통일, 계획서 7절 L)
      */
     type TileBounds = { min: [number, number]; max: [number, number] }
-    const streamTiles = new Map<string, { terrain: GpuChunk[]; buildings: GpuChunk[]; roads: GpuChunk[]; mode: TerrainMode; bounds: TileBounds | null }>()
+    const streamTiles = new Map<string, { terrain: GpuChunk[]; buildings: GpuChunk[]; roads: GpuChunk[]; water: GpuChunk[]; mode: TerrainMode; bounds: TileBounds | null }>()
     /**
      * 거리 거르기 반경(m). 둘러보기 중에만 켜진다(cullRadiusUpdater). 카메라 xy 에서 도엽 xy 범위까지의 거리가 이보다 멀면
      * 장면 pass 에서 빼고, 그림자 pass 는 캐스케이드 반경의 2배 밖을 뺀다(빛 상자가 카메라 앞쪽으로 치우쳐 있어 여유를 둔다).
@@ -666,13 +697,14 @@ const createTerrainDrawingPassAndUpdaters = (
      */
     const streamTileUpdater = (
         id: string,
-        tile: { terrain: MeshChunk[]; buildings: TinMesh | null; roads?: MeshChunk[]; mode: TerrainMode; bounds?: TileBounds } | null,
+        tile: { terrain: MeshChunk[]; buildings: TinMesh | null; roads?: MeshChunk[]; water?: MeshChunk[]; mode: TerrainMode; bounds?: TileBounds } | null,
     ) => {
         const prev = streamTiles.get(id)
         if (prev) {
             destroyChunks(prev.terrain)
             destroyChunks(prev.buildings)
             destroyChunks(prev.roads)
+            destroyChunks(prev.water)
             streamTiles.delete(id)
         }
         if (!tile) return
@@ -688,7 +720,8 @@ const createTerrainDrawingPassAndUpdaters = (
             }
         }
         const roads = (tile.roads ?? []).filter((c) => c.indices.length > 0).map((c) => uploadChunk(`tile ${id} roads`, c))
-        streamTiles.set(id, { terrain, buildings, roads, mode: tile.mode, bounds: tile.bounds ?? null })
+        const water = (tile.water ?? []).filter((c) => c.indices.length > 0).map((c) => uploadChunk(`tile ${id} water`, c))
+        streamTiles.set(id, { terrain, buildings, roads, water, mode: tile.mode, bounds: tile.bounds ?? null })
     }
     /**
      * 표고 색 범위(uniform offset 64)를 쓴다. 도엽이 하나씩 올라오며 범위가 넓어질 때마다 다시 쓴다
@@ -699,11 +732,24 @@ const createTerrainDrawingPassAndUpdaters = (
     const elevationRangeUpdater = (minZ: number, maxZ: number) => {
         device.queue.writeBuffer(uniformBuffer, 64, new Float32Array([minZ, maxZ]))
     }
+    /**
+     * 도엽의 물 조각만 바꿔 끼운다(수면 맞추기 뒤. terrainTilesClient levelWater). 도엽이 GPU 에 없으면 아무것도 안 한다
+     *
+     * @param id 도엽 id
+     * @param chunks 새 물 조각(띄움 적용)
+     */
+    const waterTileUpdater = (id: string, chunks: MeshChunk[]) => {
+        const t = streamTiles.get(id)
+        if (!t) return
+        destroyChunks(t.water)
+        t.water = chunks.filter((c) => c.indices.length > 0).map((c) => uploadChunk(`tile ${id} water`, c))
+    }
     const streamClearUpdater = () => {
         for (const t of streamTiles.values()) {
             destroyChunks(t.terrain)
             destroyChunks(t.buildings)
             destroyChunks(t.roads)
+            destroyChunks(t.water)
         }
         streamTiles.clear()
     }
@@ -711,9 +757,11 @@ const createTerrainDrawingPassAndUpdaters = (
      * 이번 프레임에 그릴 (조각, 파이프라인) 목록: 스트리밍 도엽(거리 거르기 반경 안).
      *
      * @param radius 거리 거르기 반경(m). null 이면 모두 그린다
+     * @param withWater true 면 물 조각을 **맨 뒤에** 더한다(투명이라 불투명한 것 뒤에 그려야 한다. 그림자 pass 는 물을 빼 그림자를 드리우지 않게)
      */
-    const collectDraws = (radius: number | null) => {
+    const collectDraws = (radius: number | null, withWater = false) => {
         const draws: { chunks: GpuChunk[]; set: ReturnType<typeof createPipelineSet> }[] = []
+        const water: typeof draws = []
         const eye = radius !== null ? lastEye : null
         for (const t of streamTiles.values()) {
             if (eye && t.bounds && distanceToBounds(eye, t.bounds) > radius!) continue
@@ -724,8 +772,13 @@ const createTerrainDrawingPassAndUpdaters = (
                 if (smooth.length > 0) draws.push({ chunks: smooth, set: pipelines.roadsSmooth })
                 if (flat.length > 0) draws.push({ chunks: flat, set: pipelines.roads })
             }
+            if (withWater && layerVisible.water && getDebug().water !== false && t.water.length > 0) {
+                const smooth = t.water.filter((c) => c.normalBuffer), flat = t.water.filter((c) => !c.normalBuffer)
+                if (smooth.length > 0) water.push({ chunks: smooth, set: pipelines.waterSmooth })
+                if (flat.length > 0) water.push({ chunks: flat, set: pipelines.water })
+            }
         }
-        return draws
+        return draws.concat(water)
     }
 
     /**
@@ -765,7 +818,7 @@ const createTerrainDrawingPassAndUpdaters = (
      * @param target 그릴 색 텍스처 view(캔버스 또는 오프스크린 장면 텍스처)
      */
     const scenePass = (encoder: GPUCommandEncoder, target: GPUTextureView) => {
-        const draws = collectDraws(cullRadius)
+        const draws = collectDraws(cullRadius, true)
         if (draws.length === 0) return
 
         const pass = encoder.beginRenderPass({
@@ -831,6 +884,8 @@ const createTerrainDrawingPassAndUpdaters = (
         currentRoadsBias = roadsBias()
         pipelines.roads = createRoadsPipeline()
         pipelines.roadsSmooth = createRoadsSmoothPipeline()
+        pipelines.water = createWaterPipeline()
+        pipelines.waterSmooth = createWaterSmoothPipeline()
     }
 
     return {
@@ -842,6 +897,7 @@ const createTerrainDrawingPassAndUpdaters = (
         setCameraListener,
         fogColorUpdater,
         streamTileUpdater,
+        waterTileUpdater,
         streamClearUpdater,
         elevationRangeUpdater,
         cullRadiusUpdater,

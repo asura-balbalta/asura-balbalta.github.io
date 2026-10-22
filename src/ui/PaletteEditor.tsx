@@ -129,6 +129,10 @@ export const PaletteDialog = ({ store, open, onClose }: { store: PaletteStore; o
                                 <ColorField label="건물색" value={palette.buildingColor} onChange={(hex) => store.update({ buildingColor: hex })} />
                                 <span>도로</span>
                                 <ColorField label="도로색" value={palette.roadColor} onChange={(hex) => store.update({ roadColor: hex })} />
+                                <span>물</span>
+                                <ColorField label="물색" value={palette.waterColor} onChange={(hex) => store.update({ waterColor: hex })} />
+                                <span>물 투명도</span>
+                                <Slider size="small" min={0} max={1} step={0.05} value={palette.waterAlpha} onChange={(_, d) => store.update({ waterAlpha: d.value })} aria-label="물 투명도" />
                             </div>
                             <div className="ui-palette-head">표고 색표 (m)</div>
                             <div className="ui-palette-stops">

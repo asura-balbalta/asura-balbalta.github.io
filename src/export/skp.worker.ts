@@ -6,6 +6,8 @@ import { buildingAttributes, buildingLabel, buildingRings, BuildingTable, NOT_BU
 import { LAYER_DEFS } from "../layers"
 import { roadExportSampler, roadGroupExportChunks } from "../roadsMesh"
 import { roadAttributes, roadGroups, roadLabel, RoadTable } from "../roadTable"
+import { waterGroupExportChunks } from "../waterMesh"
+import { waterAttributes, waterGroups, waterLabel, WaterTable } from "../waterTable"
 import type { TinMesh } from "../terrainData"
 import type { TerrainMode } from "../webgpu/terrainRenderer"
 import type { ExportMesh, LayerMeshes } from "./stlClient"
@@ -284,6 +286,44 @@ const addRoadGroups = (
 }
 
 /**
+ * 물 레이어를 "수역(또는 하천선)마다 삼각형 면 그룹" 들을 모은 "water" 그룹으로 넣는다(2026-10-22 결정 D5 by @nanangqq: 그룹 단위는 수역, 선택 범위로
+ * 자른 것만). 그룹 이름은 수역 이름(waterLabel), 속성 사전 "asrbbt" 에 속성(waterAttributes). 여러 도엽의 조각은 weld 해 한 메쉬로(waterGroupExportChunks)
+ *
+ * @returns 건너뛴 면 수
+ */
+const addWaterGroups = (builder: Builder, mesh: TinMesh, table: WaterTable, progress: (ratio: number) => void) => {
+    const started = performance.now()
+    let skipped = 0
+    const groups = waterGroups(table)
+    const defs: ReturnType<Builder["addComponentDefinition"]>[] = []
+    const names: string[] = []
+    const attributes: ReturnType<typeof waterAttributes>[] = []
+    groups.forEach((g, i) => {
+        const chunks = waterGroupExportChunks(mesh, g)
+        if (chunks.every((c) => c.indices.length === 0)) return
+        const name = waterLabel(table, g.k0)
+        names.push(name)
+        attributes.push(waterAttributes(table, g))
+        defs.push(
+            builder.addComponentDefinition(name, (def) => {
+                // 수면은 평면이라 soft + smooth(선은 숨기고 음영은 매끄럽게)
+                for (const c of chunks) skipped += addTriangles(def, c.positions, c.indices, { softEdges: true, smoothEdges: true })
+            }),
+        )
+        if (i % 200 === 199) progress((i + 1) / groups.length)
+    })
+    builder.addGroup(
+        (group) => {
+            defs.forEach((def, i) => group.addGroupInstance(def, { name: names[i], attributes: attributes[i], attributeDictName: "asrbbt" }))
+        },
+        { name: "water", ...ATTRIBUTION_ATTRS },
+    )
+    progress(1)
+    console.log(`SKP 물: ${defs.length}수역, ${Math.round(performance.now() - started)}ms`)
+    return skipped
+}
+
+/**
  * openskp(SDK 없이 .skp 를 쓰는 라이브러리)로 레이어들을 SketchUp 2017 포맷 파일 하나로 만든다. 메인 스레드 밖에서 돈다.
  *
  * LAYER_DEFS 순서로 레이어마다 그룹(레이어 id 이름)을 하나씩 둔다. 지형 tin 은 삼각형 면을 soft·smooth 로 두어 SketchUp 이
@@ -322,6 +362,8 @@ self.onmessage = (e: MessageEvent<SkpExportRequest>) => {
             skipped += addBuildingGroups(builder, mesh.table, (ratio) => progress(ratio, w))
         } else if (id === "roads" && mesh.roadTable) {
             skipped += addRoadGroups(builder, mesh, mesh.roadTable, mode, step, roadExportSampler(layers.terrain), (ratio) => progress(ratio, w))
+        } else if (id === "water" && mesh.waterTable) {
+            skipped += addWaterGroups(builder, mesh, mesh.waterTable, (ratio) => progress(ratio, w))
         } else {
             const options: FaceOptions = id === "terrain" ? { softEdges: true, smoothEdges: true } : { softEdges: true }
             builder.addGroup((def) => void (skipped += addPlain(def, mesh, options)), { name: id, ...ATTRIBUTION_ATTRS })

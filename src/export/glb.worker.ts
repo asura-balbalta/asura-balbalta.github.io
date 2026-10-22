@@ -2,6 +2,8 @@ import { buildingAttributes, buildingLabel, NOT_BUILT } from "../buildingTable"
 import { LAYER_DEFS } from "../layers"
 import { roadExportSampler, roadGroupExportChunks } from "../roadsMesh"
 import { roadAttributes, roadGroups, roadLabel } from "../roadTable"
+import { waterGroupExportChunks } from "../waterMesh"
+import { waterAttributes, waterGroups, waterLabel } from "../waterTable"
 import type { TinMesh } from "../terrainData"
 import { buildSteppedMeshChunks } from "../terrainSteps"
 import type { TerrainMode } from "../webgpu/terrainRenderer"
@@ -32,6 +34,7 @@ const LAYER_COLORS: Record<string, [number, number, number]> = {
     terrain: [0.55, 0.67, 0.47],
     buildings: [0.78, 0.78, 0.78],
     roads: [0.6, 0.6, 0.62],
+    water: [0.61, 0.76, 0.9],
 }
 
 const post = (msg: GlbExportResponse, transfer: Transferable[] = []) => self.postMessage(msg, { transfer })
@@ -109,6 +112,22 @@ self.onmessage = (e: MessageEvent<GlbExportRequest>) => {
                         c.normals ? { positions: c.positions, indices: c.indices, normals: c.normals, material } : toFlatPrimitive(c.positions, c.indices, material),
                     ),
                     extras: roadAttributes(table, g.k0, g.k1),
+                })
+            }
+        } else if (id === "water" && mesh.waterTable) {
+            // 물: "water" 노드 아래 수역(또는 하천선)마다 노드(이름 = 수역 이름, extras = 속성). 여러 도엽의 조각을 weld 해 한 메쉬로(waterGroupExportChunks)
+            const table = mesh.waterTable
+            delete node.primitives
+            node.children = []
+            // 수면은 자체 면이라 계단화하지 않는다. 정점 법선은 평면이라 거의 위 방향
+            const normals = computeVertexNormals(mesh.positions, mesh.indices)
+            for (const g of waterGroups(table)) {
+                node.children.push({
+                    name: waterLabel(table, g.k0),
+                    primitives: waterGroupExportChunks(mesh, g, normals).map((c) =>
+                        c.normals ? { positions: c.positions, indices: c.indices, normals: c.normals, material } : toFlatPrimitive(c.positions, c.indices, material),
+                    ),
+                    extras: waterAttributes(table, g),
                 })
             }
         } else {

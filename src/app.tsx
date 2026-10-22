@@ -15,7 +15,7 @@ import { exportableLayers, runExport } from "./export/runExport"
 import { INITIAL_LAYER_STATES, LAYER_DEFS, LayerId, LayerStates } from "./layers"
 import { applyMapTheme, initOlMap } from "./olmap"
 import { SquarePhase, SquareTool } from "./squareTool"
-import type { RoadsStyle } from "./terrainTiles.worker"
+import type { RoadsStyle, WaterStyle } from "./terrainTiles.worker"
 import { createTerrainTiles, TerrainTilesClient, TerrainTilesEvent } from "./terrainTilesClient"
 import { TERRAIN_THEMES, Theme } from "./terrainTheme"
 import { PaletteStore, usePalettes } from "./usePalettes"
@@ -119,11 +119,16 @@ type TerrainInfo = {
     buildings: number
     /** 도로: 얹은 조각·띠 수, 그중 교량·고가, 터널·지하차도라 숨긴 수 */
     roads: { built: number; bridges: number; hidden: number }
+    /** 물: 얹은 조각·띠 수, 그중 하천·호소 조각, 하천선 띠 */
+    water: { built: number; rivers: number; lakes: number; ribbons: number }
 }
 
 /** 렌더 디버그 설정 중 도로 얹기 스위치(디버그 페이지 roadsclip=0·roadsbridge=0·roadslift=)를 도엽 스타일로 */
 const roadsStyleOf = (debug?: RenderDebug): RoadsStyle | undefined =>
     debug && { clip: debug.roadsClip, bridge: debug.roadsBridge, lift: debug.roadsLift }
+/** 렌더 디버그 설정 중 물 얹기 스위치(waterclip=0·waterz=·waterlines=0·waterlift=·waterwidth=)를 도엽 스타일로 */
+const waterStyleOf = (debug?: RenderDebug): WaterStyle | undefined =>
+    debug && { clip: debug.waterClip, zMode: debug.waterZ, lines: debug.waterLines, lift: debug.waterLift, ribbonWidth: debug.waterWidth, levelQuantile: debug.waterQ }
 
 /**
  * 마우스·트랙패드처럼 정밀한 포인터가 있는 기기인지. 처음 들어오면 범위 그리기 모드를 바로 켜고, 안내 문구를 클릭 방식으로
@@ -548,7 +553,7 @@ function App({
         setTerrainProgress(null)
         setSelection(bbox)
         setSheetCount(null)
-        tiles.select(bbox, { mode, step: stepInterval, band: renderDebug?.band, roads: roadsStyleOf(renderDebug) })
+        tiles.select(bbox, { mode, step: stepInterval, band: renderDebug?.band, roads: roadsStyleOf(renderDebug), water: waterStyleOf(renderDebug) })
     }
     /** 도엽 집합의 일을 상태로 옮긴다. 구독은 한 번만 하고, 처리 함수는 최신 상태를 보도록 ref 로 */
     const onTilesEventRef = useRef<(event: TerrainTilesEvent) => void>(() => {})
@@ -566,6 +571,7 @@ function App({
                     triangles: stats.triangles,
                     buildings: stats.buildings,
                     roads: stats.roads,
+                    water: stats.water,
                 })
             }
             if (event.first) showTerrain()
@@ -651,7 +657,7 @@ function App({
         if (terrain) {
             setBusy(true)
             setTerrainProgress(null)
-            tiles.setStyle({ mode: next, step: stepInterval, band: renderDebug?.band, roads: roadsStyleOf(renderDebug) })
+            tiles.setStyle({ mode: next, step: stepInterval, band: renderDebug?.band, roads: roadsStyleOf(renderDebug), water: waterStyleOf(renderDebug) })
         }
     }
 
@@ -662,7 +668,7 @@ function App({
         if (terrain && mode === "stepped") {
             setBusy(true)
             setTerrainProgress(null)
-            tiles.setStyle({ mode, step: next, band: renderDebug?.band, roads: roadsStyleOf(renderDebug) })
+            tiles.setStyle({ mode, step: next, band: renderDebug?.band, roads: roadsStyleOf(renderDebug), water: waterStyleOf(renderDebug) })
         }
     }
 
@@ -730,9 +736,10 @@ function App({
     if (terrain) layerNotes.terrain = `삼각형 ${terrain.triangles.toLocaleString()}` + (terrain.count < terrain.total ? ` (도엽 ${terrain.count} / ${terrain.total})` : "")
     if (terrain) layerNotes.buildings = `${terrain.buildings.toLocaleString()} 동`
     if (terrain) layerNotes.roads = `${terrain.roads.built.toLocaleString()} 조각` + (terrain.roads.bridges > 0 ? ` · 교량 ${terrain.roads.bridges}` : "")
+    if (terrain) layerNotes.water = `하천 ${terrain.water.rivers.toLocaleString()} · 호소 ${terrain.water.lakes.toLocaleString()}` + (terrain.water.ribbons > 0 ? ` · 띠 ${terrain.water.ribbons.toLocaleString()}` : "")
 
     const included = terrain
-        ? exportableLayers({ terrain: true, buildings: terrain.buildings > 0, roads: terrain.roads.built > 0 }, layers)
+        ? exportableLayers({ terrain: true, buildings: terrain.buildings > 0, roads: terrain.roads.built > 0, water: terrain.water.built > 0 }, layers)
         : []
 
     // 폭에 따라 그릇만 바꾼다. props 는 같다

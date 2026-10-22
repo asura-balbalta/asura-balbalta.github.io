@@ -3,6 +3,8 @@ import proj4 from "proj4"
 
 import type { BuildingTable } from "./buildingTable"
 import { RoadTable, roadTableBuffers } from "./roadTable"
+import type { WaterZMode } from "./waterMesh"
+import { WaterTable, waterTableBuffers } from "./waterTable"
 import type { MeshChunk, TinMesh } from "./terrainData"
 import { getTtpSheetsInBbox, MB_PER_TILE, neighborReach, SELECTION_TILE_LIMITS } from "./terrainIndex"
 import type { BuildRequest, BuildResponse } from "./terrainTileBuild.worker"
@@ -32,6 +34,20 @@ export type TileStyle = {
     band?: number
     /** 도로 레이어 디버그 스위치(roadsMesh). 없으면 기본값 */
     roads?: RoadsStyle
+    /** 물 레이어 스위치(waterMesh). 없으면 기본값 */
+    water?: WaterStyle
+}
+/** 물 얹기 옵션(디버그 페이지 waterclip=0·waterz=·waterlines=0·waterlift=·waterwidth=). lift 빼고는 메쉬 캐시 키에 들어간다 */
+export type WaterStyle = {
+    clip?: boolean
+    zMode?: WaterZMode
+    lines?: boolean
+    /** 띄움(m). 없으면 WATER_LIFT_M */
+    lift?: number
+    /** 띠 폭(m). 없으면 riverSe 별 기본값 */
+    ribbonWidth?: number
+    /** 수면 높이 분위수(waterq=). 없으면 LEVEL_QUANTILE */
+    levelQuantile?: number
 }
 /** 도로 얹기 옵션(디버그 페이지 roadsclip=0·roadsbridge=0·roadslift=). clip·bridge 는 메쉬 캐시 키에 들어간다 */
 export type RoadsStyle = {
@@ -96,6 +112,14 @@ export type TileData = {
     roadTable: RoadTable | null
     /** 얹은 도로 수(조각 + 띠), 그중 교량·고가, 터널·지하차도라 숨긴 수 */
     roadStats: { built: number; bridges: number; hidden: number }
+    /** 물 메쉬(지형과 같은 평면, 띄움 없음. 내보내기·표 범위의 기준). 없으면 null */
+    water: TinMesh | null
+    /** 그릴 물 조각(띄움 적용). GPU 에 올리면 버린다(releaseTerrain) */
+    waterChunks: MeshChunk[]
+    /** 물 표(내보내기 속성·그룹용. 삼각형 범위는 water 기준) */
+    waterTable: WaterTable | null
+    /** 얹은 물 수(조각 + 띠), 그중 하천·호소 조각, 하천선 띠 */
+    waterStats: { built: number; rivers: number; lakes: number; ribbons: number }
 }
 
 export type TerrainTilesResponse =
@@ -277,6 +301,16 @@ const postTile = (data: TileData) => {
         if (ch.normals) set.add(ch.normals.buffer as ArrayBuffer)
     }
     if (data.roadTable) for (const b of roadTableBuffers(data.roadTable)) set.add(b)
+    if (data.water) {
+        set.add(data.water.positions.buffer as ArrayBuffer)
+        set.add(data.water.indices.buffer as ArrayBuffer)
+    }
+    for (const ch of data.waterChunks) {
+        set.add(ch.positions.buffer as ArrayBuffer)
+        set.add(ch.indices.buffer as ArrayBuffer)
+        if (ch.normals) set.add(ch.normals.buffer as ArrayBuffer)
+    }
+    if (data.waterTable) for (const b of waterTableBuffers(data.waterTable)) set.add(b)
     post({ type: "tile", tile: data }, [...set])
 }
 
