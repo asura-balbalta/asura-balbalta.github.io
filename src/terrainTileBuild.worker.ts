@@ -276,8 +276,10 @@ const buildTile = async (job: BuildJob): Promise<{ data: TileData; transfer: Tra
 
     const t0 = performance.now()
     const poly = t.corners.map(([x, y]) => [x - ox, y - oy] as [number, number])
-    // 계단형도 법선을 쓴다: 먼 거리에서 매끈한 법선으로 조명할 때(terrainSteps normals, 2026-10-22)
-    const needNormals = true
+    // 계단형도 먼 거리 조명용 매끈한 법선을 실을 때는 TIN 법선이 필요하다(terrainSteps normals, 2026-10-22). 설정에서 끄면(smoothNormals false)
+    // 매끈한 면만 계산한다(C 이전과 같음. 도로·물 얹기는 mergedNormals 를 따로 부른다)
+    const smoothStepped = style.smoothNormals !== false
+    const needNormals = style.mode === "tin" || smoothStepped
     const band = style.band ?? NEIGHBOR_BAND_M
     /** 이웃을 합친 메쉬(띠 범위만, 외접원 검사로 넓힘). 캐시가 맞으면 만들지 않는다(건물 바닥 높이에 필요하면 그때 만든다) */
     let merged: TinMesh | null = null
@@ -314,7 +316,7 @@ const buildTile = async (job: BuildJob): Promise<{ data: TileData; transfer: Tra
     const t1 = performance.now()
     let terrain: MeshChunk[]
     if (style.mode === "stepped" && style.step > 0) {
-        terrain = [...buildSteppedMeshChunks(tin, style.step, maxBytes, undefined, { normals: tin.normals })]
+        terrain = [...buildSteppedMeshChunks(tin, style.step, maxBytes, undefined, { normals: smoothStepped ? tin.normals : undefined })]
     } else {
         terrain = [{ positions: tin.positions, indices: tin.indices, normals: tin.normals! }]
     }
@@ -414,7 +416,7 @@ const buildTile = async (job: BuildJob): Promise<{ data: TileData; transfer: Tra
         if (roads && roadTable) {
             const lift = roadsStyle.lift ?? ROAD_LIFT_M
             const zAt = style.mode === "stepped" ? (() => { const m = mergedMesh(); return createTerrainSampler(m.positions, m.indices) })() : null
-            roadChunks = roadDisplayChunks(roads, roadTable, style.mode, style.step, lift, maxBytes, zAt)
+            roadChunks = roadDisplayChunks(roads, roadTable, style.mode, style.step, lift, maxBytes, zAt, smoothStepped)
         }
     } catch (err) {
         console.warn(`도엽 ${t.name} 도로 실패:`, err)

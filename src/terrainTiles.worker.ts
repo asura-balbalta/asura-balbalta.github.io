@@ -40,6 +40,11 @@ export type TileStyle = {
     water?: WaterStyle
     /** 산림 레이어 스위치(forestMask). 없으면 기본값 */
     forest?: ForestStyle
+    /**
+     * false 면 계단형 지형·도로에 매끈한 법선(먼 거리 조명용, terrainSteps normals)을 만들지 않는다. 설정 "먼 거리 계단 부드럽게"(품질 smoothFar)를
+     * 끄고 다시 만들 때. 법선이 없는 조각은 렌더러가 원래 계단형 파이프라인으로 그린다. 없으면 만든다
+     */
+    smoothNormals?: boolean
 }
 /** 산림 마스크 옵션(디버그 페이지 forest=0·forestres=). 둘 다 마스크 캐시 키에 들어간다 */
 export type ForestStyle = {

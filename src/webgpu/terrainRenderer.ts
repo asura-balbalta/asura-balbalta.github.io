@@ -182,6 +182,8 @@ export type RenderDebug = {
     forestWalls?: boolean
     /** 산림 색("#RRGGBB" 하나면 임상 전부, 다섯이면 임상 0 ~ 4 순. forestcolor=). 없으면 색상표 forestColors */
     forestColor?: string[]
+    /** false 면 먼 거리 계단 부드럽게를 끈다(smoothfar=0. 표시: stepFade·stepNormal 끔, 생성: 계단형 매끈한 법선 안 만듦). 없으면 품질 설정 smoothFar */
+    smoothFar?: boolean
 }
 /**
  * 둘러보기 중 장면에 그릴 반경(m). 이보다 먼 도엽은 그리지 않는다(L4, 2026-10-14). 안개 1/1200 에서 5 km 의 가시도는 약 1.5 % 라
@@ -207,13 +209,16 @@ const STEP_NORMAL_DIM = 0.8
 /** 외곽선 기본 세기(0.18 = 18% 어둡게. 0.25 는 진했다, 2026-10-13). Chrome 에서 edge= 로 비교해 정하면 바꾼다 by @nanangqq */
 const EDGE_STRENGTH = 0.18
 /**
- * 품질 설정(설정 패널의 그림자·SSAO·하늘·외곽선 켜고 끄기)을 렌더 디버그 설정에 합친다. 디버그 파라미터가 명시되어 있으면 그것이 우선이고,
- * 없으면 품질 설정이 끈 효과를 끈다(외곽선은 edge=0)
+ * 품질 설정(설정 패널의 그림자·SSAO·하늘·외곽선·먼 거리 계단 부드럽게 켜고 끄기)을 렌더 디버그 설정에 합친다. 디버그 파라미터가 명시되어
+ * 있으면 그것이 우선이고, 없으면 품질 설정이 끈 효과를 끈다(외곽선은 edge=0, 먼 거리 계단 부드럽게는 stepFade·stepNormal [0, 0])
  */
 export const effectiveDebug = (debug: RenderDebug = {}, quality?: QualitySettings): RenderDebug => {
-    if (!quality) return debug
+    const smoothFar = debug.smoothFar ?? quality?.smoothFar ?? true
+    const far: RenderDebug = smoothFar ? {} : { stepFade: debug.stepFade ?? [0, 0], stepNormal: debug.stepNormal ?? [0, 0] }
+    if (!quality) return { ...debug, ...far }
     return {
         ...debug,
+        ...far,
         shadow: debug.shadow ?? quality.shadows,
         ao: debug.ao ?? quality.ao,
         sky: debug.sky ?? quality.sky,

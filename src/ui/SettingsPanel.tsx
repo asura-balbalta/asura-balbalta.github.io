@@ -61,6 +61,7 @@ export const SettingsPanel = ({
     modeDisabled,
     stepInterval,
     onStepInterval,
+    rebuildPending,
     onAttribution,
 }: {
     theme: Theme
@@ -73,6 +74,8 @@ export const SettingsPanel = ({
     modeDisabled?: boolean
     stepInterval: number
     onStepInterval: (step: number) => void
+    /** 간격 말고도 다시 만들어야 반영되는 설정이 바뀌었으면 true("먼 거리 계단 부드럽게" 생성 쪽). "다시 만들기" 를 켠다 */
+    rebuildPending?: boolean
     onAttribution?: () => void
 }) => {
     // 입력 중의 글자는 따로 두고, "다시 만들기" 를 눌렀을 때만 부모에 알린다
@@ -81,8 +84,9 @@ export const SettingsPanel = ({
     const stepValue = Number(stepText)
     const stepValid = Number.isFinite(stepValue) && stepValue >= STEP_MIN && stepValue <= STEP_MAX
     const stepChanged = stepValid && stepValue !== stepInterval
+    const canRebuild = stepChanged || (stepValid && !!rebuildPending)
     const commitStep = () => {
-        if (stepChanged) onStepInterval(stepValue)
+        if (canRebuild) onStepInterval(stepValue)
     }
     return (
         <>
@@ -140,10 +144,19 @@ export const SettingsPanel = ({
                         style={{ width: 64 }}
                     />
                     <span className="ui-settings-unit">m</span>
-                    <Button size="small" appearance={stepChanged ? "primary" : "secondary"} disabled={!stepChanged} onClick={commitStep}>
+                    <Button size="small" appearance={canRebuild ? "primary" : "secondary"} disabled={!canRebuild} onClick={commitStep}>
                         다시 만들기
                     </Button>
                 </span>
+            </div>
+            <div className="ui-settings-row">
+                {/* 먼 거리 계단 부드럽게(2026-10-22): 궤도 보기에도 적용되므로 "품질(둘러보기)" 가 아니라 지형 절에 둔다 */}
+                <Checkbox
+                    size="medium"
+                    label="먼 거리 계단 부드럽게"
+                    checked={paletteStore.quality.smoothFar}
+                    onChange={(_, data) => paletteStore.setQuality({ smoothFar: data.checked === true })}
+                />
             </div>
             <div className="ui-settings-divider" />
             <div className="ui-settings-head ui-label">품질 (둘러보기)</div>
@@ -167,7 +180,8 @@ export const SettingsPanel = ({
             </div>
             <div className="ui-panel-footer">
                 계단 간격은 {STEP_MIN} ~ {STEP_MAX} m 입니다. 바꾼 뒤 "다시 만들기" 를 누르면 계단형 지형을 다시 만듭니다. 내장 그래픽처럼 느린
-                기기에서 둘러보기 프레임이 낮으면 품질의 그림자·주변광 차폐부터 끄세요.
+                기기에서 둘러보기 프레임이 낮으면 품질의 그림자·주변광 차폐부터 끄세요. 도엽 만들기가 느리면 "먼 거리 계단 부드럽게" 를 끄고 "다시
+                만들기" 를 누르세요(화면은 바로 바뀌고, 생성 시간·메모리는 다시 만든 뒤부터 줄어듭니다).
                 <div className="ui-panel-footer-line">
                     지형·건물은 공공데이터를 가공한 것입니다.{" "}
                     <button type="button" className="ui-link" onClick={onAttribution}>

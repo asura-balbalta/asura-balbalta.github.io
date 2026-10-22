@@ -55,8 +55,13 @@ export type QualitySettings = {
     ao: boolean
     sky: boolean
     edge: boolean
+    /**
+     * 먼 거리 계단 부드럽게(2026-10-22): 한 층이 화면에서 몇 px 안 되는 곳의 벽 음영·외곽선 감쇠와 매끈한 법선 조명. 궤도 보기·둘러보기 모두.
+     * 끄면 화면은 바로 바뀌고, 도엽을 다시 만들 때부터 계단형 매끈한 법선을 만들지 않아 생성 시간·메모리가 준다(TileStyle.smoothNormals)
+     */
+    smoothFar: boolean
 }
-export const DEFAULT_QUALITY: QualitySettings = { shadows: true, ao: true, sky: true, edge: true }
+export const DEFAULT_QUALITY: QualitySettings = { shadows: true, ao: true, sky: true, edge: true, smoothFar: true }
 
 /** 둘러보기 조명 세기 기본값(전 walkLighting 상수) */
 export const DEFAULT_WALK_LIGHTING: WalkLightingStrength = { ambient: 0.5, diffuse: 0.5, hemisphere: 0.35, fogDensity: 1 / 1200 }
@@ -197,5 +202,6 @@ export const sanitizeQuality = (raw: unknown): QualitySettings => {
         ao: b(r.ao, DEFAULT_QUALITY.ao),
         sky: b(r.sky, DEFAULT_QUALITY.sky),
         edge: b(r.edge, DEFAULT_QUALITY.edge),
+        smoothFar: b(r.smoothFar, DEFAULT_QUALITY.smoothFar),
     }
 }

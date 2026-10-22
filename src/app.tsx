@@ -15,7 +15,7 @@ import { exportableLayers, runExport } from "./export/runExport"
 import { INITIAL_LAYER_STATES, LAYER_DEFS, LayerId, LayerStates } from "./layers"
 import { applyMapTheme, initOlMap } from "./olmap"
 import { SquarePhase, SquareTool } from "./squareTool"
-import type { ForestStyle, RoadsStyle, WaterStyle } from "./terrainTiles.worker"
+import type { ForestStyle, RoadsStyle, TileStyle, WaterStyle } from "./terrainTiles.worker"
 import { createTerrainTiles, TerrainTilesClient, TerrainTilesEvent } from "./terrainTilesClient"
 import { TERRAIN_THEMES, Theme } from "./terrainTheme"
 import { PaletteStore, usePalettes } from "./usePalettes"
@@ -558,12 +558,30 @@ function App({
      * 범위의 지형을 도엽 단위로 받아 올린다. 사각형 확정이 부른다. 진행·도엽·완료는 아래 구독이 받는다.
      * 이전 선택의 작업은 워커가 버린다(generation)
      */
+    /** 먼 거리 계단 부드럽게(품질 설정. 디버그 smoothfar= 가 우선). 화면 표시는 캔버스가 바로 바꾸고, 생성(계단형 매끈한 법선)은 도엽을 만들 때 */
+    const smoothFar = renderDebug?.smoothFar ?? paletteStore.quality.smoothFar
+    /** 지금 올라온 도엽을 만들 때 쓴 smoothFar. 설정과 다르면(계단형일 때) 설정 패널의 "다시 만들기" 를 켠다 */
+    const [builtSmoothFar, setBuiltSmoothFar] = useState(smoothFar)
+    const smoothFarStale = !!terrain && mode === "stepped" && builtSmoothFar !== smoothFar
+    /** 도엽 스타일(범위 선택·표현 방식·층 간격 변경이 같이 쓴다). 부르면 이번 smoothFar 를 "만든 값" 으로 기억한다 */
+    const nextTileStyle = (m: TerrainMode, step: number): TileStyle => {
+        setBuiltSmoothFar(smoothFar)
+        return {
+            mode: m,
+            step,
+            band: renderDebug?.band,
+            roads: roadsStyleOf(renderDebug),
+            water: waterStyleOf(renderDebug),
+            forest: forestStyleOf(renderDebug),
+            smoothNormals: smoothFar,
+        }
+    }
     const startTerrainLoad = (bbox: Extent) => {
         setBusy(true)
         setTerrainProgress(null)
         setSelection(bbox)
         setSheetCount(null)
-        tiles.select(bbox, { mode, step: stepInterval, band: renderDebug?.band, roads: roadsStyleOf(renderDebug), water: waterStyleOf(renderDebug), forest: forestStyleOf(renderDebug) })
+        tiles.select(bbox, nextTileStyle(mode, stepInterval))
     }
     /** 도엽 집합의 일을 상태로 옮긴다. 구독은 한 번만 하고, 처리 함수는 최신 상태를 보도록 ref 로 */
     const onTilesEventRef = useRef<(event: TerrainTilesEvent) => void>(() => {})
@@ -668,18 +686,18 @@ function App({
         if (terrain) {
             setBusy(true)
             setTerrainProgress(null)
-            tiles.setStyle({ mode: next, step: stepInterval, band: renderDebug?.band, roads: roadsStyleOf(renderDebug), water: waterStyleOf(renderDebug), forest: forestStyleOf(renderDebug) })
+            tiles.setStyle(nextTileStyle(next, stepInterval))
         }
     }
 
-    /** 계단 간격을 바꾼다. 계단형이면 도엽을 다시 만든다 */
+    /** 계단 간격을 바꾼다. 계단형이면 도엽을 다시 만든다. 간격이 같아도 먼 거리 계단 부드럽게가 만든 값과 다르면 다시 만든다 */
     const changeStepInterval = (next: number) => {
-        if (next === stepInterval) return
+        if (next === stepInterval && !smoothFarStale) return
         setStepInterval(next)
         if (terrain && mode === "stepped") {
             setBusy(true)
             setTerrainProgress(null)
-            tiles.setStyle({ mode, step: next, band: renderDebug?.band, roads: roadsStyleOf(renderDebug), water: waterStyleOf(renderDebug), forest: forestStyleOf(renderDebug) })
+            tiles.setStyle(nextTileStyle(mode, next))
         }
     }
 
@@ -930,6 +948,7 @@ function App({
                         modeDisabled={!terrainReady || busy}
                         stepInterval={stepInterval}
                         onStepInterval={changeStepInterval}
+                        rebuildPending={smoothFarStale}
                         onAttribution={() => openAttribution()}
                     />
                 </Panel>

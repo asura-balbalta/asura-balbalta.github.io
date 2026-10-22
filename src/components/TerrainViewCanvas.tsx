@@ -136,7 +136,7 @@ export const TerrainViewCanvas = ({
     theme?: Theme
     /** 장면 색상표(scenePalette). 기본은 톤의 내장 색상표. 바뀌면 uniform 만 다시 쓴다 */
     palette?: ScenePalette
-    /** 품질 설정(그림자·SSAO·하늘·외곽선). 둘러보기 조명에 합친다(effectiveDebug) */
+    /** 품질 설정(그림자·SSAO·하늘·외곽선·먼 거리 계단 부드럽게). 둘러보기 조명과 렌더 디버그 설정에 합친다(effectiveDebug) */
     quality?: QualitySettings
     hidden?: boolean
     walking?: boolean
@@ -230,7 +230,7 @@ export const TerrainViewCanvas = ({
             width: Math.round(size.width * size.dpr),
             height: Math.round(size.height * size.dpr),
             backgroundColor: hexToRgb(paletteRef.current.background),
-            debug: renderDebugRef.current,
+            debug: effectiveDebug(renderDebugRef.current, qualityRef.current),
         })
             .then((r) => {
                 if (cancelled) return r.destroy()
@@ -586,15 +586,16 @@ export const TerrainViewCanvas = ({
     useEffect(() => {
         if (walkPhysics) walkRef.current?.setPhysics(walkPhysics)
     }, [walkPhysics])
-    // 렌더 디버그 설정이 바뀌면(디버그 페이지에서 해시를 고침) 새로고침 없이 반영: 태양·AO 출력은 렌더러에, 조명 항목은 걸어 보기 중일 때 다시 쓴다
+    // 렌더 디버그 설정이 바뀌면(디버그 페이지에서 해시를 고침) 새로고침 없이 반영: 태양·AO 출력은 렌더러에, 조명 항목은 걸어 보기 중일 때 다시 쓴다.
+    // 품질 설정을 합친 값을 넘긴다(먼 거리 계단 부드럽게는 궤도 보기에도 바로 적용)
     useEffect(() => {
         if (!renderer) return
-        renderer.updaters.debugUpdater(renderDebug ?? {})
+        renderer.updaters.debugUpdater(effectiveDebug(renderDebug, quality))
         if (walkRef.current) {
             renderer.updaters.lightingUpdater(currentWalkLighting())
             renderer.updaters.cullRadiusUpdater(renderDebug?.walkRadius ?? WALK_CULL_RADIUS)
         }
-    }, [renderer, renderDebug])
+    }, [renderer, renderDebug, quality])
     /** 계단형이면 층 간격, 아니면 null. 플레이어 발 높이를 계단 바닥에 맞추는 데 쓴다 */
     const groundStep = mode === "stepped" ? stepInterval : null
     const groundStepRef = useRef(groundStep)

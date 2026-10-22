@@ -104,6 +104,7 @@ npm run render-check -- --params "bbox=14135700,4513980,14136500,4514780&yaw=90&
 | `sun=60` | 하늘 태양 고도(°, 테마 값 대신) |
 | `aodebug=1 ~ 9` | SSAO 합성 pass 디버그 출력(3절 3). 7 = 표본보다 장면 점이 얼마나 앞인지(0.5 = 같음), 8 = 장면 점이 P 의 접평면 위인 표본 비율, 9 = 한 층의 화면 px(`stepfade` 의 기준. <2 빨강, 2 ~ 4 주황, 4 ~ 8 노랑, 8 ~ 16 초록, 그 이상 흰색) |
 | `stepnormal=0` · `stepnormal=12,4` | 계단형 지형·도로의 조명 법선을 한 층이 시작 px → 끝 px 로 줄어드는 사이에 면 법선에서 매끈한 지형 법선(`terrainSteps.ts` normals)으로 옮김(기본 8,3. `terrainRenderer.ts` STEP_NORMAL_PX). 0 이면 끔(면 법선만, 옛 동작). 판·벽 조명 차이의 무아레 비교 |
+| `smoothfar=0` | 먼 거리 계단 부드럽게 끔(설정 지형 절 체크박스, 품질 `smoothFar` 보다 우선). 표시는 `stepfade=0&stepnormal=0` 과 같고, 생성에서도 계단형 지형·도로의 매끈한 법선을 만들지 않는다(`TileStyle.smoothNormals`. 범위 확정·다시 만들기 때 적용). 도엽 생성 시간·메모리 비교 |
 | `stepdim=0.8` | 매끈한 법선으로 다 옮겼을 때 바탕색 배수(기본 0.8. `terrainRenderer.ts` STEP_NORMAL_DIM). 1 이면 보정 없음. 매끈한 조명이 계단 평균보다 밝은 것을 맞출 때 |
 | `stepfade=0` · `stepfade=6,3` | 계단형 벽 음영(25%)·외곽선을 한 층이 화면에서 시작 px → 끝 px 로 줄어드는 사이에 0 으로(기본 4,2. `terrainRenderer.ts` STEP_FADE_PX). 0 이면 감쇠 끔(옛 동작). 먼 산 무아레 비교 |
 | `aoradius=0.6` · `aobias=0.1` | SSAO 표본 반지름·깊이 여유(m, 기본 1.2·0.03). 띠·후광이 어느 항에 반응하는지 가를 때(3절 4) |

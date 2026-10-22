@@ -325,6 +325,7 @@ export { compactTriangles, liftMesh, liftSteppedChunk }
  * @param lift 띄움(m)
  * @param maxBytes 계단형 조각 버퍼 상한
  * @param zAt 지형 높이 조회(벽 방향 판정). 없으면 벽을 옮기지 않는다
+ * @param smoothNormals 계단화한 조각에 매끈한 법선을 실을지(먼 거리 조명용. 설정 "먼 거리 계단 부드럽게"를 끄면 false)
  */
 export const roadDisplayChunks = (
     mesh: TinMesh & { normals?: Float32Array },
@@ -334,6 +335,7 @@ export const roadDisplayChunks = (
     lift: number,
     maxBytes: number,
     zAt: ((x: number, y: number) => number | null) | null,
+    smoothNormals = true,
 ): MeshChunk[] => {
     if (mode !== "stepped" || step <= 0 || mesh.indices.length === 0) {
         // 매끈한 면: 지형에서 보간한 정점 법선을 같이 실어 지형과 같은 셰이더(법선 보간)로 그린다
@@ -353,7 +355,7 @@ export const roadDisplayChunks = (
         // 매끈한 법선(지형에서 보간)을 같이 계단화해 먼 거리 조명을 지형처럼 옮긴다(2026-10-22)
         const stepped = buildSteppedMeshChunks({ origin: mesh.origin, positions: mesh.positions, indices: new Uint32Array(plain) }, step, maxBytes, undefined, {
             quiet: true,
-            normals: mesh.normals,
+            normals: smoothNormals ? mesh.normals : undefined,
         })
         for (const c of stepped) chunks.push(liftSteppedChunk(c, lift, zAt))
     }

@@ -18,6 +18,7 @@ import type { RenderDebug } from "../webgpu/terrainRenderer"
  * - ao·shadow·sky: 0 이면 끔. edge: 외곽선 세기(0 ~ 1). sun: 태양 고도(°). aodebug: SSAO 디버그 출력 모드(ao.ts AoDebugMode 0 ~ 6)
  * - aoradius·aobias: SSAO 표본 반지름·깊이 여유(m, 기본 1.2·0.03). 띠·후광이 어느 항에 반응하는지 가를 때
  * - stepnormal: 계단형 조명 법선을 매끈한 지형 법선으로 옮기는 구간(한 층의 화면 px, 기본 8,3). 0 이면 끔(면 법선만)
+ * - smoothfar=0: 먼 거리 계단 부드럽게 끔(표시: stepfade·stepnormal 0, 생성: 계단형 매끈한 법선 안 만듦. 생성은 범위 확정·다시 만들기 때 적용)
  * - stepdim: 매끈한 법선으로 다 옮겼을 때 바탕색 배수(기본 0.8, 1 이면 보정 없음)
  * - stepfade: 계단형 벽 음영·외곽선을 줄이는 구간(한 층의 화면 px, 기본 4,2). 0 이면 감쇠 끔(먼 산 무아레 비교)
  * - walkradius: 둘러보기 중 장면에 그릴 반경(m, 기본 5000). 0 이면 모두 그림
@@ -119,6 +120,7 @@ export const parseWalkParams = (params: URLSearchParams): { preset: AppPreset; r
         stepFade: pairOrOff(params, "stepfade", notes),
         stepNormal: pairOrOff(params, "stepnormal", notes),
         stepDim: number(params, "stepdim"),
+        smoothFar: flag(params, "smoothfar"),
         forest: flag(params, "forest"),
         forestRes: number(params, "forestres"),
         forestWalls: flag(params, "forestwalls"),
