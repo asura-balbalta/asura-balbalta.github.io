@@ -360,7 +360,7 @@ export const liftMesh = (positions: Float32Array, lift: number) => {
  * 계단형 조각의 벽을 아래층 쪽으로 lift 만큼 수평 이동하고 전체를 lift 만큼 올린다(도로 계획서 2.1절: 얹은 판은 지형 판 + lift, 벽은 지형 벽과
  * xy 가 같아 수직면끼리 겹치므로 아래층 쪽으로 밀어 lift 두께의 껍질처럼 둔다). 벽 삼각형(법선의 z ≈ 0)마다 가운데 점 양옆의 지형 높이를
  * 읽어 낮은 쪽을 고르고, 그 방향을 세 꼭짓점에 쌓아(판과 공유하는 꼭짓점도 같이 움직여 판이 그만큼 늘고 준다) 평균 방향으로 민다.
- * zAt 이 없으면(내보내기에 지형이 없을 때) 벽은 옮기지 않고 올리기만 한다
+ * zAt 이 없으면(내보내기에 지형이 없을 때) 벽은 옮기지 않고 올리기만 한다. 정점 법선(매끈한 법선, terrainSteps)이 있으면 그대로 싣는다
  */
 export const liftSteppedChunk = (chunk: MeshChunk, lift: number, zAt: ((x: number, y: number) => number | null) | null): MeshChunk => {
     const p = chunk.positions.slice()
@@ -400,7 +400,7 @@ export const liftSteppedChunk = (chunk: MeshChunk, lift: number, zAt: ((x: numbe
         }
     }
     for (let i = 2; i < p.length; i += 3) p[i] += lift
-    return { positions: p, indices: idx }
+    return { positions: p, indices: idx, ...(chunk.normals ? { normals: chunk.normals } : {}) }
 }
 
 /** 삼각형 범위가 참조하는 정점만 모은 작은 메쉬(내보내기 그룹용). lift 를 z 에 더하고, 정점 법선이 있으면 같이 옮긴다 */

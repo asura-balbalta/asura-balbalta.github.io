@@ -47,7 +47,8 @@ const SKY_OFFSET = LIGHT_VP_NEAR_OFFSET + 64 // vec4f: 태양 방향 xyz + 하�
 const HIGHLIGHT_COLOR_OFFSET = SKY_OFFSET + 16 // vec4f: 조준점 건물 강조색(테마 accent) + 투명도
 const ROAD_COLOR_OFFSET = HIGHLIGHT_COLOR_OFFSET + 16 // vec4f: 도로색
 const WATER_COLOR_OFFSET = ROAD_COLOR_OFFSET + 16 // vec4f: 물색 + 투명도
-const UNIFORM_SIZE = WATER_COLOR_OFFSET + 16 // viewProj(0~64) + zRange(64~72) + eye(80~92) + stops + buildingColor + lightViewProj + lighting + fogColor + hemi + lightViewProjNear + sky + highlightColor + roadColor + waterColor
+const STEP_NORMAL_OFFSET = WATER_COLOR_OFFSET + 16 // vec4f: 계단형 매끈한 법선으로 옮기는 구간(시작·끝 px)
+const UNIFORM_SIZE = STEP_NORMAL_OFFSET + 16 // viewProj(0~64) + zRange(64~72) + eye(80~92) + stops + buildingColor + lightViewProj + lighting + fogColor + hemi + lightViewProjNear + sky + highlightColor + roadColor + waterColor + stepNormal
 /**
  * 도로 파이프라인의 깊이 바이어스(상수·기울기 배수). 도로는 지형과 같은 평면에 띄움 0.1 m 로 놓이는데 아주 멀리서 비스듬히 보면 그 차이가
  * 1픽셀 깊이 아래로 내려가 다시 깊이 싸움이 나므로 비교에 쓰는 깊이만 카메라 쪽으로 치우친다(2026-10-19 결정 by @nanangqq: 띄움 + bias 둘 다).
@@ -162,12 +163,34 @@ export type RenderDebug = {
     waterQ?: number
     /** 물색("#RRGGBB" 또는 "#RRGGBBAA"). 없으면 색상표 waterColor·waterAlpha */
     waterColor?: string
+    /** 계단형 벽 음영·외곽선의 감쇠 [시작, 끝](한 층의 화면 px. stepfade=4,2). [0, 0] 이면 끔(stepfade=0). 없으면 STEP_FADE_PX */
+    stepFade?: [number, number]
+    /** 계단형 조명 법선을 매끈한 법선으로 옮기는 구간 [시작, 끝](한 층의 화면 px. stepnormal=8,3). [0, 0] 이면 끔(stepnormal=0). 없으면 STEP_NORMAL_PX */
+    stepNormal?: [number, number]
+    /** 매끈한 법선으로 다 옮겼을 때 바탕색 배수(stepdim=0.8. 1 이면 보정 없음). 없으면 STEP_NORMAL_DIM */
+    stepDim?: number
 }
 /**
  * 둘러보기 중 장면에 그릴 반경(m). 이보다 먼 도엽은 그리지 않는다(L4, 2026-10-14). 안개 1/1200 에서 5 km 의 가시도는 약 1.5 % 라
  * 사라지는 것이 보이지 않는다. 디버그 페이지 walkradius= 로 바꿔 비교한다
  */
 export const WALK_CULL_RADIUS = 5000
+/**
+ * 계단형 벽 음영(25%)·외곽선을 줄이는 구간(한 층의 화면 px): 4 px 이상이면 그대로, 2 px 이하면 0. 멀리서 층이 픽셀보다 촘촘해지면
+ * 층마다 어두운 벽·선이 번갈아 찍혀 먼 산에 무아레가 생겼다(2026-10-22). Chrome 에서 stepfade= 로 비교해 정하면 바꾼다 by @nanangqq
+ */
+const STEP_FADE_PX: [number, number] = [4, 2]
+/**
+ * 계단형 조명 법선을 면 법선에서 매끈한 지형 법선으로 옮기는 구간(한 층의 화면 px): 8 px 이상이면 면 법선 그대로, 3 px 이하면 매끈한 법선.
+ * 벽 음영을 줄여도(STEP_FADE_PX) 판(위)·벽(옆)의 조명 차이가 한 층 2 ~ 4 px 구간에서 무아레로 남았다(2026-10-22. MSAA 4× 는 무늬를 잘게
+ * 바꿀 뿐이라 되돌림). Chrome 에서 stepnormal= 로 비교해 정하면 바꾼다 by @nanangqq
+ */
+const STEP_NORMAL_PX: [number, number] = [8, 3]
+/**
+ * 매끈한 법선으로 다 옮겼을 때 바탕색에 곱하는 값. 매끈한 조명은 어두운 벽이 섞인 계단 평균보다 밝다(2026-10-22: 밝아진 것이 살짝
+ * 거슬림 by @nanangqq. 소양호 산비탈 평균 휘도 C 끔 172 → 켬 201). Chrome 에서 stepdim= 로 비교해 정하면 바꾼다
+ */
+const STEP_NORMAL_DIM = 0.8
 /** 외곽선 기본 세기(0.18 = 18% 어둡게. 0.25 는 진했다, 2026-10-13). Chrome 에서 edge= 로 비교해 정하면 바꾼다 by @nanangqq */
 const EDGE_STRENGTH = 0.18
 /**
@@ -454,13 +477,16 @@ const createTerrainDrawingPassAndUpdaters = (
     let currentRoadsBias = roadsBias()
     /** 도로 파이프라인 둘: 법선 없는 조각(계단형 판·벽, 교량)은 면 법선, 법선 있는 조각(매끈한 면)은 지형처럼 정점 법선 보간 */
     const createRoadsPipeline = () => createPipelineSet("roads", createRoadShader(), [float32x3Layout(0)], { depthBias: currentRoadsBias })
+    /** 계단화한 도로 조각(매끈한 법선 있음): 계단형 지형처럼 먼 거리에서 매끈한 법선으로 조명 */
+    const createRoadsSteppedPipeline = () =>
+        createPipelineSet("roads stepped", createRoadShader(true), [float32x3Layout(0), float32x3Layout(1)], { depthBias: currentRoadsBias })
     const createRoadsSmoothPipeline = () =>
         createPipelineSet("roads smooth", createRoadSmoothShader(), [float32x3Layout(0), float32x3Layout(1)], { depthBias: currentRoadsBias })
     /** 물 파이프라인 둘(도로처럼 면 법선 / 정점 법선). 투명(D6) + 도로와 같은 깊이 바이어스 */
     const createWaterPipeline = () => createPipelineSet("water", createWaterShader(), [float32x3Layout(0)], { depthBias: currentRoadsBias, transparent: true })
     const createWaterSmoothPipeline = () =>
         createPipelineSet("water smooth", createWaterSmoothShader(), [float32x3Layout(0), float32x3Layout(1)], { depthBias: currentRoadsBias, transparent: true })
-    const pipelines: Record<TerrainMode | "buildings" | "buildingHighlight" | "roads" | "roadsSmooth" | "water" | "waterSmooth", ReturnType<typeof createPipelineSet>> = {
+    const pipelines: Record<TerrainMode | "steppedSmooth" | "buildings" | "buildingHighlight" | "roads" | "roadsSmooth" | "roadsStepped" | "water" | "waterSmooth", ReturnType<typeof createPipelineSet>> = {
         tin: createPipelineSet("terrain tin", createSmoothTerrainShader(), [
             float32x3Layout(0),
             float32x3Layout(1),
@@ -468,11 +494,14 @@ const createTerrainDrawingPassAndUpdaters = (
         stepped: createPipelineSet("terrain stepped", createSteppedTerrainShader(), [
             float32x3Layout(0),
         ]),
+        // 매끈한 법선을 실은 계단형 조각(terrainSteps normals): 멀리서 그 법선으로 조명한다
+        steppedSmooth: createPipelineSet("terrain stepped smooth", createSteppedTerrainShader(true), [float32x3Layout(0), float32x3Layout(1)]),
         buildings: createPipelineSet("buildings", createBuildingShader(), [float32x3Layout(0)]),
         buildingHighlight: createPipelineSet("building highlight", createBuildingHighlightShader(), [float32x3Layout(0)], { overlay: true }),
         // 깊이 바이어스는 파이프라인 상태라 디버그 값이 바뀌면 다시 만든다(debugUpdater)
         roads: createRoadsPipeline(),
         roadsSmooth: createRoadsSmoothPipeline(),
+        roadsStepped: createRoadsSteppedPipeline(),
         water: createWaterPipeline(),
         waterSmooth: createWaterSmoothPipeline(),
     }
@@ -605,11 +634,29 @@ const createTerrainDrawingPassAndUpdaters = (
             LIGHTING_OFFSET,
             new Float32Array([next.ambient, next.diffuse, next.shadows ? 1 : 0, next.fogDensity]),
         )
-        device.queue.writeBuffer(uniformBuffer, HEMI_OFFSET, new Float32Array([next.hemisphere, 0, 0, 0]))
+        writeHemi()
         writeSky()
         if (lastCamera) cameraUpdater(lastCamera)
     }
     const currentLighting = () => lighting
+    /** 계단 층 간격(m). 벽 음영·외곽선 감쇠가 "한 층의 화면 px" 를 재는 데 쓴다 */
+    let stepInterval = 1
+    /** [층 간격, 감쇠 시작 px, 끝 px]. 디버그 stepfade=0 이면 시작·끝 0(감쇠 없음) */
+    const currentStepFade = (): [number, number, number] => [stepInterval, ...(getDebug().stepFade ?? STEP_FADE_PX)]
+    /** uniform hemi: 반구 조명 세기 + currentStepFade, 그리고 stepNormal(매끈한 법선 구간) */
+    const writeHemi = () => {
+        device.queue.writeBuffer(uniformBuffer, HEMI_OFFSET, new Float32Array([lighting.hemisphere, ...currentStepFade()]))
+        device.queue.writeBuffer(uniformBuffer, STEP_NORMAL_OFFSET, new Float32Array([...(getDebug().stepNormal ?? STEP_NORMAL_PX), getDebug().stepDim ?? STEP_NORMAL_DIM, 0]))
+    }
+    /**
+     * 계단 층 간격을 바꾼다(설정 패널). 인자 없이 부르면 디버그 stepfade 만 다시 쓴다(debugUpdater)
+     *
+     * @param step 층 간격(m)
+     */
+    const stepIntervalUpdater = (step = stepInterval) => {
+        stepInterval = step
+        writeHemi()
+    }
     /** 하늘의 태양 방향(그림자 빛의 방위각 + 테마의 고도). paletteUpdater 가 바꾼다 */
     let sunDir: Vec3 = sunDirection(60, [LIGHT_DIR[0], LIGHT_DIR[1]])
     const writeSky = () =>
@@ -765,11 +812,15 @@ const createTerrainDrawingPassAndUpdaters = (
         const eye = radius !== null ? lastEye : null
         for (const t of streamTiles.values()) {
             if (eye && t.bounds && distanceToBounds(eye, t.bounds) > radius!) continue
-            if (layerVisible.terrain && t.terrain.length > 0) draws.push({ chunks: t.terrain, set: pipelines[t.mode] })
+            if (layerVisible.terrain && t.terrain.length > 0) {
+                const set = t.mode === "stepped" && t.terrain.every((c) => c.normalBuffer) ? pipelines.steppedSmooth : pipelines[t.mode]
+                draws.push({ chunks: t.terrain, set })
+            }
             if (layerVisible.buildings && t.buildings.length > 0) draws.push({ chunks: t.buildings, set: pipelines.buildings })
             if (layerVisible.roads && getDebug().roads !== false && t.roads.length > 0) {
                 const smooth = t.roads.filter((c) => c.normalBuffer), flat = t.roads.filter((c) => !c.normalBuffer)
-                if (smooth.length > 0) draws.push({ chunks: smooth, set: pipelines.roadsSmooth })
+                // 법선이 있는 조각: 매끈한 면이면 정점 법선 보간, 계단형이면 계단화한 도로(면 법선 + 먼 거리 매끈한 법선)
+                if (smooth.length > 0) draws.push({ chunks: smooth, set: t.mode === "stepped" ? pipelines.roadsStepped : pipelines.roadsSmooth })
                 if (flat.length > 0) draws.push({ chunks: flat, set: pipelines.roads })
             }
             if (withWater && layerVisible.water && getDebug().water !== false && t.water.length > 0) {
@@ -884,6 +935,7 @@ const createTerrainDrawingPassAndUpdaters = (
         currentRoadsBias = roadsBias()
         pipelines.roads = createRoadsPipeline()
         pipelines.roadsSmooth = createRoadsSmoothPipeline()
+        pipelines.roadsStepped = createRoadsSteppedPipeline()
         pipelines.water = createWaterPipeline()
         pipelines.waterSmooth = createWaterSmoothPipeline()
     }
@@ -892,7 +944,9 @@ const createTerrainDrawingPassAndUpdaters = (
         scenePass,
         shadowPass,
         lightingUpdater,
+        stepIntervalUpdater,
         currentLighting,
+        currentStepFade,
         currentSun,
         setCameraListener,
         fogColorUpdater,
@@ -967,6 +1021,7 @@ export const createTerrainRenderFunctionAndUpdateFunctions = async ({
         aspectUpdater,
         fogColorUpdater,
         currentLighting,
+        currentStepFade,
         currentSun,
         setCameraListener,
         refreshPalette,
@@ -1000,6 +1055,7 @@ export const createTerrainRenderFunctionAndUpdateFunctions = async ({
         sky.setSun(currentSun())
         ao.setParams({ radius: next.aoRadius, bias: next.aoBias })
         sceneUpdaters.roadsBiasUpdater()
+        sceneUpdaters.stepIntervalUpdater()
     }
 
     /**
@@ -1036,7 +1092,7 @@ export const createTerrainRenderFunctionAndUpdateFunctions = async ({
         scenePass(encoder, target)
         if (lighting.sky) sky.run(encoder, target, depth.view)
         if (offscreen) {
-            ao.run(encoder, canvasView, { ao: lighting.ao, edge: lighting.edge, fogDensity: lighting.fogDensity, debug: aoDebug })
+            ao.run(encoder, canvasView, { ao: lighting.ao, edge: lighting.edge, fogDensity: lighting.fogDensity, debug: aoDebug, stepFade: currentStepFade() })
         }
         device.queue.submit([encoder.finish()])
     }

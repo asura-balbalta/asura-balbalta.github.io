@@ -6,7 +6,8 @@ import { FpsCamera } from "./webgpu/camera"
  * 렌더 루프가 프레임마다 step(dt) 로 물리를 진행해 1인칭 카메라를 받아 간다.
  *
  * 동작 규칙은 예전 three.js 게임(../app/game, playerController)에서 가져왔다: 포인터 잠금 마우스 시점, WASD(화살표) 이동,
- * Space 점프(공중 점프 2번까지), W 두 번(0.32초 안) 대시. 충돌은 높이 조회(HeightSampler)로만 한다: 발 높이는 지형과 건물 지붕
+ * Space 점프(공중 점프 2번까지), W 두 번(0.32초 안) 대시. Space 두 번(0.3초 안)이면 두 번째가 공중 점프 대신 공중 정지(스샷용, 2026-10-22 결정 by @nanangqq):
+ * 속도 0·중력 끔, 시점만 돌고 이동·대시는 무시, Space 한 번이면 풀려 떨어진다. 충돌은 높이 조회(HeightSampler)로만 한다: 발 높이는 지형과 건물 지붕
  * (roofAt) 중 높은 쪽이고, 발이 그 아래로 못 가며, 새 자리의 발 높이가 지금보다 STEP_UP_MAX 보다 높으면(건물 벽) 못 간다.
  * 막히면 x·y 한 축씩 따로 시도해 벽을 따라 미끄러진다. 시작점이 건물 안이면 지붕 위에서 시작한다(2026-10-13. 처음엔 건물을 통과했다).
  * 메쉬 범위 밖으로 못 나간다.
@@ -43,6 +44,8 @@ export type Player = {
     step: (dt: number) => FpsCamera
     /** 물리 값을 바꾼다(테스트용 조절 패널). 바로 반영된다 */
     setPhysics: (next: Partial<WalkPhysics>) => void
+    /** 공중 정지 중인지 */
+    isHovering: () => boolean
     /** 계단형 모드의 층 간격(m). 주면 발 높이를 층 바닥(floor(z / step) · step)으로 맞춰 계단 위를 걷는다. null 이면 매끈한 면 */
     setGroundStep: (step: number | null) => void
     /** 다시 포커스(포인터 잠금 요청). Esc 로 풀린 뒤 화면을 클릭했을 때 */
@@ -74,6 +77,8 @@ const DASH_SPEED_CAP = 2
 const AIR_DAMPING_RATIO = 0.15
 const AIR_CONTROL_RATIO = 0.36
 const DASH_TAP_WINDOW = 0.32
+/** Space 두 번을 공중 정지로 볼 간격(초) */
+const HOVER_TAP_WINDOW = 0.3
 const EYE_HEIGHT = 1.7
 const LOOK_RATE = 0.002
 /** 위아래 시점 한계(약 86°). 90° 면 lookAt 의 up 과 겹쳐 행렬이 무너진다 */
@@ -99,6 +104,7 @@ const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v
  * @param options.onMove 위치가 바뀔 때 약 10 Hz 로(미니맵·상태 표시줄용)
  * @param options.physics 처음 물리 값(없는 항목은 기본값)
  * @param options.groundStep 계단형 층 간격(m). setGroundStep 참고
+ * @param options.hoverHeight 주면 지표 위 이 높이(m)에서 공중 정지한 채 시작한다(디버그 페이지 hover=. 자동 캡처가 같은 높이에서 찍게)
  */
 export const createPlayer = ({
     sampler,
@@ -111,6 +117,7 @@ export const createPlayer = ({
     onMove,
     physics: initialPhysics,
     groundStep: initialGroundStep = null,
+    hoverHeight,
 }: {
     sampler: HeightSampler
     spawn: [number, number]
@@ -122,6 +129,7 @@ export const createPlayer = ({
     onMove?: (move: PlayerMove) => void
     physics?: Partial<WalkPhysics>
     groundStep?: number | null
+    hoverHeight?: number
 }): Player => {
     let physics: WalkPhysics = { ...DEFAULT_WALK_PHYSICS, ...initialPhysics }
     let groundStep = initialGroundStep
@@ -146,13 +154,16 @@ export const createPlayer = ({
     let x = clamp(spawn[0], sampler.min[0] + EDGE_MARGIN, sampler.max[0] - EDGE_MARGIN)
     let y = clamp(spawn[1], sampler.min[1] + EDGE_MARGIN, sampler.max[1] - EDGE_MARGIN)
     let ground = groundAt(x, y) ?? sampler.min[2]
-    let z = ground
+    let z = ground + Math.max(hoverHeight ?? 0, 0)
     let vx = 0
     let vy = 0
     let vz = 0
     let yaw = initialYaw
     let pitch = clamp(initialPitch, -PITCH_LIMIT, PITCH_LIMIT)
-    let grounded = true
+    let grounded = z <= ground
+    /** 공중 정지: 속도 0, 중력·이동 없음. Space 두 번으로 들어가고 Space 한 번으로 풀린다 */
+    let hovering = hoverHeight !== undefined && hoverHeight > 0
+    let lastJumpTap = -Infinity
     let airJumps = 0
     let dashUntil = 0
     let lastForwardTap = -Infinity
@@ -181,16 +192,31 @@ export const createPlayer = ({
             return
         }
         if (code === "Space") {
-            if (grounded) {
-                vz = physics.jumpSpeed
-                grounded = false
-                airJumps = 0
-            } else if (airJumps < MAX_AIR_JUMPS) {
-                vz = physics.jumpSpeed
-                airJumps++
+            if (hovering) {
+                // 풀기: 그 자리에서 떨어지기 시작한다
+                hovering = false
+                lastJumpTap = -Infinity
+            } else if (clock - lastJumpTap < HOVER_TAP_WINDOW) {
+                // 두 번째 Space: 공중 점프 대신 그 높이에서 멈춘다(땅에서 빠르게 두 번이면 점프 직후 낮게)
+                hovering = true
+                vx = 0
+                vy = 0
+                vz = 0
+                dashUntil = 0
+                lastJumpTap = -Infinity
+            } else {
+                if (grounded) {
+                    vz = physics.jumpSpeed
+                    grounded = false
+                    airJumps = 0
+                } else if (airJumps < MAX_AIR_JUMPS) {
+                    vz = physics.jumpSpeed
+                    airJumps++
+                }
+                lastJumpTap = clock
             }
         }
-        if (code === "KeyW" || code === "ArrowUp") {
+        if ((code === "KeyW" || code === "ArrowUp") && !hovering) {
             if (clock - lastForwardTap < DASH_TAP_WINDOW) {
                 // 대시: 앞 방향 수평 속도를 즉시 올리고 잠깐 더 민다. 그 뒤는 감쇠가 줄인다
                 vx = Math.cos(yaw) * physics.dashSpeed
@@ -269,6 +295,8 @@ export const createPlayer = ({
         step: (rawDt) => {
             const dt = clamp(rawDt, 0, MAX_DT)
             clock += dt
+            // 공중 정지: 위치 그대로(시점만 마우스로 돈다)
+            if (hovering) return camera()
             // 이동 방향: 앞 = yaw, 오른쪽 = yaw − 90°
             let f = 0
             let s = 0
@@ -327,6 +355,7 @@ export const createPlayer = ({
             }
             return camera()
         },
+        isHovering: () => hovering,
         setPhysics: (next) => {
             physics = { ...physics, ...next }
         },

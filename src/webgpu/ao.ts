@@ -40,11 +40,19 @@ const AO_UNIFORM_SIZE = 208
 /**
  * 합성 pass 의 디버그 출력 모드(디버그 페이지 `aodebug=`. 운영 경로는 0). 흰색 = 0 으로 두어 판독이 쉽다.
  * 1 흐린 AO(대비 8배) · 2 흐림 전 AO(대비 8배) · 3 복원 법선(n·0.5+0.5) · 4 거리 등고선(fract(d/0.25)) ·
- * 5 이웃 행(아래)과의 거리 차 ×10 · 6 같은 차폐 계산을 전해상도로(대비 8배. 반해상도 pass 의 읽기 문제를 가르는 비교용)
+ * 5 이웃 행(아래)과의 거리 차 ×10 · 6 같은 차폐 계산을 전해상도로(대비 8배. 반해상도 pass 의 읽기 문제를 가르는 비교용) ·
+ * 9 한 층의 화면 px(계단 벽 음영·외곽선 감쇠의 기준. <2 빨강, 2 ~ 4 주황, 4 ~ 8 노랑, 8 ~ 16 초록, 그 이상 흰색)
  */
-export type AoDebugMode = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8
+export type AoDebugMode = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9
 /** 합성 pass 옵션. ao 가 꺼지면(그리고 debug 가 0 이면) 차폐·흐림 pass 를 건너뛰고 외곽선만 */
-export type CompositeOptions = { ao: boolean; edge: number; fogDensity: number; debug: AoDebugMode }
+export type CompositeOptions = {
+    ao: boolean
+    edge: number
+    fogDensity: number
+    debug: AoDebugMode
+    /** 계단 층 간격(m)과 외곽선 감쇠 시작·끝(한 층의 화면 px. 시작이 0 이면 감쇠 없음). 계단형 셰이더의 벽 음영과 같은 규칙 */
+    stepFade: [number, number, number]
+}
 
 const fullscreenVertex = /* wgsl */ `
     // 정점 3개로 화면을 덮는 삼각형
@@ -67,7 +75,7 @@ const aoCommon = /* wgsl */ `
         size: vec2f, // AO 텍스처 크기(px)
         depthSize: vec2f, // 깊이 텍스처 크기(px)
         offset: vec4f, // x normalOffsetPerMeter, y 외곽선 세기(0 이면 없음), z 안개 밀도(1/m), w AO 켬(0/1)
-        debug: vec4f, // x 디버그 출력 모드(AoDebugMode. 0 이면 없음)
+        debug: vec4f, // x 디버그 출력 모드(AoDebugMode. 0 이면 없음), y 계단 층 간격(m), z·w 외곽선 감쇠 시작·끝(한 층의 화면 px. z 가 0 이면 없음)
     };
     @group(0) @binding(0) var<uniform> a: AoUniforms;
     @group(0) @binding(1) var depthTex: texture_depth_2d;
@@ -261,6 +269,16 @@ const compositeShader = (): GPUShaderModuleDescriptor => ({
         if (mode == 7) { return vec4f(vec3f(aoDiag(c, vec2u(fragXY) % 4u).y), 1.0); }
         if (mode == 8) { return vec4f(vec3f(aoDiag(c, vec2u(fragXY) % 4u).z), 1.0); }
         let P = worldAtPixel(c);
+        if (mode == 9) {
+            let dir = normalize(P);
+            let ang = max(length(normalize(worldAt(pixelUv(c + vec2i(1, 0)), d)) - dir), length(normalize(worldAt(pixelUv(c + vec2i(0, 1)), d)) - dir));
+            let s = a.debug.y / max(length(P) * ang, 1e-6);
+            if (s < 2.0) { return vec4f(0.9, 0.2, 0.2, 1.0); }
+            if (s < 4.0) { return vec4f(1.0, 0.6, 0.2, 1.0); }
+            if (s < 8.0) { return vec4f(1.0, 0.9, 0.3, 1.0); }
+            if (s < 16.0) { return vec4f(0.5, 0.85, 0.4, 1.0); }
+            return vec4f(1.0);
+        }
         if (mode == 4) { return vec4f(vec3f(fract(length(P) / 0.25)), 1.0); }
         let Pd = worldAtPixel(c + vec2i(0, 1));
         if (mode == 5) { return vec4f(vec3f(1.0 - abs(length(Pd) - length(P)) * 10.0), 1.0); }
@@ -290,6 +308,13 @@ const compositeShader = (): GPUShaderModuleDescriptor => ({
             let Pu = worldAt(uv - vec2f(0.0, px.y), depthAt(uv - vec2f(0.0, px.y)));
             let n = normalAt(P, Pr, Pl, Pd, Pu);
             edge = max(edgeAlong(P, n, Pr, Pl), edgeAlong(P, n, Pd, Pu));
+            // 한 층이 화면에서 몇 px 안 되면 층마다 선이 픽셀보다 촘촘히 찍혀 먼 산에 무아레가 생긴다(2026-10-22). 계단형 벽 음영과 같은
+            // 규칙으로 줄인다: 픽셀 폭(m) = 거리 × 이웃 픽셀과의 시선 각
+            if (a.debug.z > 0.0) {
+                let dir = normalize(P);
+                let ang = max(length(normalize(worldAt(uv + vec2f(px.x, 0.0), d)) - dir), length(normalize(worldAt(uv + vec2f(0.0, px.y), d)) - dir));
+                edge = edge * smoothstep(a.debug.w, a.debug.z, a.debug.y / max(length(P) * ang, 1e-6));
+            }
             // 안개와 같은 비율로 사라진다(멀리서 선만 남지 않게)
             let fog = 1.0 - exp(-length(P) * a.offset.z);
             edge = edge * (1.0 - fog) * a.offset.y;
@@ -463,13 +488,14 @@ export const createAoPasses = (device: GPUDevice, format: GPUTextureFormat) => {
             lastOptions.ao !== options.ao ||
             lastOptions.edge !== options.edge ||
             lastOptions.fogDensity !== options.fogDensity ||
-            lastOptions.debug !== options.debug
+            lastOptions.debug !== options.debug ||
+            lastOptions.stepFade.some((v, i) => v !== options.stepFade[i])
         ) {
-            lastOptions = { ...options }
+            lastOptions = { ...options, stepFade: [...options.stepFade] }
             device.queue.writeBuffer(
                 uniformBuffer,
                 176,
-                new Float32Array([AO_PARAMS.normalOffsetPerMeter, options.edge, options.fogDensity, options.ao ? 1 : 0, options.debug, 0, 0, 0]),
+                new Float32Array([AO_PARAMS.normalOffsetPerMeter, options.edge, options.fogDensity, options.ao ? 1 : 0, options.debug, ...options.stepFade]),
             )
         }
         // 디버그 출력(1·2·6)은 AO 가 꺼져 있어도 차폐 텍스처가 있어야 한다

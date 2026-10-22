@@ -23,7 +23,7 @@ npm run build       # esbuild → dist/. 미리보기 전에 반드시
 - **재현은 디버그 페이지 주소로 한다**(2026-10-14, 계획서 7절). 범위 선택 → 3D → 둘러보기 진입이 한 번에 되고 같은 자리·각도가 보장된다:
   `http://localhost:3000/#/debug/walk?bbox=14135700,4513980,14136500,4514780&lock=0&yaw=90&pitch=-15`
   파라미터는 4절. 받은 값이 오른쪽 위에 표로 보인다. 해시를 고치면(`location.hash = …`, 새로고침 없음) 렌더 설정(ao·shadow·sky·edge·sun·aodebug)은
-  즉시 반영되고, 프리셋(bbox·spawn·yaw·pitch)은 처음 한 번만 적용된다. 운영 주소(해시 없음)에는 디버그 파라미터가 없다.
+  즉시 반영되고, 프리셋(bbox·spawn·yaw·pitch·hover)은 처음 한 번만 적용된다. 운영 주소(해시 없음)에는 디버그 파라미터가 없다.
 - 둘러보기(게임 모드)는 `lock=0` 으로 들어간다. 포인터 잠금이 내장 브라우저에서 실패해 포커스가 없으면 합성 마우스·키 이벤트가 무시된다.
 - 손으로 들어갈 때는 `find` 로 "둘러보기" 요소를 찾아 클릭. 시점·이동은 합성 이벤트로:
   `document.dispatchEvent(new MouseEvent('mousemove', {movementX, movementY}))`, `new KeyboardEvent('keydown', {code: 'KeyW'})` + `keyup`.
@@ -72,6 +72,7 @@ npm run render-check -- --params "bbox=14135700,4513980,14136500,4514780&yaw=90&
 | `walk=0` | 3D 까지만(자동 진입 안 함) |
 | `spawn=x,y` | 시작 xy(메쉬 로컬 m, origin 을 뺀 EPSG:5179). 없으면 범위 가운데 |
 | `yaw=90` · `pitch=-15` | 시작 방향(°, 0 = 동쪽·반시계, 90 = 북쪽)·위아래(°, 위로 +) |
+| `hover=80` | 지표 위 이 높이(m)에서 공중 정지한 채 시작(조작은 Space 두 번 = 정지, 한 번 = 풀기. `player.ts`). 높은 곳에서 내려다본 장면을 같은 자리에서 다시 찍을 때 |
 | `lock=0` | 포인터 잠금 없이 흉내(내장 브라우저·Playwright) |
 | `look=0` | 마우스로 시점을 돌리지 않음(자동 캡처의 결정론. 잠금 흉내에서는 보이는 Chrome 창 위를 지나는 실제 마우스가 시점을 돌린다. 스크립트가 자동으로 붙임) |
 | `walkradius=3000` | 둘러보기 중 장면에 그릴 반경(m, 기본 5000. 0 이면 모두 그림). 큰 범위의 프레임 문제를 가를 때 끈다(1364개 범위: 켬 11 ms, 끔 27 ms) |
@@ -97,7 +98,10 @@ npm run render-check -- --params "bbox=14135700,4513980,14136500,4514780&yaw=90&
 | `sky=0` | 절차적 하늘 끄기(안개는 배경색으로) |
 | `edge=0.25` | 외곽선 세기(0 이면 끄기) |
 | `sun=60` | 하늘 태양 고도(°, 테마 값 대신) |
-| `aodebug=1 ~ 8` | SSAO 합성 pass 디버그 출력(3절 3). 7 = 표본보다 장면 점이 얼마나 앞인지(0.5 = 같음), 8 = 장면 점이 P 의 접평면 위인 표본 비율 |
+| `aodebug=1 ~ 9` | SSAO 합성 pass 디버그 출력(3절 3). 7 = 표본보다 장면 점이 얼마나 앞인지(0.5 = 같음), 8 = 장면 점이 P 의 접평면 위인 표본 비율, 9 = 한 층의 화면 px(`stepfade` 의 기준. <2 빨강, 2 ~ 4 주황, 4 ~ 8 노랑, 8 ~ 16 초록, 그 이상 흰색) |
+| `stepnormal=0` · `stepnormal=12,4` | 계단형 지형·도로의 조명 법선을 한 층이 시작 px → 끝 px 로 줄어드는 사이에 면 법선에서 매끈한 지형 법선(`terrainSteps.ts` normals)으로 옮김(기본 8,3. `terrainRenderer.ts` STEP_NORMAL_PX). 0 이면 끔(면 법선만, 옛 동작). 판·벽 조명 차이의 무아레 비교 |
+| `stepdim=0.8` | 매끈한 법선으로 다 옮겼을 때 바탕색 배수(기본 0.8. `terrainRenderer.ts` STEP_NORMAL_DIM). 1 이면 보정 없음. 매끈한 조명이 계단 평균보다 밝은 것을 맞출 때 |
+| `stepfade=0` · `stepfade=6,3` | 계단형 벽 음영(25%)·외곽선을 한 층이 화면에서 시작 px → 끝 px 로 줄어드는 사이에 0 으로(기본 4,2. `terrainRenderer.ts` STEP_FADE_PX). 0 이면 감쇠 끔(옛 동작). 먼 산 무아레 비교 |
 | `aoradius=0.6` · `aobias=0.1` | SSAO 표본 반지름·깊이 여유(m, 기본 1.2·0.03). 띠·후광이 어느 항에 반응하는지 가를 때(3절 4) |
 
 파라미터 해석은 `src/debug/walk.tsx` 안에만 있고, 운영 `App`·렌더러는 `RenderDebug` 객체(`terrainRenderer.ts`)로 받는다. 새 효과를 더하면 `RenderDebug` 에 끄는 항목과 `walk.tsx` 의 파라미터를 같이 둔다.

@@ -350,7 +350,11 @@ export const roadDisplayChunks = (
     }
     const chunks: MeshChunk[] = []
     if (plain.length > 0) {
-        const stepped = buildSteppedMeshChunks({ origin: mesh.origin, positions: mesh.positions, indices: new Uint32Array(plain) }, step, maxBytes, undefined, { quiet: true })
+        // 매끈한 법선(지형에서 보간)을 같이 계단화해 먼 거리 조명을 지형처럼 옮긴다(2026-10-22)
+        const stepped = buildSteppedMeshChunks({ origin: mesh.origin, positions: mesh.positions, indices: new Uint32Array(plain) }, step, maxBytes, undefined, {
+            quiet: true,
+            normals: mesh.normals,
+        })
         for (const c of stepped) chunks.push(liftSteppedChunk(c, lift, zAt))
     }
     if (raised.length > 0) chunks.push(compactTriangles(mesh.positions, new Uint32Array(raised), lift))

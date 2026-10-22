@@ -8,6 +8,7 @@ const KEYS: [string, string][] = [
     ["마우스", "시점"],
     ["Space", "점프"],
     ["W W", "대시"],
+    ["Space Space", "공중 정지"],
 ]
 
 /**

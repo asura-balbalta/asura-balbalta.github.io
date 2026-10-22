@@ -49,6 +49,8 @@ export type WalkStart = {
     yaw?: number
     /** 시작 위아래 시점(라디안, 수평선 위로 +) */
     pitch?: number
+    /** 지표 위 이 높이(m)에서 공중 정지한 채 시작(player.ts hoverHeight) */
+    hover?: number
 }
 
 /**
@@ -528,6 +530,7 @@ export const TerrainViewCanvas = ({
             },
             physics: walkPhysicsRef.current,
             groundStep: groundStepRef.current,
+            hoverHeight: start?.hover,
         })
         walkRef.current = player
         pointersRef.current.clear()
@@ -598,6 +601,10 @@ export const TerrainViewCanvas = ({
     useEffect(() => {
         walkRef.current?.setGroundStep(groundStep)
     }, [groundStep])
+    // 계단형 벽 음영·외곽선의 먼 거리 감쇠가 "한 층의 화면 px" 를 재는 층 간격
+    useEffect(() => {
+        renderer?.updaters.stepIntervalUpdater(stepInterval)
+    }, [renderer, stepInterval])
 
     /**
      * 현재 카메라에 변경을 적용하고 GPU uniform 에 반영한다.

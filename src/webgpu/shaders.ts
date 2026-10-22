@@ -35,12 +35,13 @@ const commonWgsl = /* wgsl */ `
         lightViewProj: mat4x4f, // 빛(평행광) 기준 직교 투영. 섀도 맵의 좌표계
         lighting: vec4f, // x 주변광, y 난반사, z 그림자 켬(0/1), w 안개 밀도(1/m, 0 이면 없음)
         fogColor: vec4f, // 안개색(배경색)
-        hemi: vec4f, // x 반구 조명 세기(0 이면 없음)
+        hemi: vec4f, // x 반구 조명 세기(0 이면 없음), y 계단 층 간격(m), z·w 벽 음영 감쇠 시작·끝(한 층의 화면 px. z 가 0 이면 감쇠 없음)
         lightViewProjNear: mat4x4f, // 가까운 캐스케이드(카메라 주변 40 m, 텍셀 4 cm)의 빛 기준 투영
         sky: vec4f, // xyz 태양 방향(하늘·안개용), w 하늘 켬(0/1)
         highlightColor: vec4f, // 조준점 건물 강조색(테마 accent) rgb + 투명도
         roadColor: vec4f, // 도로 레이어 색 (r, g, b, 1)
         waterColor: vec4f, // 물 레이어 색 (r, g, b, 투명도)
+        stepNormal: vec4f, // 계단형 조명 법선을 매끈한 법선으로 옮기는 구간 x 시작·y 끝(한 층의 화면 px. x 가 0 이면 옮기지 않음), z 다 옮겼을 때 바탕색 배수
     };
     @group(0) @binding(0) var<uniform> u: Uniforms;
     @group(0) @binding(1) var shadowMap: texture_depth_2d;
@@ -165,12 +166,21 @@ export const createSmoothTerrainShader = () => ({
  *   미분은 카메라 기준 상대 위치(rel)로 한다(절대 위치는 원점에서 멀면 f32 양자화 잡음. VertexOutput 참고).
  *   미분으로 구한 법선은 앞뒤 부호가 정해지지 않으므로 카메라를 향하게 뒤집는다(양면 조명).
  *   바탕색은 절대 표고 색표(terrainColor. 판은 층 높이라 판마다 한 색)이고, 수직면(단)은 25% 어둡게 해서 어느 방향에서든
- *   판과 구분되게 한다.
+ *   판과 구분되게 한다. 멀리서 한 층이 화면에서 몇 px 안 되면(hemi.z → hemi.w px) 이 25% 를 0 으로 줄인다: 층마다 어두운 벽이
+ *   픽셀보다 촘촘히 번갈아 찍혀 먼 산에 무아레가 생겼다(2026-10-22, 보고서 10절 A)
+ * - withNormals: 정점마다 매끈한 지형 법선(@location(1), terrainSteps normals)을 받아, 한 층이 stepNormal.x → y px 로 줄어드는 사이에
+ *   조명 법선을 면 법선에서 매끈한 법선으로 옮긴다. 판(위)·벽(옆)의 조명 차이가 픽셀 간격으로 번갈아 남던 무아레를 없앤다(2026-10-22 C.
+ *   MSAA 4× 는 무늬를 잘게 바꿀 뿐이라 되돌렸다)
  *
+ * @param withNormals 정점 법선 버퍼를 받는 변형인지
  * @returns `{ label, code }` 형태의 GPUShaderModuleDescriptor
  */
-export const createSteppedTerrainShader = () => ({
-    label: "stepped terrain shader",
+export const createSteppedTerrainShader = (withNormals = false) =>
+    steppedShader(withNormals ? "stepped terrain shader (smooth normals)" : "stepped terrain shader", withNormals, "terrainColor(input.world.z)")
+
+/** 계단형 지형·도로가 같이 쓰는 셰이더 본체. baseColor 는 바탕색 WGSL 식(지형 = 표고 색표, 도로 = roadColor) */
+const steppedShader = (label: string, withNormals: boolean, baseColor: string) => ({
+    label,
     code: /* wgsl */ `
     ${commonWgsl}
 
@@ -181,14 +191,16 @@ export const createSteppedTerrainShader = () => ({
         // 약 1 mm 라 멀리 비스듬한 면의 픽셀당 위치 차(수 mm)가 양자화 잡음이 되어 법선이 흔들렸다(검은 점 무늬, 2026-10-14 충주
         // 1300개 범위). 상대 위치는 값이 작아 미분이 정확하다(SSAO 의 카메라 기준 복원과 같은 원리)
         @location(1) rel: vec3f,
+        ${withNormals ? "@location(2) smoothN: vec3f," : ""}
     };
 
     @vertex
-    fn vertexMain(@location(0) pos: vec3f) -> VertexOutput {
+    fn vertexMain(@location(0) pos: vec3f${withNormals ? ", @location(1) smoothN: vec3f" : ""}) -> VertexOutput {
         var output: VertexOutput;
         output.p = u.viewProj * vec4f(pos, 1);
         output.world = pos;
         output.rel = pos - u.eye;
+        ${withNormals ? "output.smoothN = smoothN;" : ""}
         return output;
     }
 
@@ -197,9 +209,19 @@ export const createSteppedTerrainShader = () => ({
         let v = normalize(u.eye - input.world);
         let faceNormal = normalize(cross(dpdx(input.rel), dpdy(input.rel)));
         let n = select(-faceNormal, faceNormal, dot(faceNormal, v) >= 0.0);
-        let riserShade = 1.0 - 0.25 * (1.0 - abs(n.z));
-        let base = terrainColor(input.world.z) * riserShade;
-        return vec4f(shade(base, n, input.world), 1);
+        // 픽셀 하나가 덮는 폭(m, 시선에 수직) = 거리 × 픽셀 각(시선 방향의 화면 미분). 층 간격 ÷ 이것 = 한 층의 화면 px
+        let d = length(input.rel);
+        let dir = input.rel / max(d, 1e-3);
+        let pixel = d * max(length(dpdx(dir)), length(dpdy(dir)));
+        let fade = select(1.0, smoothstep(u.hemi.w, u.hemi.z, u.hemi.y / max(pixel, 1e-6)), u.hemi.z > 0.0);
+        let riserShade = 1.0 - 0.25 * (1.0 - abs(n.z)) * fade;
+        let base = ${baseColor} * riserShade;
+        ${withNormals ? `// 한 층이 작아지면 조명 법선을 매끈한 법선으로(면 법선 비중 = keep). 매끈한 조명은 어두운 벽이 섞인 계단 평균보다 밝아
+        // (2026-10-22 소양호 산비탈 평균 휘도 +15%) 옮긴 만큼 바탕색에 stepNormal.z 를 곱한다
+        let keep = select(1.0, smoothstep(u.stepNormal.y, u.stepNormal.x, u.hemi.y / max(pixel, 1e-6)), u.stepNormal.x > 0.0);
+        let lightN = normalize(mix(normalize(input.smoothN), n, keep));
+        let dim = mix(1.0, select(1.0, u.stepNormal.z, u.stepNormal.z > 0.0), 1.0 - keep);
+        return vec4f(shade(base * dim, lightN, input.world), 1);` : "return vec4f(shade(base, n, input.world), 1);"}
     }
     `,
 })
@@ -247,43 +269,17 @@ export const createBuildingShader = () => ({
 })
 
 /**
- * 도로 레이어 셰이더 descriptor. 건물 셰이더와 같은 입력·조명(위치만, 화면 미분 법선, 양면)이고 색만 uniform roadColor 다.
- * 지형에 얹은 판은 지형과 같은 법선이라 같은 음영을 받고, 계단형의 도로 벽은 건물 벽처럼 25% 어둡다.
+ * 도로 레이어 셰이더 descriptor. 계단형 지형 셰이더(steppedShader)와 같은 입력·조명(위치, 화면 미분 법선, 양면, 먼 거리 벽 음영 감쇠)이고
+ * 색만 uniform roadColor 다. 지형에 얹은 판은 지형과 같은 법선이라 같은 음영을 받고, 계단형의 도로 벽은 지형 벽처럼 25% 어둡다.
+ * withNormals 면 계단화한 도로 조각의 매끈한 법선(terrainSteps normals)으로 먼 거리 조명을 옮긴다(2026-10-22: 지형만 옮겼더니 낮은 각도에서
+ * 도로 벽 음영이 진한 선으로 도드라졌다). 교량·고가처럼 계단화하지 않은 조각은 법선 없이 그린다.
  * 지형과 같은 평면이라 깊이 싸움이 나는 것은 파이프라인의 depthBias(terrainRenderer)와 메쉬의 띄움(roadsMesh)이 막는다
  *
+ * @param withNormals 정점 법선 버퍼를 받는 변형인지(계단화한 도로)
  * @returns `{ label, code }` 형태의 GPUShaderModuleDescriptor
  */
-export const createRoadShader = () => ({
-    label: "road shader",
-    code: /* wgsl */ `
-    ${commonWgsl}
-
-    struct VertexOutput {
-        @builtin(position) p: vec4f,
-        @location(0) world: vec3f,
-        @location(1) rel: vec3f,
-    };
-
-    @vertex
-    fn vertexMain(@location(0) pos: vec3f) -> VertexOutput {
-        var output: VertexOutput;
-        output.p = u.viewProj * vec4f(pos, 1);
-        output.world = pos;
-        output.rel = pos - u.eye;
-        return output;
-    }
-
-    @fragment
-    fn fragmentMain(input: VertexOutput) -> @location(0) vec4f {
-        let v = normalize(u.eye - input.world);
-        let faceNormal = normalize(cross(dpdx(input.rel), dpdy(input.rel)));
-        let n = select(-faceNormal, faceNormal, dot(faceNormal, v) >= 0.0);
-        let wallShade = 1.0 - 0.25 * (1.0 - abs(n.z));
-        let base = u.roadColor.rgb * wallShade;
-        return vec4f(shade(base, n, input.world), 1);
-    }
-    `,
-})
+export const createRoadShader = (withNormals = false) =>
+    steppedShader(withNormals ? "road shader (stepped smooth normals)" : "road shader", withNormals, "u.roadColor.rgb")
 
 /**
  * 매끈한 면 모드의 도로 셰이더 descriptor. 매끈한 지형 셰이더와 같이 정점 법선(@location(1))을 받아 픽셀마다 보간한다. 도로 정점 법선은

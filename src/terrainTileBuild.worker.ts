@@ -252,7 +252,8 @@ const buildTile = async (job: BuildJob): Promise<{ data: TileData; transfer: Tra
 
     const t0 = performance.now()
     const poly = t.corners.map(([x, y]) => [x - ox, y - oy] as [number, number])
-    const needNormals = style.mode === "tin"
+    // 계단형도 법선을 쓴다: 먼 거리에서 매끈한 법선으로 조명할 때(terrainSteps normals, 2026-10-22)
+    const needNormals = true
     const band = style.band ?? NEIGHBOR_BAND_M
     /** 이웃을 합친 메쉬(띠 범위만, 외접원 검사로 넓힘). 캐시가 맞으면 만들지 않는다(건물 바닥 높이에 필요하면 그때 만든다) */
     let merged: TinMesh | null = null
@@ -289,7 +290,7 @@ const buildTile = async (job: BuildJob): Promise<{ data: TileData; transfer: Tra
     const t1 = performance.now()
     let terrain: MeshChunk[]
     if (style.mode === "stepped" && style.step > 0) {
-        terrain = [...buildSteppedMeshChunks(tin, style.step, maxBytes)]
+        terrain = [...buildSteppedMeshChunks(tin, style.step, maxBytes, undefined, { normals: tin.normals })]
     } else {
         terrain = [{ positions: tin.positions, indices: tin.indices, normals: tin.normals! }]
     }

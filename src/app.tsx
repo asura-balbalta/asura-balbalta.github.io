@@ -69,6 +69,8 @@ export type AppPreset = {
     yaw?: number
     /** 시작 위아래 시점(라디안, 수평선 위로 +) */
     pitch?: number
+    /** 지표 위 이 높이(m)에서 공중 정지한 채 시작 */
+    hover?: number
 }
 
 /** 디버그 페이지에 알리는 앱 상태(준비 신호. 자동 캡처가 "도엽 스트리밍이 멈춤" 을 기다리는 데 쓴다) */
@@ -779,7 +781,7 @@ function App({
                     onWalkFrameTime={setWalkFrameMs}
                     onWalkTileCount={setWalkTileCount}
                     renderDebug={renderDebug}
-                    walkStart={preset && { spawn: preset.spawn, yaw: preset.yaw, pitch: preset.pitch }}
+                    walkStart={preset && { spawn: preset.spawn, yaw: preset.yaw, pitch: preset.pitch, hover: preset.hover }}
                     onBuildingLook={setLookedBuilding}
                     onBuildingPin={pinBuilding}
                     onBuildingLock={toggleBuildingLock}

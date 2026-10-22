@@ -14,8 +14,12 @@ import type { RenderDebug } from "../webgpu/terrainRenderer"
  * - walk=0 이면 3D 까지만(기본은 bbox 가 있으면 둘러보기 자동 진입)
  * - spawn: 시작 xy(메쉬 로컬, m. 메쉬 origin 을 뺀 EPSG:5179). 없으면 범위 가운데
  * - yaw·pitch: 시작 방향(°, yaw 0 = 동쪽·반시계, 90 = 북쪽)·위아래(°, 위로 +). 없으면 북쪽·수평
+ * - hover: 지표 위 이 높이(m)에서 공중 정지한 채 시작(Space 한 번이면 풀린다). 높은 곳에서 본 장면을 같은 자리에서 다시 찍을 때
  * - ao·shadow·sky: 0 이면 끔. edge: 외곽선 세기(0 ~ 1). sun: 태양 고도(°). aodebug: SSAO 디버그 출력 모드(ao.ts AoDebugMode 0 ~ 6)
  * - aoradius·aobias: SSAO 표본 반지름·깊이 여유(m, 기본 1.2·0.03). 띠·후광이 어느 항에 반응하는지 가를 때
+ * - stepnormal: 계단형 조명 법선을 매끈한 지형 법선으로 옮기는 구간(한 층의 화면 px, 기본 8,3). 0 이면 끔(면 법선만)
+ * - stepdim: 매끈한 법선으로 다 옮겼을 때 바탕색 배수(기본 0.8, 1 이면 보정 없음)
+ * - stepfade: 계단형 벽 음영·외곽선을 줄이는 구간(한 층의 화면 px, 기본 4,2). 0 이면 감쇠 끔(먼 산 무아레 비교)
  * - walkradius: 둘러보기 중 장면에 그릴 반경(m, 기본 5000). 0 이면 모두 그림
  * - resident: 둘러보기 중 GPU 에 올려 둘 반경(m, 기본 walkradius 와 같음). 0 이면 내리지 않음(옛 동작)
  * - band: 도엽 생성 때 이웃을 합치는 경계 띠 폭(m). 0 이면 이웃 3×3 전체(옛 동작). 없으면 기본값. 범위 확정 때만 적용된다
@@ -26,7 +30,7 @@ import type { RenderDebug } from "../webgpu/terrainRenderer"
  *   RRGGBBAA(# 없이). clip·z·lines·width·q 는 범위 확정 때만
  * - lock=0: 포인터 잠금 없이 흉내(내장 브라우저·Playwright. 마우스는 어디서 움직여도 시점, Esc 가 포커스 끔)
  * - look=0: 마우스로 시점을 돌리지 않음(자동 캡처. 보이는 창 위를 실제 마우스가 지나가도 시점이 그대로)
- * 해시를 고치면(새로고침 없이) 렌더 디버그 설정은 바로 반영되고, 프리셋(bbox·spawn·yaw·pitch)은 처음 한 번만 적용된다.
+ * 해시를 고치면(새로고침 없이) 렌더 디버그 설정은 바로 반영되고, 프리셋(bbox·spawn·yaw·pitch·hover)은 처음 한 번만 적용된다.
  * 받은 파라미터를 왼쪽 위(둘러보기 중 비어 있는 자리. 오른쪽 위는 미니맵)에 작게 보여 무엇이 적용됐는지 확인할 수 있다(클릭은 통과).
  * 그 요소의 data-debug-state(loading | ready | walking)·data-busy(로딩·재생성 중 1)·data-walk-tiles(선택 범위 밖 도엽 수)는
  * 자동 캡처(scripts/render-check.mjs)의 준비 신호다: 둘러보기 중 busy 가 0 이고 도엽 수가 한동안 변하지 않으면 찍는다
@@ -43,6 +47,18 @@ const number = (params: URLSearchParams, key: string) => {
     const v = Number(params.get(key))
     return params.has(key) && Number.isFinite(v) ? v : undefined
 }
+/**
+ * "시작,끝"(px, 시작 > 끝 ≥ 0) 또는 "0"(끔 → [0, 0]) 형식의 구간. stepfade·stepnormal(한 층의 화면 px 로 효과를 줄이는 구간)
+ * 형식이 틀리면 notes 에 적고 undefined(기본값)
+ */
+const pairOrOff = (params: URLSearchParams, key: string, notes: string[]): [number, number] | undefined => {
+    if (!params.has(key)) return undefined
+    const v = params.get(key)!.split(",").map(Number)
+    if (v.length === 1 && v[0] === 0) return [0, 0]
+    if (v.length === 2 && v.every(Number.isFinite) && v[0] > v[1] && v[1] >= 0) return [v[0], v[1]]
+    notes.push(`${key} 는 0 또는 시작,끝(px, 시작 > 끝 ≥ 0)`)
+    return undefined
+}
 const toRadians = (deg: number | undefined) => (deg === undefined ? undefined : (deg * Math.PI) / 180)
 
 /**
@@ -57,14 +73,15 @@ export const parseWalkParams = (params: URLSearchParams): { preset: AppPreset; r
     const spawnValues = numberList(params.get("spawn"), 2)
     if (params.has("spawn") && !spawnValues) notes.push("spawn 형식 오류(x,y)")
     const aodebugRaw = number(params, "aodebug")
-    const aodebug = aodebugRaw !== undefined && Number.isInteger(aodebugRaw) && aodebugRaw >= 0 && aodebugRaw <= 8 ? (aodebugRaw as AoDebugMode) : undefined
-    if (params.has("aodebug") && aodebug === undefined) notes.push("aodebug 는 0 ~ 8")
+    const aodebug = aodebugRaw !== undefined && Number.isInteger(aodebugRaw) && aodebugRaw >= 0 && aodebugRaw <= 9 ? (aodebugRaw as AoDebugMode) : undefined
+    if (params.has("aodebug") && aodebug === undefined) notes.push("aodebug 는 0 ~ 9")
     const preset: AppPreset = {
         bbox: (bboxValues as Extent | null) ?? undefined,
         walk: !!bboxValues && params.get("walk") !== "0",
         spawn: (spawnValues as [number, number] | null) ?? undefined,
         yaw: toRadians(number(params, "yaw")),
         pitch: toRadians(number(params, "pitch")),
+        hover: number(params, "hover"),
     }
     const walkRadiusRaw = number(params, "walkradius")
     const residentRaw = number(params, "resident")
@@ -97,6 +114,9 @@ export const parseWalkParams = (params: URLSearchParams): { preset: AppPreset; r
         waterWidth: number(params, "waterwidth"),
         waterQ: number(params, "waterq"),
         waterColor: params.has("watercolor") ? `#${params.get("watercolor")}` : undefined,
+        stepFade: pairOrOff(params, "stepfade", notes),
+        stepNormal: pairOrOff(params, "stepnormal", notes),
+        stepDim: number(params, "stepdim"),
     }
     return { preset, renderDebug, notes }
 }

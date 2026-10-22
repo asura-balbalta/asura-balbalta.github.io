@@ -133,6 +133,31 @@ const levelSegment = (poly: P[], level: number): [P, P] | null => {
 }
 
 /**
+ * 원본 삼각형 안의 (x, y) 에서 세 정점 법선을 무게중심 보간해 정규화하는 함수를 만든다. 위에서 볼 때 넓이가 거의 0인 삼각형(수직면)은 평균을 쓴다
+ *
+ * @param tri 원본 삼각형 꼭짓점
+ * @param vi 꼭짓점의 원본 정점 번호
+ * @param N 원본 정점 법선
+ */
+const smoothNormalOf = (tri: P[], vi: number[], N: Float32Array) => {
+    const [[x0, y0], [x1, y1], [x2, y2]] = tri
+    const n = vi.map((i) => [N[i * 3], N[i * 3 + 1], N[i * 3 + 2]])
+    const det = (y1 - y2) * (x0 - x2) + (x2 - x1) * (y0 - y2)
+    return (x: number, y: number): P => {
+        let l0 = 1 / 3
+        let l1 = 1 / 3
+        if (Math.abs(det) > 1e-9) {
+            l0 = ((y1 - y2) * (x - x2) + (x2 - x1) * (y - y2)) / det
+            l1 = ((y2 - y0) * (x - x2) + (x0 - x2) * (y - y2)) / det
+        }
+        const l2 = 1 - l0 - l1
+        const v: P = [0, 1, 2].map((k) => l0 * n[0][k] + l1 * n[1][k] + l2 * n[2][k]) as P
+        const len = Math.hypot(v[0], v[1], v[2]) || 1
+        return [v[0] / len, v[1] / len, v[2] / len]
+    }
+}
+
+/**
  * TIN 메쉬를 등고선 모형(콘타)처럼 계단형 메쉬로 바꾼다.
  *
  * 각 삼각형을 높이 k·step 평면들로 잘라, 조각마다 z 를 그 구간의 바닥 높이로 눌러 평평한 판을 만들고,
@@ -143,7 +168,7 @@ const levelSegment = (poly: P[], level: number): [P, P] | null => {
  * 그때그때 삼각 분할해 넣고(pushPlate), 조각들이 모여 판이 된다. 그래서 판 전체의 오목한 모양이나 구멍을
  * 따로 처리할 필요가 없다. 대신 조각 경계마다 정점이 생기는데, 좌표가 같은 정점은 하나로 공유하므로 이음새는 없다.
  *
- * 법선은 넣지 않는다. 판·벽이 모두 평면이라 셰이더가 화면 미분으로 면 법선을 구하며(stepped 모드),
+ * 면 법선은 넣지 않는다. 판·벽이 모두 평면이라 셰이더가 화면 미분으로 면 법선을 구하며(stepped 모드),
  * 그 덕에 좌표가 같은 정점(판 모서리 = 벽 모서리 = 이웃 판 모서리)을 mm 단위로 비교해 하나로 공유한다.
  * 판·벽의 z 는 항상 층 높이라서, 층 번호별 Map 에 (x, y) 숫자 키(makeXyKey, 메쉬 최소 x·y 기준)로 정점을 찾는다.
  * 그래서 메쉬 크기가 가로 134km × 세로 67km 를 넘으면 키가 겹칠 수 있어 시작 전에 오류를 던진다.
@@ -159,6 +184,10 @@ const levelSegment = (poly: P[], level: number): [P, P] | null => {
  * @param mesh 원본 TIN 메쉬(원점 기준 좌표)
  * @param step 층 간격(m). 1이면 1m 마다 한 층
  * @param maxBytes 조각의 정점 버퍼·인덱스 버퍼 각각의 최대 바이트 수 (device.limits.maxBufferSize)
+ * 원본 정점 법선(options.normals)을 주면 정점마다 "그 자리의 매끈한 지형 법선"(원본 삼각형 안에서 x·y 무게중심 보간)을 normals 로 같이 낸다.
+ * 셰이더가 한 층이 화면에서 몇 px 안 될 때 면 법선 대신 이것으로 조명해 판(밝음)·벽(어두움)이 픽셀 간격으로 번갈아 생기는 무아레를 없앤다
+ * (2026-10-22). 이웃 원본 삼각형과 공유하는 변 위에서는 양쪽 보간값이 같아 정점을 공유해도 이음새가 없다(먼저 만든 쪽 값을 쓴다)
+ *
  * @param onProgress 진행률 알림(선택). 처리한 원본 삼각형 수와 전체 수를 약 PROGRESS_INTERVAL_MS 간격으로 받고,
  *   끝나면 (전체, 전체)를 한 번 더 받는다(간격 때문에 100% 가 빠지지 않게)
  * @yields 판·벽으로 이루어진 인덱스 메쉬 조각
@@ -168,8 +197,8 @@ export function* buildSteppedMeshChunks(
     step: number,
     maxBytes: number,
     onProgress?: (done: number, total: number) => void,
-    /** quiet: 끝에 요약 로그를 찍지 않는다(도로 내보내기가 그룹마다 부를 때) */
-    options: { quiet?: boolean } = {},
+    /** quiet: 끝에 요약 로그를 찍지 않는다(도로 내보내기가 그룹마다 부를 때). normals: 원본 정점 법선(있으면 매끈한 법선을 같이 낸다) */
+    options: { quiet?: boolean; normals?: Float32Array } = {},
 ): Generator<MeshChunk> {
     const started = performance.now()
     let lastProgress = started
@@ -189,6 +218,10 @@ export function* buildSteppedMeshChunks(
     const maxIndices = Math.floor(maxBytes / 4)
     const positions = growable((n) => new Float32Array(n))
     const indices = growable((n) => new Uint32Array(n))
+    const N0 = options.normals
+    const normals = N0 ? growable((n) => new Float32Array(n)) : null
+    /** 지금 처리 중인 원본 삼각형의 매끈한 법선 보간(x, y → 정규화한 법선). 법선이 없으면 null */
+    let smoothAt: ((x: number, y: number) => P) | null = null
     let chunkCount = 0
     let totalTriangles = 0
     let totalVertices = 0
@@ -211,6 +244,7 @@ export function* buildSteppedMeshChunks(
             idx = positions.length() / 3
             byXy.set(key, idx)
             positions.push3(x, y, z)
+            if (normals && smoothAt) normals.push3(...smoothAt(x, y))
         }
         return idx
     }
@@ -280,12 +314,13 @@ export function* buildSteppedMeshChunks(
 
     /** 쌓인 것을 조각으로 만들고 새 조각을 시작한다 */
     const flush = (): MeshChunk => {
-        const chunk = { positions: positions.result(), indices: indices.result() }
+        const chunk: MeshChunk = { positions: positions.result(), indices: indices.result(), ...(normals ? { normals: normals.result() } : {}) }
         chunkCount++
         totalTriangles += chunk.indices.length / 3
         totalVertices += chunk.positions.length / 3
         positions.reset()
         indices.reset()
+        normals?.reset()
         vertexMaps.clear()
         wallSets.clear()
         return chunk
@@ -305,6 +340,7 @@ export function* buildSteppedMeshChunks(
             const i = I0[t + k] * 3
             return [P0[i], P0[i + 1], P0[i + 2]] as P
         })
+        if (N0) smoothAt = smoothNormalOf(tri, [0, 1, 2].map((k) => I0[t + k]), N0)
         const zs = tri.map((p) => p[2])
         const kMin = bandOf(Math.min(...zs), step)
         const kMax = bandOf(Math.max(...zs), step)
