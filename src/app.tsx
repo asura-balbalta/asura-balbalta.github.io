@@ -381,6 +381,10 @@ function App({
             window.setTimeout(() => setEscHint(false), 4000)
         }
     }
+    // 둘러보기 중 다시 클릭해 포커스가 잡히면 열린 패널을 닫는다(걷는 동안 시야를 가리지 않게. 독도 이때 숨는다)
+    useEffect(() => {
+        if (walking && walkFocused) setOpenPanel(null)
+    }, [walking, walkFocused])
     useEffect(() => {
         if (walking) return
         const prev = walkPrevModeRef.current
@@ -794,12 +798,13 @@ function App({
                     }}
                 />
             )}
-            {/* 독(탭 막대)이 지도 틀보다 앞에 와야 Tab 키가 도구부터 닿는다. 겹침은 z-index 가 정한다. 걸어 보기 중에는 숨긴다 */}
-            {!walking && (
+            {/* 독(탭 막대)이 지도 틀보다 앞에 와야 Tab 키가 도구부터 닿는다. 겹침은 z-index 가 정한다. 걸어 보기 중에는 Esc 로 마우스가
+                보일 때만 보이고(포인터 잠금 중엔 누를 수 없고 시야만 가린다. 2026-10-22 결정 by @nanangqq), 범위 그리기는 막는다 */}
+            {(!walking || !walkFocused) && (
                 <Toolbar
                     drawing={selecting}
                     onToggleDraw={() => squareToolRef.current?.setActive(!selecting)}
-                    drawDisabled={busy || !webgpuSupported}
+                    drawDisabled={busy || !webgpuSupported || walking}
                     openPanel={openPanel}
                     onOpenPanel={setOpenPanel}
                     panelDisabled={{ layers: !terrainReady, export: !terrainReady }}
@@ -903,7 +908,11 @@ function App({
                         basemap={basemap}
                         onBasemap={setBasemap}
                         mode={mode}
-                        onMode={changeMode}
+                        onMode={(next) => {
+                            // 둘러보기 중에 직접 고른 방식은 나올 때 되돌리지 않는다(들어가기 전 방식 기억을 지운다)
+                            if (walking) walkPrevModeRef.current = null
+                            changeMode(next)
+                        }}
                         modeDisabled={!terrainReady || busy}
                         stepInterval={stepInterval}
                         onStepInterval={changeStepInterval}
