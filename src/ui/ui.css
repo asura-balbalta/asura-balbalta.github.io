@@ -928,7 +928,7 @@ button.ui-statusbar-attribution:hover {
    꺾였다(표본 값에 맞췄던 실수, 2026-10-16 확인 by @nanangqq). "내보내기" 머리글 44px, "출처보기" 38px */
 .ui-layer-head {
     display: grid;
-    grid-template-columns: 1fr 48px 56px 44px;
+    grid-template-columns: minmax(0, 1fr) 48px 56px 44px;
     align-items: center;
     padding: 0 8px 0 14px;
     height: 20px;
@@ -938,9 +938,10 @@ button.ui-statusbar-attribution:hover {
     text-align: center;
 }
 
+/* 첫 열은 minmax(0, 1fr): 긴 보조 문구(nowrap)가 열을 넓혀 체크박스·출처보기를 밀어내지 않게(2026-10-22 산림 행이 깨졌다) */
 .ui-layer-row {
     display: grid;
-    grid-template-columns: 1fr 48px 56px 44px;
+    grid-template-columns: minmax(0, 1fr) 48px 56px 44px;
     justify-items: center;
 }
 .ui-layer-source {

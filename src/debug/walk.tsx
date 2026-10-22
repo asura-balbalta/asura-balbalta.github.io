@@ -28,6 +28,8 @@ import type { RenderDebug } from "../webgpu/terrainRenderer"
  * - water=0: 물 레이어를 그리지 않음. waterz=flat|drape: 높이 경로(기본 flat = 자체 면, drape = 지형에 얹음. 비교용). waterclip=0: drape 의 B 끔. waterlines=0: 하천선 띠 끔.
  *   waterlift: 띄움(m, 기본 0.05). waterwidth: 띠 폭(m, 전부 같은 값). waterq: 수면 높이 분위수(0 ~ 1, 기본 0.5 중앙값). watercolor: 물색 RRGGBB 또는
  *   RRGGBBAA(# 없이). clip·z·lines·width·q 는 범위 확정 때만
+ * - forest=0: 산림을 받지도 칠하지도 않음(지형이 산림 없는 원래 셰이더로 그려져 전과 비트까지 같다). forestres=1|2: 마스크 픽셀 크기(m, 기본 2. 범위 확정 때만).
+ *   forestwalls=0: 계단형 벽은 칠하지 않음. forestcolor: 산림 색 RRGGBB(# 없이) 하나(임상 전부) 또는 쉼표로 다섯(임상 0 무립목지 · 1 침엽 · 2 활엽 · 3 혼효 · 4 죽림 순)
  * - lock=0: 포인터 잠금 없이 흉내(내장 브라우저·Playwright. 마우스는 어디서 움직여도 시점, Esc 가 포커스 끔)
  * - look=0: 마우스로 시점을 돌리지 않음(자동 캡처. 보이는 창 위를 실제 마우스가 지나가도 시점이 그대로)
  * 해시를 고치면(새로고침 없이) 렌더 디버그 설정은 바로 반영되고, 프리셋(bbox·spawn·yaw·pitch·hover)은 처음 한 번만 적용된다.
@@ -117,6 +119,10 @@ export const parseWalkParams = (params: URLSearchParams): { preset: AppPreset; r
         stepFade: pairOrOff(params, "stepfade", notes),
         stepNormal: pairOrOff(params, "stepnormal", notes),
         stepDim: number(params, "stepdim"),
+        forest: flag(params, "forest"),
+        forestRes: number(params, "forestres"),
+        forestWalls: flag(params, "forestwalls"),
+        forestColor: params.has("forestcolor") ? params.get("forestcolor")!.split(",").map((h) => `#${h.trim()}`) : undefined,
     }
     return { preset, renderDebug, notes }
 }

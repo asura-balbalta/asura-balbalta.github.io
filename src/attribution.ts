@@ -27,6 +27,7 @@ const LAYER_INDEX_URLS: Record<LayerId, string> = {
     buildings: `${LAYERS_BASE}/buildings/index/v1/sheets50k.json`,
     roads: `${LAYERS_BASE}/roads/index/v1/sheets50k.json`,
     water: `${LAYERS_BASE}/water/index/v1/sheets50k.json`,
+    forest: `${LAYERS_BASE}/forest/index/v1/sheets50k.json`,
 }
 
 /** 버킷 루트의 사람이 읽는 전체 표시문(텍스트). 출처 창에서 링크한다 */
@@ -141,6 +142,17 @@ const FALLBACK_SOURCES: Record<LayerId, AttributionSource[]> = {
             license: "공공누리 제1유형 (출처표시)",
             license_url: KOGL_URL,
             processing: "좌표 변환, 5K 도엽 단위 분할, 형식 변환, 작은 연못 제외",
+        },
+    ],
+    // 산림: 라이선스는 "확인 중"(2026-10-22). 실제 문구는 서버 인덱스(sheets50k.json attribution)에서 읽고, 여기는 받지 못할 때만 쓴다
+    forest: [
+        {
+            name: "임상도(1:5000) 산림 폴리곤·임상·수종·경급·영급·밀도·임분고",
+            provider: "산림청",
+            portal: "브이월드 데이터마켓",
+            url: "https://www.vworld.kr/dtmk/dtmk_ntads_s002.do?svcCde=MK&dsId=30136",
+            license: "확인 중 (서버 출처 정보를 받지 못함. 출처 페이지를 다시 열어 주세요)",
+            processing: "좌표 변환, 5K 도엽 단위 묶음(폴리곤은 자르지 않음), 형식 변환",
         },
     ],
 }

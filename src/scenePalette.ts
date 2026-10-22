@@ -37,6 +37,13 @@ export type ScenePalette = {
     /** 물(수면) 색과 투명도(0 ~ 1. 2026-10-22 D6) */
     waterColor: string
     waterAlpha: number
+    /**
+     * 산림 임상별 색(정확히 FOREST_COLOR_COUNT 개, 임상 코드 frtp 순: 0 무립목지/비산림 · 1 침엽 · 2 활엽 · 3 혼효 · 4 죽림. 계획 F2).
+     * 지형 셰이더가 산림 마스크 자리의 바탕색(표고 색표)을 이 색으로 섞는다
+     */
+    forestColors: string[]
+    /** 산림 색을 지형 바탕색에 섞는 비율(0 ~ 1, 1 = 산림 색 그대로) */
+    forestAlpha: number
     /** 하늘·그림자 빛의 태양 고도(°). 음수면 지평선 아래(저녁) */
     sunAltitude: number
     walkLighting: WalkLightingStrength
@@ -75,6 +82,11 @@ export const BUILTIN_PALETTES: ScenePalette[] = [
         roadColor: "#FAFAF8", // 평지보다 밝은 흰색에 가까운 회색(후보. 평평한 시가지에서 묻히면 #E4E6E3 같은 어두운 쪽을 견준다)
         waterColor: "#9CC3E6", // 수면 색표(#B3BDC1)보다 푸른 하늘색(후보. watercolor= 로 Chrome 비교)
         waterAlpha: 0.8, // 0.6 은 물 아래 지형 삼각형 선이 비쳐 산만했다(2026-10-22 지적 by @nanangqq)
+        // 산림(계획 F2, 2026-10-22: "너무 녹색, 지도(Stadia alidade_smooth)의 녹지 색처럼" by @nanangqq): 무립목지/비산림 · 침엽 · 활엽 · 혼효 · 죽림.
+        // 무립목지는 Stadia landcover_wood rgb(220,224,220) 그대로, 나머지는 landcover_park rgb(210,224,210) 의 색상 120°·채도 18% 를 두고
+        // 밝기 72 ~ 80%·색상 ±10° 만 달리했다. 섞는 비율 0.6 은 표고 색표의 밝기를 남겨(산지 #A8ADAE → 침엽 #AABBAD) 칠이 아니라 물든 것처럼 보이게
+        forestColors: ["#DCE0DC", "#ABC4AD", "#C5D5C3", "#B8CCB7", "#CAD5C3"],
+        forestAlpha: 0.6,
         walkLighting: DEFAULT_WALK_LIGHTING,
     },
     {
@@ -95,9 +107,16 @@ export const BUILTIN_PALETTES: ScenePalette[] = [
         roadColor: "#44484C", // 평지보다 밝고 건물보다 어두운 회색
         waterColor: "#2B4A66", // 어두운 바탕 위 짙은 청색(후보)
         waterAlpha: 0.75,
+        // 산림(Stadia alidade_smooth_dark 의 landcover_wood hsla(120,23%,59%,10%) 를 배경 hsl(0,0%,20%) 위에 합성한 #3B3F3B 를 무립목지로,
+        // 나머지는 색상 120° 안팎·채도 14 ~ 16%·밝기 26 ~ 32%. 섞는 비율은 라이트와 같은 0.6)
+        forestColors: ["#3A413A", "#384D39", "#485F45", "#405440", "#4F5F45"],
+        forestAlpha: 0.6,
         walkLighting: DEFAULT_WALK_LIGHTING,
     },
 ]
+
+/** 산림 색 개수(임상 코드 0 ~ 4) */
+export const FOREST_COLOR_COUNT = 5
 
 /** 톤의 내장 색상표 */
 export const builtinPalette = (tone: Theme): ScenePalette => BUILTIN_PALETTES.find((p) => p.id === tone) ?? BUILTIN_PALETTES[0]
@@ -117,6 +136,7 @@ export const PALETTE_STORAGE_KEYS = {
 export const clonePalette = (p: ScenePalette): ScenePalette => ({
     ...p,
     stops: p.stops.map((s) => ({ ...s })),
+    forestColors: [...p.forestColors],
     walkLighting: { ...p.walkLighting },
 })
 
@@ -156,6 +176,8 @@ export const sanitizePalette = (raw: unknown): ScenePalette | null => {
         roadColor: isHex(r.roadColor) ? r.roadColor : base.roadColor,
         waterColor: isHex(r.waterColor) ? r.waterColor : base.waterColor,
         waterAlpha: num(r.waterAlpha, base.waterAlpha, 0, 1),
+        forestColors: base.forestColors.map((hex, i) => (Array.isArray(r.forestColors) && isHex(r.forestColors[i]) ? r.forestColors[i] : hex)),
+        forestAlpha: num(r.forestAlpha, base.forestAlpha, 0, 1),
         sunAltitude: num(r.sunAltitude, base.sunAltitude, -30, 90),
         walkLighting: {
             ambient: num(wl.ambient, base.walkLighting.ambient, 0, 1),

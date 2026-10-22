@@ -5,6 +5,8 @@ import type { BuildingTable } from "./buildingTable"
 import { RoadTable, roadTableBuffers } from "./roadTable"
 import type { WaterZMode } from "./waterMesh"
 import { WaterTable, waterTableBuffers } from "./waterTable"
+import type { ForestMask } from "./forestMask"
+import { ForestTable, forestTableBuffers } from "./forestTable"
 import type { MeshChunk, TinMesh } from "./terrainData"
 import { getTtpSheetsInBbox, MB_PER_TILE, neighborReach, SELECTION_TILE_LIMITS } from "./terrainIndex"
 import type { BuildRequest, BuildResponse } from "./terrainTileBuild.worker"
@@ -36,6 +38,15 @@ export type TileStyle = {
     roads?: RoadsStyle
     /** 물 레이어 스위치(waterMesh). 없으면 기본값 */
     water?: WaterStyle
+    /** 산림 레이어 스위치(forestMask). 없으면 기본값 */
+    forest?: ForestStyle
+}
+/** 산림 마스크 옵션(디버그 페이지 forest=0·forestres=). 둘 다 마스크 캐시 키에 들어간다 */
+export type ForestStyle = {
+    /** false 면 산림을 받지도 칠하지도 않는다(forest=0. 회귀 비교용) */
+    enabled?: boolean
+    /** 마스크 픽셀 크기(m, 1 또는 2). 없으면 FOREST_RES_M */
+    res?: number
 }
 /** 물 얹기 옵션(디버그 페이지 waterclip=0·waterz=·waterlines=0·waterlift=·waterwidth=). lift 빼고는 메쉬 캐시 키에 들어간다 */
 export type WaterStyle = {
@@ -120,6 +131,12 @@ export type TileData = {
     waterTable: WaterTable | null
     /** 얹은 물 수(조각 + 띠), 그중 하천·호소 조각, 하천선 띠 */
     waterStats: { built: number; rivers: number; lakes: number; ribbons: number }
+    /** 산림 마스크(R8, 값 = frtp + 1). 칠한 픽셀이 없거나 꺼져 있으면 null. GPU 에 올리면 버린다(releaseTerrain) */
+    forestMask: ForestMask | null
+    /** 칠한 폴리곤 표(패널 통계를 id 로 한 번만 센다). 없으면 null */
+    forestTable: ForestTable | null
+    /** 이 도엽에서 건너뛴 폴리곤 수(고리 3점 미만·예외) */
+    forestSkipped: number
 }
 
 export type TerrainTilesResponse =
@@ -311,6 +328,8 @@ const postTile = (data: TileData) => {
         if (ch.normals) set.add(ch.normals.buffer as ArrayBuffer)
     }
     if (data.waterTable) for (const b of waterTableBuffers(data.waterTable)) set.add(b)
+    if (data.forestMask) set.add(data.forestMask.data.buffer as ArrayBuffer)
+    if (data.forestTable) for (const b of forestTableBuffers(data.forestTable)) set.add(b)
     post({ type: "tile", tile: data }, [...set])
 }
 

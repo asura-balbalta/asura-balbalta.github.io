@@ -18,6 +18,9 @@ import type { QueryTile, TileData, TileStyle } from "./terrainTiles.worker"
 import { loadWater, loadWaterCodes, WaterLine, WaterNames, WaterPiece } from "./waterData"
 import { buildWaterMesh, WATER_LIFT_M, waterDisplayChunks, WaterMesh } from "./waterMesh"
 import { cloneWaterTable, WaterTable, waterTableBuffers } from "./waterTable"
+import { ForestPolygon, loadForest, loadForestCodes } from "./forestData"
+import { buildForestMask, ForestMask, forestResOf } from "./forestMask"
+import { cloneForestTable, ForestTable, forestTableBuffers } from "./forestTable"
 
 /**
  * 도엽 생성 보조 Worker(계획 문서 7절 L5-B, 2026-10-14). 조정자(terrainTiles.worker.ts)가 도엽 하나를 만들라고 보내면
@@ -220,6 +223,24 @@ const waterOf5k = (id5k: string, bbox3857: Extent, origin: [number, number]) => 
     return p
 }
 
+/**
+ * 도엽별 산림 마스크 캐시(지형 표현 방식과 무관. 계단형 판·벽도 같은 마스크를 xy 로 읽는다). 키는 도엽 id + 픽셀 크기(forestres=).
+ * 5K 단위 임상도 폴리곤(flags & 1 중복 제거한 것)은 forestOf5k(`${id5k}@${ox},${oy}`)
+ */
+const builtForestCache = new Map<string, { mask: ForestMask | null; table: ForestTable | null; skipped: number }>()
+let builtForestBytes = 0
+const forest5kCache = new Map<string, Promise<ForestPolygon[]>>()
+const forestOf5k = (id5k: string, bbox3857: Extent, origin: [number, number]) => {
+    const key = `${id5k}@${origin[0]},${origin[1]}`
+    let p = forest5kCache.get(key)
+    if (!p) {
+        p = loadForest(bbox3857, origin).then(({ polys }) => polys)
+        forest5kCache.set(key, p)
+        p.catch(() => forest5kCache.delete(key))
+    }
+    return p
+}
+
 const reset = () => {
     ttpCache.clear()
     tinCache.clear()
@@ -232,6 +253,9 @@ const reset = () => {
     builtWaterCache.clear()
     builtWaterBytes = 0
     water5kCache.clear()
+    builtForestCache.clear()
+    builtForestBytes = 0
+    forest5kCache.clear()
 }
 
 /**
@@ -451,13 +475,53 @@ const buildTile = async (job: BuildJob): Promise<{ data: TileData; transfer: Tra
     } catch (err) {
         console.warn(`도엽 ${t.name} 물 실패:`, err)
     }
+    const t5 = performance.now()
+
+    // 산림(안 라): 5K 단위 임상도 폴리곤을 이 도엽 bbox 격자에 칠한 마스크. 메쉬를 만들지 않고 지형 셰이더가 색만 바꾼다.
+    // forest=0 이면 받지도 칠하지도 않는다
+    let forestMask: ForestMask | null = null
+    let forestTable: ForestTable | null = null
+    let forestSkipped = 0
+    let forestNote = ""
+    let forestWait = 0
+    const forestStyle = style.forest ?? {}
+    if (forestStyle.enabled !== false) {
+        const res = forestResOf(forestStyle.res)
+        const forestKey = `${t.map_id}|${res}`
+        const cachedForest = builtForestCache.get(forestKey)
+        try {
+            if (cachedForest) {
+                forestMask = cachedForest.mask && { ...cachedForest.mask, data: cachedForest.mask.data.slice() }
+                forestTable = cachedForest.table && cloneForestTable(cachedForest.table)
+                forestSkipped = cachedForest.skipped
+                forestNote = "(캐시)"
+            } else {
+                const [codes, polys] = await Promise.all([loadForestCodes(), forestOf5k(t.id5k, extentOf(t.corners.map(to3857)), origin)])
+                forestWait = performance.now() - t5
+                const r = buildForestMask(polys, poly, res, codes)
+                forestMask = r.mask
+                forestTable = r.mask ? r.table : null
+                forestSkipped = r.skipped
+                forestNote = `${r.mask ? `${r.mask.width}×${r.mask.height}` : "없음"} 칠하기 ${r.ms.toFixed(1)}ms`
+                builtForestCache.set(forestKey, {
+                    mask: forestMask && { ...forestMask, data: forestMask.data.slice() },
+                    table: forestTable && cloneForestTable(forestTable),
+                    skipped: forestSkipped,
+                })
+                if (forestMask) builtForestBytes += forestMask.data.byteLength
+                if (forestTable) for (const b of forestTableBuffers(forestTable)) builtForestBytes += b.byteLength
+            }
+        } catch (err) {
+            console.warn(`도엽 ${t.name} 산림 실패:`, err)
+        }
+    }
     console.log(
-        `도엽 ${t.name}${extra ? "(밖)" : ""}: ${fromCache ? "캐시" : `이웃 ${ttpTiles.length}개 ${mergeNote} 합침`} ${Math.round(t1 - t0)}ms, ${style.mode} ${Math.round(t2 - t1)}ms, 삼각형 ${tin.indices.length / 3}, 건물 ${built}${cached ? "(캐시)" : ""} ${Math.round(t3 - t2)}ms, 도로 ${roadStats.built}(교량 ${roadStats.bridges}, 숨김 ${roadStats.hidden})${roadsNote} ${roadsWait > 50 ? `받기 ${Math.round(roadsWait)}ms + ` : ""}${Math.round(t4 - t3 - roadsWait)}ms, 물 ${waterStats.built}(하천 ${waterStats.rivers}, 호소 ${waterStats.lakes}, 띠 ${waterStats.ribbons})${waterNote} ${waterWait > 50 ? `받기 ${Math.round(waterWait)}ms + ` : ""}${Math.round(performance.now() - t4 - waterWait)}ms`,
+        `도엽 ${t.name}${extra ? "(밖)" : ""}: ${fromCache ? "캐시" : `이웃 ${ttpTiles.length}개 ${mergeNote} 합침`} ${Math.round(t1 - t0)}ms, ${style.mode} ${Math.round(t2 - t1)}ms, 삼각형 ${tin.indices.length / 3}, 건물 ${built}${cached ? "(캐시)" : ""} ${Math.round(t3 - t2)}ms, 도로 ${roadStats.built}(교량 ${roadStats.bridges}, 숨김 ${roadStats.hidden})${roadsNote} ${roadsWait > 50 ? `받기 ${Math.round(roadsWait)}ms + ` : ""}${Math.round(t4 - t3 - roadsWait)}ms, 물 ${waterStats.built}(하천 ${waterStats.rivers}, 호소 ${waterStats.lakes}, 띠 ${waterStats.ribbons})${waterNote} ${waterWait > 50 ? `받기 ${Math.round(waterWait)}ms + ` : ""}${Math.round(t5 - t4 - waterWait)}ms, 산림 ${forestTable?.count ?? 0}${forestSkipped ? `(건너뜀 ${forestSkipped})` : ""} ${forestNote} ${forestWait > 50 ? `받기 ${Math.round(forestWait)}ms + ` : ""}${Math.round(performance.now() - t5 - forestWait)}ms`,
     )
 
     builtCount++
     if (builtCount % 50 === 0) {
-        console.log(`메모리(보조 워커 캐시): 만든 도엽 ${builtCount}, 자른 TIN ${(tinCacheBytes / 1048576).toFixed(1)} MB(${tinCache.size}개), 건물 결과 ${(builtBuildingsBytes / 1048576).toFixed(1)} MB(${builtBuildingsCache.size}개), 도로 결과 ${(builtRoadsBytes / 1048576).toFixed(1)} MB(${builtRoadsCache.size}개), 물 결과 ${(builtWaterBytes / 1048576).toFixed(1)} MB(${builtWaterCache.size}개), 5K 파일 ${ttpCache.size}개, 5K 건물 목록 ${buildings5kCache.size}개, 5K 도로 목록 ${roads5kCache.size}개, 5K 물 목록 ${water5kCache.size}개`)
+        console.log(`메모리(보조 워커 캐시): 만든 도엽 ${builtCount}, 자른 TIN ${(tinCacheBytes / 1048576).toFixed(1)} MB(${tinCache.size}개), 건물 결과 ${(builtBuildingsBytes / 1048576).toFixed(1)} MB(${builtBuildingsCache.size}개), 도로 결과 ${(builtRoadsBytes / 1048576).toFixed(1)} MB(${builtRoadsCache.size}개), 물 결과 ${(builtWaterBytes / 1048576).toFixed(1)} MB(${builtWaterCache.size}개), 산림 마스크 ${(builtForestBytes / 1048576).toFixed(1)} MB(${builtForestCache.size}개), 5K 파일 ${ttpCache.size}개, 5K 건물 목록 ${buildings5kCache.size}개, 5K 도로 목록 ${roads5kCache.size}개, 5K 물 목록 ${water5kCache.size}개, 5K 산림 목록 ${forest5kCache.size}개`)
     }
     const xy = positionsBounds(tin.positions)
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
@@ -488,6 +552,9 @@ const buildTile = async (job: BuildJob): Promise<{ data: TileData; transfer: Tra
         waterChunks,
         waterTable,
         waterStats,
+        forestMask,
+        forestTable,
+        forestSkipped,
     }
     return { data, transfer: transferablesOf(data) }
 }
@@ -525,6 +592,8 @@ export const transferablesOf = (data: TileData): Transferable[] => {
         if (ch.normals) set.add(ch.normals.buffer as ArrayBuffer)
     }
     if (data.waterTable) for (const b of waterTableBuffers(data.waterTable)) set.add(b)
+    if (data.forestMask) set.add(data.forestMask.data.buffer as ArrayBuffer)
+    if (data.forestTable) for (const b of forestTableBuffers(data.forestTable)) set.add(b)
     return [...set]
 }
 

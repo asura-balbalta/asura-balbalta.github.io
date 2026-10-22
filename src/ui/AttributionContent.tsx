@@ -58,7 +58,8 @@ const SourceItem = ({ s }: { s: AttributionSource }) => (
 /**
  * 출처 표시문(src/attribution.ts 머리말). 통합 창(AttributionDialog)과 페이지(#/attribution, AttributionPage)가 같이 쓴다.
  * layer 를 주면(레이어 패널 "출처보기") 그 레이어의 인덱스만 받아 그 자료만 그리고, 검색·바탕 지도 항목은 뺀다. 라이선스 링크 줄과
- * 면책은 둘 다 둔다. 받는 동안은 "불러오는 중", 받으면 그린다. 모양은 ui.css(.ui-attribution)
+ * 면책은 둘 다 둔다. 단 산림은 라이선스가 "확인 중"(인덱스 문구)이라 공공누리·CC BY 링크 줄을 빼고 면책만 둔다.
+ * 받는 동안은 "불러오는 중", 받으면 그린다. 모양은 ui.css(.ui-attribution)
  *
  * @param props.layer 이 레이어의 출처만. 없으면 전부
  */
@@ -95,19 +96,21 @@ export const AttributionContent = ({ layer }: { layer?: LayerId }) => {
                     </ul>
                 </>
             )}
-            <p className="ui-attribution-links">
-                <a href={KOGL_URL} target="_blank" rel="noreferrer">
-                    공공누리 제1유형
-                </a>
-                {" · "}
-                <a href={CC_BY_URL} target="_blank" rel="noreferrer">
-                    CC BY 4.0
-                </a>
-                {" · "}
-                <a href={ATTRIBUTION_TXT_URL} target="_blank" rel="noreferrer">
-                    데이터 서버의 표시문(ATTRIBUTION.txt)
-                </a>
-            </p>
+            {layer !== "forest" && (
+                <p className="ui-attribution-links">
+                    <a href={KOGL_URL} target="_blank" rel="noreferrer">
+                        공공누리 제1유형
+                    </a>
+                    {" · "}
+                    <a href={CC_BY_URL} target="_blank" rel="noreferrer">
+                        CC BY 4.0
+                    </a>
+                    {" · "}
+                    <a href={ATTRIBUTION_TXT_URL} target="_blank" rel="noreferrer">
+                        데이터 서버의 표시문(ATTRIBUTION.txt)
+                    </a>
+                </p>
+            )}
             <p className="ui-attribution-disclaimer">{data.disclaimer}</p>
             {!data.fromServer && <p className="ui-attribution-note">서버의 최신 표시문을 받지 못해 내장 문구를 보여 줍니다.</p>}
         </div>

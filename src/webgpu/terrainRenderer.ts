@@ -1,3 +1,4 @@
+import type { ForestMask } from "../forestMask"
 import { LayerId } from "../layers"
 import { MeshChunk, TinMesh } from "../terrainData"
 import { DEFAULT_WALK_LIGHTING, QualitySettings, ScenePalette, WalkLightingStrength } from "../scenePalette"
@@ -48,6 +49,10 @@ const HIGHLIGHT_COLOR_OFFSET = SKY_OFFSET + 16 // vec4f: 조준점 건물 강조
 const ROAD_COLOR_OFFSET = HIGHLIGHT_COLOR_OFFSET + 16 // vec4f: 도로색
 const WATER_COLOR_OFFSET = ROAD_COLOR_OFFSET + 16 // vec4f: 물색 + 투명도
 const STEP_NORMAL_OFFSET = WATER_COLOR_OFFSET + 16 // vec4f: 계단형 매끈한 법선으로 옮기는 구간(시작·끝 px)
+/** 산림 색 uniform(group 1 binding 2): 임상 5개 vec4f(rgb + 섞는 비율) + params vec4f(x 벽도 칠함). shaders.ts forestWgsl 의 ForestStyle */
+const FOREST_STYLE_SIZE = 16 * 5 + 16
+/** 도엽 격자 uniform(group 1 binding 1): (x0, y0, 픽셀 크기, 0) f32 + (폭, 높이, 0, 0) u32. shaders.ts ForestTile */
+const FOREST_TILE_SIZE = 32
 const UNIFORM_SIZE = STEP_NORMAL_OFFSET + 16 // viewProj(0~64) + zRange(64~72) + eye(80~92) + stops + buildingColor + lightViewProj + lighting + fogColor + hemi + lightViewProjNear + sky + highlightColor + roadColor + waterColor + stepNormal
 /**
  * 도로 파이프라인의 깊이 바이어스(상수·기울기 배수). 도로는 지형과 같은 평면에 띄움 0.1 m 로 놓이는데 아주 멀리서 비스듬히 보면 그 차이가
@@ -169,6 +174,14 @@ export type RenderDebug = {
     stepNormal?: [number, number]
     /** 매끈한 법선으로 다 옮겼을 때 바탕색 배수(stepdim=0.8. 1 이면 보정 없음). 없으면 STEP_NORMAL_DIM */
     stepDim?: number
+    /** false 면 산림을 받지도 칠하지도 않는다(forest=0. 지형은 산림 없는 원래 셰이더로 그려 전과 비트까지 같다) */
+    forest?: boolean
+    /** 산림 마스크 픽셀 크기(m, 1 또는 2. forestres=). 없으면 forestMask FOREST_RES_M. 범위 확정 때만 적용 */
+    forestRes?: number
+    /** false 면 계단형 벽(수직면)은 산림 색을 칠하지 않는다(forestwalls=0) */
+    forestWalls?: boolean
+    /** 산림 색("#RRGGBB" 하나면 임상 전부, 다섯이면 임상 0 ~ 4 순. forestcolor=). 없으면 색상표 forestColors */
+    forestColor?: string[]
 }
 /**
  * 둘러보기 중 장면에 그릴 반경(m). 이보다 먼 도엽은 그리지 않는다(L4, 2026-10-14). 안개 1/1200 에서 5 km 의 가시도는 약 1.5 % 라
@@ -486,7 +499,10 @@ const createTerrainDrawingPassAndUpdaters = (
     const createWaterPipeline = () => createPipelineSet("water", createWaterShader(), [float32x3Layout(0)], { depthBias: currentRoadsBias, transparent: true })
     const createWaterSmoothPipeline = () =>
         createPipelineSet("water smooth", createWaterSmoothShader(), [float32x3Layout(0), float32x3Layout(1)], { depthBias: currentRoadsBias, transparent: true })
-    const pipelines: Record<TerrainMode | "steppedSmooth" | "buildings" | "buildingHighlight" | "roads" | "roadsSmooth" | "roadsStepped" | "water" | "waterSmooth", ReturnType<typeof createPipelineSet>> = {
+    const pipelines: Record<
+        TerrainMode | "steppedSmooth" | "forestTin" | "forestStepped" | "forestSteppedSmooth" | "buildings" | "buildingHighlight" | "roads" | "roadsSmooth" | "roadsStepped" | "water" | "waterSmooth",
+        ReturnType<typeof createPipelineSet>
+    > = {
         tin: createPipelineSet("terrain tin", createSmoothTerrainShader(), [
             float32x3Layout(0),
             float32x3Layout(1),
@@ -496,6 +512,10 @@ const createTerrainDrawingPassAndUpdaters = (
         ]),
         // 매끈한 법선을 실은 계단형 조각(terrainSteps normals): 멀리서 그 법선으로 조명한다
         steppedSmooth: createPipelineSet("terrain stepped smooth", createSteppedTerrainShader(true), [float32x3Layout(0), float32x3Layout(1)]),
+        // 산림 마스크가 있는 도엽의 지형(셰이더에 forestWgsl 이 붙은 변형. group 1 은 도엽마다 forestGroupFor). 산림이 없거나 꺼지면 위의 원래 것
+        forestTin: createPipelineSet("terrain tin forest", createSmoothTerrainShader(true), [float32x3Layout(0), float32x3Layout(1)]),
+        forestStepped: createPipelineSet("terrain stepped forest", createSteppedTerrainShader(false, true), [float32x3Layout(0)]),
+        forestSteppedSmooth: createPipelineSet("terrain stepped smooth forest", createSteppedTerrainShader(true, true), [float32x3Layout(0), float32x3Layout(1)]),
         buildings: createPipelineSet("buildings", createBuildingShader(), [float32x3Layout(0)]),
         buildingHighlight: createPipelineSet("building highlight", createBuildingHighlightShader(), [float32x3Layout(0)], { overlay: true }),
         // 깊이 바이어스는 파이프라인 상태라 디버그 값이 바뀌면 다시 만든다(debugUpdater)
@@ -514,7 +534,50 @@ const createTerrainDrawingPassAndUpdaters = (
         /** 원본 메쉬 인덱스 배열에서 이 조각이 시작하는 자리(조각이 삼각형 순서대로 나뉘므로). 건물 강조가 삼각형 범위를 조각 안 자리로 옮기는 데 쓴다 */
         indexStart: number
     }
-    const layerVisible: Record<LayerId, boolean> = { terrain: true, buildings: true, roads: true, water: true }
+    const layerVisible: Record<LayerId, boolean> = { terrain: true, buildings: true, roads: true, water: true, forest: true }
+
+    /** 산림 색 uniform(모든 도엽 공용). paletteUpdater 가 쓴다 */
+    const forestStyleBuffer = device.createBuffer({ label: "forest style", size: FOREST_STYLE_SIZE, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST })
+    /** 도엽의 산림 마스크 GPU 자원. 바인드그룹은 layout "auto" 라 파이프라인마다 따로(처음 쓸 때 만든다) */
+    type GpuForest = { texture: GPUTexture; view: GPUTextureView; tileBuffer: GPUBuffer; groups: Map<GPURenderPipeline, GPUBindGroup> }
+    const uploadForest = (id: string, mask: ForestMask): GpuForest => {
+        const texture = device.createTexture({
+            label: `tile ${id} forest mask`,
+            size: [mask.width, mask.height],
+            format: "r8uint",
+            usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+        })
+        device.queue.writeTexture({ texture }, mask.data, { bytesPerRow: mask.width }, [mask.width, mask.height])
+        const tileBuffer = device.createBuffer({ label: `tile ${id} forest grid`, size: FOREST_TILE_SIZE, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST })
+        const grid = new ArrayBuffer(FOREST_TILE_SIZE)
+        new Float32Array(grid, 0, 4).set([mask.x0, mask.y0, mask.res, 0])
+        new Uint32Array(grid, 16, 4).set([mask.width, mask.height, 0, 0])
+        device.queue.writeBuffer(tileBuffer, 0, grid)
+        residentBytes += mask.data.byteLength + FOREST_TILE_SIZE
+        return { texture, view: texture.createView(), tileBuffer, groups: new Map() }
+    }
+    const destroyForest = (f: GpuForest | null) => {
+        if (!f) return
+        residentBytes -= f.texture.width * f.texture.height + FOREST_TILE_SIZE
+        f.texture.destroy()
+        f.tileBuffer.destroy()
+    }
+    const forestGroupFor = (f: GpuForest, set: ReturnType<typeof createPipelineSet>) => {
+        let g = f.groups.get(set.pipeline)
+        if (!g) {
+            g = device.createBindGroup({
+                label: "bind group (forest tile)",
+                layout: set.pipeline.getBindGroupLayout(1),
+                entries: [
+                    { binding: 0, resource: f.view },
+                    { binding: 1, resource: { buffer: f.tileBuffer } },
+                    { binding: 2, resource: { buffer: forestStyleBuffer } },
+                ],
+            })
+            f.groups.set(set.pipeline, g)
+        }
+        return g
+    }
 
     /** GPU 에 상주하는 도엽 버퍼 바이트 합(메모리 측정, 2026-10-15) */
     let residentBytes = 0
@@ -705,6 +768,16 @@ const createTerrainDrawingPassAndUpdaters = (
         // 조준점 건물 강조색: 톤의 UI 강조색(accent, 라이트 #0f6cbd · 다크 #bae6fd)을 0.45 로 덮는다
         const accent = hexToRgb(accentHex)
         device.queue.writeBuffer(uniformBuffer, HIGHLIGHT_COLOR_OFFSET, new Float32Array([accent.r, accent.g, accent.b, 0.45]))
+        // 산림 색(임상 0 ~ 4) + 섞는 비율 + 벽 칠함: 디버그 forestcolor=(하나면 전부, 다섯이면 임상 순)가 있으면 그 값, 없으면 색상표
+        const debugForest = (getDebug().forestColor ?? []).filter((h) => /^#[0-9a-fA-F]{6}$/.test(h))
+        const forestHex = palette.forestColors.map((hex, i) => (debugForest.length >= 5 ? debugForest[i] : debugForest.length > 0 ? debugForest[0] : hex))
+        const forestStyle = new Float32Array(FOREST_STYLE_SIZE / 4)
+        forestHex.forEach((hex, i) => {
+            const c = hexToRgb(hex)
+            forestStyle.set([c.r, c.g, c.b, palette.forestAlpha], 4 * i)
+        })
+        forestStyle[20] = getDebug().forestWalls === false ? 0 : 1
+        device.queue.writeBuffer(forestStyleBuffer, 0, forestStyle)
         sunDir = sunDirection(getDebug().sun ?? palette.sunAltitude, [LIGHT_DIR[0], LIGHT_DIR[1]])
         writeSky()
     }
@@ -719,7 +792,10 @@ const createTerrainDrawingPassAndUpdaters = (
      * 건물은 건물 파이프라인으로 그린다. 나가면 streamClearUpdater 로 모두 비운다. 선택 범위도 같은 도엽으로 온다(1K 도엽 통일, 계획서 7절 L)
      */
     type TileBounds = { min: [number, number]; max: [number, number] }
-    const streamTiles = new Map<string, { terrain: GpuChunk[]; buildings: GpuChunk[]; roads: GpuChunk[]; water: GpuChunk[]; mode: TerrainMode; bounds: TileBounds | null }>()
+    const streamTiles = new Map<
+        string,
+        { terrain: GpuChunk[]; buildings: GpuChunk[]; roads: GpuChunk[]; water: GpuChunk[]; forest: GpuForest | null; mode: TerrainMode; bounds: TileBounds | null }
+    >()
     /**
      * 거리 거르기 반경(m). 둘러보기 중에만 켜진다(cullRadiusUpdater). 카메라 xy 에서 도엽 xy 범위까지의 거리가 이보다 멀면
      * 장면 pass 에서 빼고, 그림자 pass 는 캐스케이드 반경의 2배 밖을 뺀다(빛 상자가 카메라 앞쪽으로 치우쳐 있어 여유를 둔다).
@@ -744,7 +820,16 @@ const createTerrainDrawingPassAndUpdaters = (
      */
     const streamTileUpdater = (
         id: string,
-        tile: { terrain: MeshChunk[]; buildings: TinMesh | null; roads?: MeshChunk[]; water?: MeshChunk[]; mode: TerrainMode; bounds?: TileBounds } | null,
+        tile: {
+            terrain: MeshChunk[]
+            buildings: TinMesh | null
+            roads?: MeshChunk[]
+            water?: MeshChunk[]
+            /** 산림 마스크(없거나 null 이면 지형을 산림 없는 원래 셰이더로) */
+            forest?: ForestMask | null
+            mode: TerrainMode
+            bounds?: TileBounds
+        } | null,
     ) => {
         const prev = streamTiles.get(id)
         if (prev) {
@@ -752,6 +837,7 @@ const createTerrainDrawingPassAndUpdaters = (
             destroyChunks(prev.buildings)
             destroyChunks(prev.roads)
             destroyChunks(prev.water)
+            destroyForest(prev.forest)
             streamTiles.delete(id)
         }
         if (!tile) return
@@ -768,7 +854,8 @@ const createTerrainDrawingPassAndUpdaters = (
         }
         const roads = (tile.roads ?? []).filter((c) => c.indices.length > 0).map((c) => uploadChunk(`tile ${id} roads`, c))
         const water = (tile.water ?? []).filter((c) => c.indices.length > 0).map((c) => uploadChunk(`tile ${id} water`, c))
-        streamTiles.set(id, { terrain, buildings, roads, water, mode: tile.mode, bounds: tile.bounds ?? null })
+        const forest = tile.forest ? uploadForest(id, tile.forest) : null
+        streamTiles.set(id, { terrain, buildings, roads, water, forest, mode: tile.mode, bounds: tile.bounds ?? null })
     }
     /**
      * 표고 색 범위(uniform offset 64)를 쓴다. 도엽이 하나씩 올라오며 범위가 넓어질 때마다 다시 쓴다
@@ -797,6 +884,7 @@ const createTerrainDrawingPassAndUpdaters = (
             destroyChunks(t.buildings)
             destroyChunks(t.roads)
             destroyChunks(t.water)
+            destroyForest(t.forest)
         }
         streamTiles.clear()
     }
@@ -807,14 +895,22 @@ const createTerrainDrawingPassAndUpdaters = (
      * @param withWater true 면 물 조각을 **맨 뒤에** 더한다(투명이라 불투명한 것 뒤에 그려야 한다. 그림자 pass 는 물을 빼 그림자를 드리우지 않게)
      */
     const collectDraws = (radius: number | null, withWater = false) => {
-        const draws: { chunks: GpuChunk[]; set: ReturnType<typeof createPipelineSet> }[] = []
+        /** group1: 산림 마스크 바인드그룹(산림 변형 파이프라인일 때만) */
+        const draws: { chunks: GpuChunk[]; set: ReturnType<typeof createPipelineSet>; group1?: GPUBindGroup }[] = []
         const water: typeof draws = []
         const eye = radius !== null ? lastEye : null
         for (const t of streamTiles.values()) {
             if (eye && t.bounds && distanceToBounds(eye, t.bounds) > radius!) continue
             if (layerVisible.terrain && t.terrain.length > 0) {
-                const set = t.mode === "stepped" && t.terrain.every((c) => c.normalBuffer) ? pipelines.steppedSmooth : pipelines[t.mode]
-                draws.push({ chunks: t.terrain, set })
+                const smoothStepped = t.mode === "stepped" && t.terrain.every((c) => c.normalBuffer)
+                // 산림: 레이어가 보이고 forest=0 이 아니고 이 도엽에 마스크가 있을 때만 산림 변형. 아니면 원래 파이프라인 그대로(출력이 전과 같다)
+                if (t.forest && layerVisible.forest && getDebug().forest !== false) {
+                    const set = smoothStepped ? pipelines.forestSteppedSmooth : t.mode === "stepped" ? pipelines.forestStepped : pipelines.forestTin
+                    draws.push({ chunks: t.terrain, set, group1: forestGroupFor(t.forest, set) })
+                } else {
+                    const set = smoothStepped ? pipelines.steppedSmooth : pipelines[t.mode]
+                    draws.push({ chunks: t.terrain, set })
+                }
             }
             if (layerVisible.buildings && t.buildings.length > 0) draws.push({ chunks: t.buildings, set: pipelines.buildings })
             if (layerVisible.roads && getDebug().roads !== false && t.roads.length > 0) {
@@ -886,9 +982,10 @@ const createTerrainDrawingPassAndUpdaters = (
                 depthStoreOp: "store",
             },
         })
-        for (const { chunks, set } of draws) {
+        for (const { chunks, set, group1 } of draws) {
             pass.setPipeline(set.pipeline)
             pass.setBindGroup(0, set.bindGroup)
+            if (group1) pass.setBindGroup(1, group1)
             for (const c of chunks) {
                 pass.setVertexBuffer(0, c.vertexBuffer)
                 if (c.normalBuffer) pass.setVertexBuffer(1, c.normalBuffer)

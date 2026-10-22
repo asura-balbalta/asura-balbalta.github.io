@@ -396,6 +396,7 @@ export const TerrainViewCanvas = ({
                             buildings: event.tile.buildings,
                             roads: event.tile.roadChunks,
                             water: event.tile.waterChunks,
+                            forest: event.tile.forestMask,
                             mode: event.tile.mode,
                             bounds: { min: [event.tile.bounds.min[0], event.tile.bounds.min[1]], max: [event.tile.bounds.max[0], event.tile.bounds.max[1]] },
                         })

@@ -4,6 +4,7 @@ import { BuildingTable, buildingTableBuffers, mergeBuildingTables } from "./buil
 import { mergeRoadTables, RoadTable, roadTableBuffers } from "./roadTable"
 import { WATER_LIFT_M, waterDisplayChunks } from "./waterMesh"
 import { mergeWaterTables, NOT_BUILT, WATER_KIND, WaterTable, waterTableBuffers } from "./waterTable"
+import { ForestTable, forestTableBuffers, forestTypeCounts } from "./forestTable"
 import type { MeshChunk } from "./terrainData"
 import type { TinMesh } from "./terrainData"
 import type { TerrainTilesRequest, TerrainTilesResponse, TileData, TileStyle, TileSummary } from "./terrainTiles.worker"
@@ -50,7 +51,9 @@ const tileBytes = (t: TileData) => {
     let water = t.water ? t.water.positions.byteLength + t.water.indices.byteLength : 0
     for (const c of t.waterChunks) water += c.positions.byteLength + c.indices.byteLength + (c.normals?.byteLength ?? 0)
     if (t.waterTable) for (const b of waterTableBuffers(t.waterTable)) water += b.byteLength
-    return { chunks, tin, buildings, table, roads, water }
+    let forest = t.forestMask ? t.forestMask.data.byteLength : 0
+    if (t.forestTable) for (const b of forestTableBuffers(t.forestTable)) forest += b.byteLength
+    return { chunks, tin, buildings, table, roads, water, forest }
 }
 
 export const createTerrainTiles = () => {
@@ -76,7 +79,7 @@ export const createTerrainTiles = () => {
     let currentStyle: TileStyle | null = null
     /** 들고 있는 도엽 사본의 바이트 합(선택 도엽·밖 도엽 수 포함) */
     const memoryStats = () => {
-        const sum = { tiles: 0, extra: 0, chunks: 0, tin: 0, buildings: 0, table: 0, roads: 0, water: 0 }
+        const sum = { tiles: 0, extra: 0, chunks: 0, tin: 0, buildings: 0, table: 0, roads: 0, water: 0, forest: 0 }
         for (const t of tiles.values()) {
             const b = tileBytes(t)
             sum.tiles++
@@ -87,13 +90,14 @@ export const createTerrainTiles = () => {
             sum.table += b.table
             sum.roads += b.roads
             sum.water += b.water
+            sum.forest += b.forest
         }
-        return { ...sum, total: sum.chunks + sum.tin + sum.buildings + sum.table + sum.roads + sum.water }
+        return { ...sum, total: sum.chunks + sum.tin + sum.buildings + sum.table + sum.roads + sum.water + sum.forest }
     }
     const mb = (n: number) => (n / 1048576).toFixed(1)
     const logMemory = () => {
         const m = memoryStats()
-        console.log(`메모리(메인 도엽 사본): 도엽 ${m.tiles}(밖 ${m.extra}), ${mb(m.total)} MB = 조각 ${mb(m.chunks)} + TIN ${mb(m.tin)} + 건물 ${mb(m.buildings)} + 표 ${mb(m.table)} + 도로 ${mb(m.roads)} + 물 ${mb(m.water)}`)
+        console.log(`메모리(메인 도엽 사본): 도엽 ${m.tiles}(밖 ${m.extra}), ${mb(m.total)} MB = 조각 ${mb(m.chunks)} + TIN ${mb(m.tin)} + 건물 ${mb(m.buildings)} + 표 ${mb(m.table)} + 도로 ${mb(m.roads)} + 물 ${mb(m.water)} + 산림 ${mb(m.forest)}`)
     }
 
     /**
@@ -317,6 +321,8 @@ export const createTerrainTiles = () => {
                 t.terrain = []
                 t.roadChunks = []
                 t.waterChunks = []
+                // 산림 마스크는 GPU 텍스처로 올렸으므로 버린다(다시 필요하면 워커가 캐시로 다시 보낸다). 통계용 표는 남긴다
+                t.forestMask = null
             }
         },
         /** 수면 맞추기(levelWater) 뒤 도엽의 물 조각을 다시 만든다(띄움 적용). 캔버스가 GPU 의 물 조각만 바꿔 끼운다. 물이 없으면 빈 배열 */
@@ -339,6 +345,8 @@ export const createTerrainTiles = () => {
             let count = 0
             const roads = { built: 0, bridges: 0, hidden: 0 }
             const water = { built: 0, rivers: 0, lakes: 0, ribbons: 0 }
+            const forestTables: ForestTable[] = []
+            let forestSkipped = 0
             for (const t of tiles.values()) {
                 if (t.extra) continue
                 count++
@@ -351,8 +359,12 @@ export const createTerrainTiles = () => {
                 water.rivers += t.waterStats.rivers
                 water.lakes += t.waterStats.lakes
                 water.ribbons += t.waterStats.ribbons
+                if (t.forestTable) forestTables.push(t.forestTable)
+                forestSkipped += t.forestSkipped
             }
-            return { count, triangles, buildings, roads, water }
+            // 산림: 폴리곤은 걸친 도엽마다 칠해지므로 id 로 한 번만 센다(임상별, 길이 5). 건너뜀은 도엽마다 센 합
+            const forest = { types: forestTypeCounts(forestTables), skipped: forestSkipped }
+            return { count, triangles, buildings, roads, water, forest }
         },
         memory: memoryStats,
         /**
@@ -364,8 +376,10 @@ export const createTerrainTiles = () => {
             buildings: (TinMesh & { table?: BuildingTable }) | null
             roads: (TinMesh & { roadTable?: RoadTable }) | null
             water: (TinMesh & { waterTable?: WaterTable }) | null
+            /** 산림은 내보내지 않는다(계획 F5). LayerMeshes 모양을 맞추려고 항상 null */
+            forest: null
         } => {
-            if (!origin) return { terrain: null, buildings: null, roads: null, water: null }
+            if (!origin) return { terrain: null, buildings: null, roads: null, water: null, forest: null }
             /** 메쉬들을 잇고 각 조각이 시작하는 정점·삼각형 번호를 돌려준다 */
             const concat = (parts: TinMesh[]): { mesh: TinMesh; offsets: { vertex: number; face: number }[] } | null => {
                 if (parts.length === 0) return null
@@ -419,6 +433,7 @@ export const createTerrainTiles = () => {
                 buildings: buildings ? (table ? { ...buildings.mesh, table } : buildings.mesh) : null,
                 roads: roads ? (roadTable ? { ...roads.mesh, roadTable } : roads.mesh) : null,
                 water: water ? (waterTable ? { ...water.mesh, waterTable } : water.mesh) : null,
+                forest: null,
             }
         },
         terminate: () => {

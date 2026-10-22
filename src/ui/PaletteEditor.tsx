@@ -16,6 +16,8 @@ const ColorField = ({ value, onChange, label }: { value: string; onChange: (hex:
 )
 
 const STOP_LABELS = ["수면", "강변 평지", "시가지 평지", "구릉", "산지", "고산"]
+/** 산림 색 이름(임상 코드 frtp 순. scenePalette forestColors) */
+const FOREST_COLOR_LABELS = ["무립목지", "침엽", "활엽", "혼효", "죽림"]
 
 /**
  * 설정 패널의 "색상표" 줄: 색상표 고르기(내장 + 사용자)와 "편집…" 버튼. 편집은 별도 창(PaletteDialog)에서 한다(2026-10-20 결정 by @nanangqq:
@@ -133,6 +135,18 @@ export const PaletteDialog = ({ store, open, onClose }: { store: PaletteStore; o
                                 <ColorField label="물색" value={palette.waterColor} onChange={(hex) => store.update({ waterColor: hex })} />
                                 <span>물 투명도</span>
                                 <Slider size="small" min={0} max={1} step={0.05} value={palette.waterAlpha} onChange={(_, d) => store.update({ waterAlpha: d.value })} aria-label="물 투명도" />
+                                {FOREST_COLOR_LABELS.map((label, i) => (
+                                    <React.Fragment key={label}>
+                                        <span>산림 {label}</span>
+                                        <ColorField
+                                            label={`산림 ${label} 색`}
+                                            value={palette.forestColors[i]}
+                                            onChange={(hex) => store.update({ forestColors: palette.forestColors.map((c, j) => (j === i ? hex : c)) })}
+                                        />
+                                    </React.Fragment>
+                                ))}
+                                <span>산림 섞는 비율</span>
+                                <Slider size="small" min={0} max={1} step={0.05} value={palette.forestAlpha} onChange={(_, d) => store.update({ forestAlpha: d.value })} aria-label="산림 섞는 비율" />
                             </div>
                             <div className="ui-palette-head">표고 색표 (m)</div>
                             <div className="ui-palette-stops">

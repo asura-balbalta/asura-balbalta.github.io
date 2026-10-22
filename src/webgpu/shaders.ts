@@ -120,6 +120,38 @@ const commonWgsl = /* wgsl */ `
 `
 
 /**
+ * 산림 마스크(forestMask.ts, 계획 "안 라") 조각. 지형 셰이더의 forest 변형에만 붙는다(산림이 없거나 꺼진 도엽은 이것이 없는 원래 셰이더로
+ * 그려 출력이 전과 비트까지 같다).
+ * - group 1 binding 0: 도엽 마스크(r8uint, 값 = 임상 frtp + 1, 0 = 산림 아님). 행 0 이 y0(아래). textureLoad 로 가장 가까운 픽셀
+ * - binding 1: 도엽 격자(x0, y0, 픽셀 크기 m, 0) + (폭, 높이)
+ * - binding 2: 산림 색(임상 5개 rgb + a = 섞는 비율) + params(x: 계단형 벽도 칠함 0/1)
+ * forestTint(): 바탕색(표고 색표)을 그 자리 임상 색으로 섞는다. 조명·그림자·AO·안개는 지형 것 그대로 받는다
+ */
+const forestWgsl = /* wgsl */ `
+    struct ForestTile {
+        box: vec4f, // x0, y0, 픽셀 크기(m), 0
+        size: vec4u, // 폭, 높이, 0, 0
+    };
+    struct ForestStyle {
+        colors: array<vec4f, 5>, // 임상 0 ~ 4 의 rgb + 섞는 비율
+        params: vec4f, // x: 계단형 벽도 칠함(0/1)
+    };
+    @group(1) @binding(0) var forestMask: texture_2d<u32>;
+    @group(1) @binding(1) var<uniform> forestTile: ForestTile;
+    @group(1) @binding(2) var<uniform> forestStyle: ForestStyle;
+
+    fn forestTint(base: vec3f, world: vec3f, wall: bool) -> vec3f {
+        if (wall && forestStyle.params.x < 0.5) { return base; }
+        let p = (world.xy - forestTile.box.xy) / forestTile.box.z;
+        let ij = clamp(vec2i(floor(p)), vec2i(0), vec2i(forestTile.size.xy) - vec2i(1));
+        let c = textureLoad(forestMask, ij, 0).r;
+        if (c == 0u) { return base; }
+        let f = forestStyle.colors[min(c - 1u, 4u)];
+        return mix(base, f.rgb, f.a);
+    }
+`
+
+/**
  * 부드러운 지형(TIN) 셰이더 descriptor. `device.createShaderModule()` 에 그대로 넘긴다.
  *
  * - 정점 입력: 위치(@location(0)) + 정점 법선(@location(1))
@@ -128,10 +160,10 @@ const commonWgsl = /* wgsl */ `
  *
  * @returns `{ label, code }` 형태의 GPUShaderModuleDescriptor
  */
-export const createSmoothTerrainShader = () => ({
-    label: "smooth terrain shader",
+export const createSmoothTerrainShader = (forest = false) => ({
+    label: forest ? "smooth terrain shader (forest)" : "smooth terrain shader",
     code: /* wgsl */ `
-    ${commonWgsl}
+    ${commonWgsl}${forest ? forestWgsl : ""}
 
     struct VertexOutput {
         @builtin(position) p: vec4f,
@@ -152,7 +184,7 @@ export const createSmoothTerrainShader = () => ({
     fn fragmentMain(input: VertexOutput) -> @location(0) vec4f {
         // 보간된 법선은 길이가 1이 아니므로 다시 정규화한다
         let n = normalize(input.normal);
-        let base = terrainColor(input.world.z);
+        let base = ${forest ? "forestTint(terrainColor(input.world.z), input.world, false)" : "terrainColor(input.world.z)"};
         return vec4f(shade(base, n, input.world), 1);
     }
     `,
@@ -175,14 +207,22 @@ export const createSmoothTerrainShader = () => ({
  * @param withNormals 정점 법선 버퍼를 받는 변형인지
  * @returns `{ label, code }` 형태의 GPUShaderModuleDescriptor
  */
-export const createSteppedTerrainShader = (withNormals = false) =>
-    steppedShader(withNormals ? "stepped terrain shader (smooth normals)" : "stepped terrain shader", withNormals, "terrainColor(input.world.z)")
+export const createSteppedTerrainShader = (withNormals = false, forest = false) =>
+    forest
+        ? steppedShader(
+              withNormals ? "stepped terrain shader (smooth normals, forest)" : "stepped terrain shader (forest)",
+              withNormals,
+              // 벽(수직면) 판정은 화면 미분 법선 n(벽은 n.z ≈ 0). forestwalls=0 이면 벽은 표고 색 그대로
+              "forestTint(terrainColor(input.world.z), input.world, abs(n.z) < 0.5)",
+              forestWgsl,
+          )
+        : steppedShader(withNormals ? "stepped terrain shader (smooth normals)" : "stepped terrain shader", withNormals, "terrainColor(input.world.z)")
 
-/** 계단형 지형·도로가 같이 쓰는 셰이더 본체. baseColor 는 바탕색 WGSL 식(지형 = 표고 색표, 도로 = roadColor) */
-const steppedShader = (label: string, withNormals: boolean, baseColor: string) => ({
+/** 계단형 지형·도로가 같이 쓰는 셰이더 본체. baseColor 는 바탕색 WGSL 식(지형 = 표고 색표, 도로 = roadColor), extra 는 공통 조각 뒤에 붙일 WGSL(산림) */
+const steppedShader = (label: string, withNormals: boolean, baseColor: string, extra = "") => ({
     label,
     code: /* wgsl */ `
-    ${commonWgsl}
+    ${commonWgsl}${extra}
 
     struct VertexOutput {
         @builtin(position) p: vec4f,

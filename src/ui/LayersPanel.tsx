@@ -19,12 +19,15 @@ export const LayersPanel = ({
     onChange,
     loading,
     notes,
+    noteTitles,
     onAttribution,
 }: {
     layers: LayerStates
     onChange: (id: LayerId, key: "visible" | "export", value: boolean) => void
     loading?: Partial<Record<LayerId, boolean>>
     notes?: Partial<Record<LayerId, string>>
+    /** 보조 문구에 마우스를 올리면 보일 자세한 내용(산림 임상별 수) */
+    noteTitles?: Partial<Record<LayerId, string>>
     onAttribution?: (id: LayerId) => void
 }) => (
     <>
@@ -34,14 +37,18 @@ export const LayersPanel = ({
             <span>내보내기</span>
             <span />
         </div>
-        {LAYER_DEFS.map(({ id, label }) => (
+        {LAYER_DEFS.map(({ id, label, exportable }) => (
             <div key={id} className="ui-row ui-layer-row">
                 <span>
                     {label}
                     {loading?.[id] ? (
                         <span className="ui-layer-note">받는 중</span>
                     ) : (
-                        notes?.[id] && <span className="ui-layer-note">{notes[id]}</span>
+                        notes?.[id] && (
+                            <span className="ui-layer-note" title={noteTitles?.[id]}>
+                                {notes[id]}
+                            </span>
+                        )
                     )}
                 </span>
                 <Checkbox
@@ -50,7 +57,8 @@ export const LayersPanel = ({
                     onChange={(_, data) => onChange(id, "visible", data.checked === true)}
                 />
                 <Checkbox
-                    checked={layers[id].export}
+                    checked={exportable !== false && layers[id].export}
+                    disabled={exportable === false}
                     aria-label={`${label} 내보내기`}
                     onChange={(_, data) => onChange(id, "export", data.checked === true)}
                 />

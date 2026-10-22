@@ -4,7 +4,7 @@
  * 레이어마다 "보기"(화면에 그릴지)와 "내보내기"(STL·SKP 에 넣을지)를 따로 켜고 끈다. 새 레이어를 추가할 때는
  * 여기에 항목을 더하고, 렌더러(layerMeshUpdater)와 STL·SKP worker 에 그 레이어의 메쉬를 넘기는 코드를 잇는다.
  */
-export type LayerId = "terrain" | "buildings" | "roads" | "water"
+export type LayerId = "terrain" | "buildings" | "roads" | "water" | "forest"
 
 export type LayerState = {
     /** 화면에 그린다 */
@@ -19,6 +19,8 @@ export type LayerDef = {
     id: LayerId
     /** 화면에 보일 이름 */
     label: string
+    /** false 면 내보내기에 넣을 수 없다(패널의 내보내기 칸을 끈다. 산림: 계획 F5 라이선스 확인 중) */
+    exportable?: false
 }
 
 /** 화면 패널에 보이는 순서 */
@@ -27,6 +29,7 @@ export const LAYER_DEFS: LayerDef[] = [
     { id: "buildings", label: "건물" },
     { id: "roads", label: "도로" },
     { id: "water", label: "물" },
+    { id: "forest", label: "산림", exportable: false },
 ]
 
 export const INITIAL_LAYER_STATES: LayerStates = {
@@ -34,4 +37,5 @@ export const INITIAL_LAYER_STATES: LayerStates = {
     buildings: { visible: true, export: true },
     roads: { visible: true, export: true },
     water: { visible: true, export: true },
+    forest: { visible: true, export: false },
 }
