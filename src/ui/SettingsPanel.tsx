@@ -84,7 +84,8 @@ export const SettingsPanel = ({
     const stepValue = Number(stepText)
     const stepValid = Number.isFinite(stepValue) && stepValue >= STEP_MIN && stepValue <= STEP_MAX
     const stepChanged = stepValid && stepValue !== stepInterval
-    const canRebuild = stepChanged || (stepValid && !!rebuildPending)
+    // 지형을 만드는 중(또는 준비 전)에는 보기 모드처럼 계단 간격도 바꾸지 않는다(생성 중 스타일이 바뀌면 일부 도엽이 옛 간격으로 남는다. 2026-10-23)
+    const canRebuild = !modeDisabled && (stepChanged || (stepValid && !!rebuildPending))
     const commitStep = () => {
         if (canRebuild) onStepInterval(stepValue)
     }
@@ -141,6 +142,7 @@ export const SettingsPanel = ({
                         onChange={(_, data) => setStepText(data.value)}
                         onKeyDown={(e) => e.key === "Enter" && commitStep()}
                         aria-invalid={!stepValid}
+                        disabled={modeDisabled}
                         style={{ width: 64 }}
                     />
                     <span className="ui-settings-unit">m</span>
