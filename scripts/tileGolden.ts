@@ -3,7 +3,8 @@
  *
  * tile-golden.mjs 가 esbuild 로 이 파일을 Node 용으로 묶어 쓴다. 하는 일은 셋이다.
  * 1. 일감 만들기(sceneJobs): 조정자(src/terrainTiles.worker.ts select·buildTile)와 같은 규칙으로 BuildJob 을 만든다.
- *    선택 bbox → qSel(도엽·원점)·qAll(± 1650 여유) → 가운데에서 가까운 순 → 이웃(neighborReach 와 겹치는 도엽)·5K 경로
+ *    선택 bbox → qSel(도엽·원점)·qAll(± 1650 여유) → 가운데에서 가까운 순 → 이웃(neighborReach 와 겹치는 도엽)·5K 경로 →
+ *    레이어 5K 목록(C2 2026-10-23: src/layerSheets.ts, 조정자와 같은 함수)
  * 2. 자료 대조(analyzeTile, C0): 도엽 하나에 레이어마다 쓰이는 항목 집합을 (a) 자기 5K 파일만 / (b) 지금 방식(1K bbox 로 ttp 인덱스에서 고른
  *    5K 전부, flags & 1 id 중복 제거) 두 벌로 계산해 비교하고, 다른 항목이 도엽 폴리곤과 실제로 겹치는지(면적·산림은 픽셀 중심)를 가린다.
  *    보조 워커의 거르기 규칙(건물 무게중심, 도로 bbox 닿음·면 밖 선, 물 조각·띠, 산림 bbox 닿음)을 그대로 옮겼다
@@ -17,6 +18,7 @@ import proj4 from "proj4"
 import { Building, BUILDINGS_BASE, parseBfp } from "../src/buildingsData"
 import { FOREST_BASE, ForestPolygon, parseFrs } from "../src/forestData"
 import { parseRds, RoadFace, RoadLine, ROADS_BASE } from "../src/roadsData"
+import { DATA_LAYERS, layerSheetsOfTile } from "../src/layerSheets"
 import { RIBBON_DEFAULT_WIDTH_M } from "../src/roadsMesh"
 import { isElevated, isUnderground, ROAD_LINE_FLAG } from "../src/roadTable"
 import { fetchGunzip } from "../src/terrainData"
@@ -99,7 +101,9 @@ export const sceneJobs = async (bbox3857: Extent, only?: string[]): Promise<Scen
         const neighbors = qAll.tiles.filter((n) => extentsOverlap(n.bbox, neighborReach(t.bbox)))
         const ids5k = new Set(neighbors.map((n) => n.id5k))
         const sheets = qAll.sheets.filter((s) => ids5k.has(s.id5k)).map((s) => ({ id5k: s.id5k, path: s.path }))
-        jobs.set(t.map_id, { tile: t, neighbors, sheets, origin: qSel.origin, maxBytes: 64 * 1048576, extra: false })
+        // 레이어 5K 목록(C2): 조정자 buildTile 과 같은 함수. 산림 끔 설정도 네 레이어를 다 싣는다(보조 워커가 산림을 읽지 않는다)
+        const layers = await layerSheetsOfTile(t.corners, DATA_LAYERS)
+        jobs.set(t.map_id, { tile: t, neighbors, sheets, layers, origin: qSel.origin, maxBytes: 64 * 1048576, extra: false })
     }
     return { origin: qSel.origin, tiles, jobs }
 }

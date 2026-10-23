@@ -1,7 +1,4 @@
-import type { Extent } from "ol/extent"
-
-import { fetchGunzip, noteCached, noteJson } from "./terrainData"
-import { getTtpSheetsInBbox } from "./terrainIndex"
+import { dataTier, fetchGunzip, JsonMemo, jsonFetcher, Layer5k, shiftXy } from "./terrainData"
 import { emptyWaterCodeNames, WaterCodeNames } from "./waterTable"
 
 /**
@@ -145,19 +142,7 @@ type WaterNamesFile = { id5k: string; n: number; name_id: number[]; name: string
 /** 이름 표: nameId → 이름·하천 번호(호소는 river_no 가 빈 문자열). 5K 마다 받아 합친다(같은 id 는 같은 이름) */
 export type WaterNames = Map<number, { name: string; riverNo: string }>
 
-const jsonCache = new Map<string, Promise<unknown>>()
-const fetchJsonCached = <T>(url: string): Promise<T> => {
-    let p = jsonCache.get(url)
-    if (!p) {
-        p = fetch(url).then(async (res) => {
-            if (!res.ok) throw new Error(`${res.status} ${url}`)
-            return noteJson("water.json", res)
-        })
-        jsonCache.set(url, p)
-        p.catch(() => jsonCache.delete(url))
-    }
-    return p as Promise<T>
-}
+const fetchJson = jsonFetcher("water")
 
 const namesOf = (codes: Record<string, string> | undefined) => {
     const names = new Array<string>(256).fill("")
@@ -173,87 +158,58 @@ export const emptyWaterCodeTable = emptyWaterCodeNames
 
 /** codes.json 을 받아 코드 값 → 한글 이름 표를 만든다(모듈 캐시) */
 export const loadWaterCodes = async (): Promise<WaterCodeNames> => {
-    const codes = await fetchJsonCached<WaterCodes>(`${WATER_BASE}/index/v1/codes.json`)
+    const codes = await fetchJson.fixed<WaterCodes>(`${WATER_BASE}/index/v1/codes.json`)
     return { kindNames: namesOf(codes.kind), riverSeNames: namesOf(codes.river_se) }
 }
 
-/** 파싱한 5K 물 파일 캐시(path → 결과). 도엽 스트리밍이 도엽마다 부를 때 같은 5K 를 다시 받지 않게 */
-const wtrCache = new Map<string, Promise<WtrFile>>()
-const fetchWtrCached = (path: string) => {
-    let p = wtrCache.get(path)
-    if (!p) {
-        p = fetchGunzip(`${WATER_BASE}/${path}`).then((buf) => parseWtr(noteCached("water.file", buf.byteLength, buf)))
-        wtrCache.set(path, p)
-        p.catch(() => wtrCache.delete(path))
-    }
-    return p
-}
-
-/** 5K 이름 파일 캐시(path → nameId 표) */
-const namesCache = new Map<string, Promise<WaterNames>>()
-const fetchNamesCached = (path: string) => {
-    let p = namesCache.get(path)
-    if (!p) {
-        p = fetchGunzip(`${WATER_BASE}/${path}`).then((buf) => {
-            const json = JSON.parse(new TextDecoder().decode(noteCached("water.names", buf.byteLength, buf))) as WaterNamesFile
-            const map: WaterNames = new Map()
-            for (let i = 0; i < json.name_id.length; i++) map.set(json.name_id[i], { name: json.name[i] ?? "", riverNo: json.river_no?.[i] ?? "" })
-            return map
-        })
-        namesCache.set(path, p)
-        p.catch(() => namesCache.delete(path))
-    }
-    return p
-}
-
-/** 파일 원점 기준 mm 좌표를 공통 원점 기준으로 옮긴 새 배열 */
-const shiftXy = (xy: Int32Array, dx: number, dy: number) => {
-    const out = new Int32Array(xy.length)
-    for (let i = 0; i < xy.length; i += 2) {
-        out[i] = xy[i] + dx
-        out[i + 1] = xy[i + 1] + dy
-    }
-    return out
-}
-
 /**
- * 선택 범위의 수면 조각·하천선을 받아 공통 원점 기준으로 합친다(안내문 4절 1).
- *
- * 1. ttp 인덱스로 범위에 걸린 5K 번호를 고른다(지형·건물·도로와 같은 번호)
- * 2. 물 50K 인덱스에서 그 5K 의 path 를 보고 조각·선이 하나라도 있는 것만 받는다(`n_pieces == 0 && n_lines == 0` 은 40 B 빈 파일)
- * 3. 좌표를 공통 원점 mm 로 옮긴다. **중복 제거는 하지 않는다**(조각은 5K 경계에서 잘려 있고 복제가 없다)
- * 4. 이름 파일(names_path)을 같이 받아 nameId 표로 합친다(내보내기 그룹 이름용)
- * 범위 안팎 선별은 하지 않는다(지형 위에 얹을 때 도엽 폴리곤으로 잘린다).
- *
- * @param bbox3857 지도에서 고른 범위 (EPSG:3857)
- * @param commonOrigin 지형 메쉬의 원점(정수 m, 5179)
- * @returns 조각·선 목록(xy 는 공통 원점 mm 의 새 배열), 이름 표, 받은 파일 수
+ * 도엽이 쓸 물 5K(조정자가 도엽마다 부른다. layerSheets.ts, C2 2026-10-23). sheets 는 도엽 3857 bbox 로 ttp 인덱스에서 고른 5K(그 순서).
+ * 물 50K 인덱스에서 조각·선이 하나라도 있는 것만 같은 순서로 남긴다(`n_pieces == 0 && n_lines == 0` 은 40 B 빈 파일). 이름 파일(names_path)이
+ * 있으면 같이 싣는다(C2 전 loadWater 의 targets 와 같다). memo 는 조정자의 묶음 동안 인덱스를 쥐는 곳
  */
-export const loadWater = async (
-    bbox3857: Extent,
-    commonOrigin: [number, number],
-): Promise<{ pieces: WaterPiece[]; lines: WaterLine[]; names: WaterNames; files: number }> => {
-    const q = await getTtpSheetsInBbox(bbox3857)
-    const ids50k = [...new Set(q.sheets.map((s) => s.id5k.slice(0, 5)))]
-    const indexes = await Promise.all(ids50k.map((id50k) => fetchJsonCached<WaterSheet50k>(`${WATER_BASE}/index/v1/${id50k}.json`)))
+export const waterSheetsOf = async (sheets: { id5k: string }[], memo?: JsonMemo): Promise<Layer5k[]> => {
+    const ids50k = [...new Set(sheets.map((s) => s.id5k.slice(0, 5)))]
+    const indexes = await Promise.all(ids50k.map((id50k) => fetchJson.index50k<WaterSheet50k>(`${WATER_BASE}/index/v1/${id50k}.json`, memo)))
     const entryById5k = new Map(indexes.flatMap((ix) => ix.sheets.map((s) => [String(s.id5k), s] as const)))
-    const targets = q.sheets
+    return sheets
         .map((s) => entryById5k.get(s.id5k))
         .filter((e): e is NonNullable<typeof e> => !!e && (e.n_pieces > 0 || e.n_lines > 0))
-    const [files, nameMaps] = await Promise.all([
-        Promise.all(targets.map((t) => fetchWtrCached(t.path))),
-        Promise.all(targets.filter((t) => t.names_path).map((t) => fetchNamesCached(t.names_path!))),
-    ])
+        .map((e) => (e.names_path ? { id5k: String(e.id5k), path: e.path, names: e.names_path } : { id5k: String(e.id5k), path: e.path }))
+}
 
+/** 물 데이터 층 항목(5K 하나, 파일 원점). names 는 그 5K 이름 파일의 nameId 표(없으면 null) */
+export type Water5k = { file: WtrFile; names: WaterNames | null; bytes: number }
+const waterTier = dataTier<Water5k>("water")
+/** 물 5K 파일(과 이름 파일)을 받아 파싱(데이터 층. 같은 5K 는 다시 받지 않는다) */
+export const fetchWater5k = (s: Layer5k) =>
+    waterTier(s.path, async () => {
+        const [buf, namesBuf] = await Promise.all([fetchGunzip(`${WATER_BASE}/${s.path}`), s.names ? fetchGunzip(`${WATER_BASE}/${s.names}`) : null])
+        let names: WaterNames | null = null
+        if (namesBuf) {
+            const json = JSON.parse(new TextDecoder().decode(namesBuf)) as WaterNamesFile
+            names = new Map()
+            for (let i = 0; i < json.name_id.length; i++) names.set(json.name_id[i], { name: json.name[i] ?? "", riverNo: json.river_no?.[i] ?? "" })
+        }
+        return { file: parseWtr(buf), names, bytes: buf.byteLength + (namesBuf?.byteLength ?? 0) }
+    })
+
+/**
+ * 도엽의 수면 조각·하천선(안내문 4절 1, C2 2026-10-23). entries 는 도엽이 걸치는 5K 들(조정자 순서). 그 순서로 모두 공통 원점 mm 로 옮긴다.
+ * **중복 제거는 하지 않는다**(조각은 5K 경계에서 잘려 있고 복제가 없다). 이름 표는 5K 마다의 표를 합친다(같은 id 는 앞 5K 의 것).
+ * 범위 안팎 선별은 하지 않는다(waterMesh 가 도엽 폴리곤으로 자르고, 폴리곤 안 선분 판정에 조각 전부가 필요하다). C2 전 loadWater 와 같은 결과·순서
+ *
+ * @param commonOrigin 지형 메쉬의 원점(정수 m, 5179)
+ */
+export const waterOfTile = (entries: Water5k[], commonOrigin: [number, number]): { pieces: WaterPiece[]; lines: WaterLine[]; names: WaterNames } => {
     const pieces: WaterPiece[] = []
     const lines: WaterLine[] = []
-    for (const file of files) {
+    for (const { file } of entries) {
         const dx = (file.origin[0] - commonOrigin[0]) * 1000
         const dy = (file.origin[1] - commonOrigin[1]) * 1000
         for (const p of file.pieces) pieces.push({ ...p, xy: shiftXy(p.xy, dx, dy) })
         for (const l of file.lines) lines.push({ ...l, xy: shiftXy(l.xy, dx, dy) })
     }
     const names: WaterNames = new Map()
-    for (const m of nameMaps) for (const [id, v] of m) if (!names.has(id)) names.set(id, v)
-    return { pieces, lines, names, files: files.length }
+    for (const e of entries) if (e.names) for (const [id, v] of e.names) if (!names.has(id)) names.set(id, v)
+    return { pieces, lines, names }
 }

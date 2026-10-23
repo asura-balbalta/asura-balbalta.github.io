@@ -29,6 +29,7 @@
  *     [--size 878x946] [--dpr 2] [--stable 2000] [--timeout 600000] [--browser chrome|chromium] [--base http://localhost:3000]
  *     [--bbox25 …] [--bbox300 …] [--steps 5] [--step-m 1000] [--bearing 22.5] [--http cold|warm]
  *   node scripts/perf-check.mjs --compare <beforeDir> <afterDir>
+ *   node scripts/perf-check.mjs --merge <dir1,dir2,…> --out <dir>   # --runs 1 로 전·후를 번갈아 잰 폴더들을 빌드별로 합쳐 통계를 다시 냄
  *   --bearing  순간 이동 방향(°, 0 = 동쪽·반시계. 22.5 = 동북동, 계획서 19절 측정과 같은 쪽)
  *   --http     cold(기본): 새 컨텍스트라 HTTP 캐시가 비어 R2 에서 받는 시간까지 잰다(데이터 서버는 CDN 캐시 DYNAMIC 이라 받기 지연이 크게 흔들린다).
  *              warm: 같은 컨텍스트에서 시나리오를 한 번 돌려 HTTP 캐시만 데운 뒤(R2 응답 cache-control max-age=3600) 새 페이지에서 잰다.
@@ -95,6 +96,7 @@ const parseArgs = (argv) => {
             case "--bearing": args.bearing = Number(take()); break
             case "--http": args.http = take(); break
             case "--compare": args.mode = "compare"; args.compare = [take(), take()]; break
+            case "--merge": args.mode = "merge"; args.merge = take().split(",").map((s) => s.trim()); break
             case "--help": case "-h": console.log("사용법은 파일 상단 주석 참고"); process.exit(0)
             default: throw new Error(`모르는 옵션 ${key}`)
         }
@@ -173,22 +175,42 @@ const MB = (bytes) => (bytes == null ? null : Math.round((bytes / 1048576) * 10)
 /** {key: {count, bytes}} 묶음의 바이트 합(조건 함수로 키를 거른다) */
 const groupBytes = (group, keep = () => true) => Object.entries(group ?? {}).reduce((s, [k, v]) => s + (keep(k) ? v?.bytes ?? 0 : 0), 0)
 /**
- * memory() 보고를 MB 요약으로. 보조 워커 합. 계획서 1.2절 표의 열: 데이터 파일(*.file·*.names)·인덱스 JSON(*.json)·5K 목록·도엽 결과·ttp·TIN·
- * 메인 사본·GPU. 리팩토링(C5)으로 보고 형식이 바뀌면 여기를 고친다(원자료는 따로 남는다)
+ * memory() 보고를 MB 요약으로. 보조 워커 합. 계획서 1.2절 표의 열: 데이터 파일·인덱스 JSON·5K 목록·도엽 결과·ttp·TIN·메인 사본·GPU.
+ * C5(2026-10-23)부터 스레드마다 캐시 표 `caches`(`층.레이어` → LruCache.stats(). 층 fixed·index·file·result, 레이어 terrain·buildings·…)를 읽는다.
+ * 그 전 형식(data·lists·results·terrain)의 원자료도 읽는다. cacheEvictions 는 키별 밀려난 수(보조 워커 합, 0 이 아닌 것만)
  */
 const summarizeMemory = (m) => {
     if (!m) return null
     const helpers = m.workers?.helpers ?? []
     const sum = (f) => helpers.reduce((s, h) => s + f(h), 0)
     const c = m.workers?.coordinator ?? {}
+    /** 캐시 표에서 층(과 레이어 조건)의 바이트 합 */
+    const tier = (caches, t, keep = () => true) => groupBytes(caches, (k) => k.startsWith(`${t}.`) && keep(k))
+    const json = (caches) => tier(caches, "index") + tier(caches, "fixed")
+    const isNew = helpers.some((h) => h.caches) || !!c.caches
+    const cacheEvictions = {}
+    for (const h of helpers) for (const [k, s] of Object.entries(h.caches ?? {})) if (s?.evictions) cacheEvictions[k] = (cacheEvictions[k] ?? 0) + s.evictions
+    const sizes = isNew
+        ? {
+              dataFilesMB: MB(sum((h) => tier(h.caches, "file", (k) => k !== "file.terrain"))),
+              jsonMB: MB(sum((h) => json(h.caches)) + json(c.caches) + json(m.main?.caches)),
+              listsMB: 0,
+              resultsMB: MB(sum((h) => tier(h.caches, "result", (k) => k !== "result.terrain"))),
+              ttpMB: MB(sum((h) => h.caches?.["file.terrain"]?.bytes ?? 0)),
+              tinMB: MB(sum((h) => h.caches?.["result.terrain"]?.bytes ?? 0)),
+          }
+        : {
+              dataFilesMB: MB(sum((h) => groupBytes(h.data, (k) => !k.endsWith(".json")))),
+              jsonMB: MB(sum((h) => groupBytes(h.data, (k) => k.endsWith(".json"))) + groupBytes(c.data) + groupBytes(m.main?.data)),
+              listsMB: MB(sum((h) => groupBytes(h.lists))),
+              resultsMB: MB(sum((h) => groupBytes(h.results))),
+              ttpMB: MB(sum((h) => h.terrain?.ttp?.bytes ?? 0)),
+              tinMB: MB(sum((h) => h.terrain?.tin?.bytes ?? 0)),
+          }
     return {
         helpers: helpers.length,
-        dataFilesMB: MB(sum((h) => groupBytes(h.data, (k) => !k.endsWith(".json")))),
-        jsonMB: MB(sum((h) => groupBytes(h.data, (k) => k.endsWith(".json"))) + groupBytes(c.data) + groupBytes(m.main?.data)),
-        listsMB: MB(sum((h) => groupBytes(h.lists))),
-        resultsMB: MB(sum((h) => groupBytes(h.results))),
-        ttpMB: MB(sum((h) => h.terrain?.ttp?.bytes ?? 0)),
-        tinMB: MB(sum((h) => h.terrain?.tin?.bytes ?? 0)),
+        ...sizes,
+        cacheEvictions,
         mainTilesMB: MB(m.main?.tiles?.total),
         mainHeapMB: MB(m.main?.heap),
         gpuMB: MB(m.gpu?.bytes),
@@ -659,9 +681,36 @@ const compare = async (args) => {
     console.log(`끝. ${path.join(afterDir, "perf-compare.json")}`)
 }
 
+/**
+ * 여러 결과 폴더(같은 환경에서 --runs 1 로 전·후를 번갈아 잰 것)의 실행 기록을 이어 붙여 통계·요약을 다시 낸다(2026-10-23 C6).
+ * --merge <폴더1,폴더2,…> --out <폴더>. 실행 번호는 이어 붙인 순서로 다시 매긴다. 환경(브라우저·창·dpr·http·서버)이 다르면 거부
+ */
+const merge = async (args) => {
+    const parts = []
+    for (const dir of args.merge) parts.push({ dir, result: JSON.parse(await readFile(path.join(dir, "results.json"), "utf8")) })
+    const env = (r) => `${r.browser?.name} ${r.browser?.version} ${r.size?.width}x${r.size?.height}@${r.dpr} http ${r.http} ${r.base}`
+    for (const p of parts) if (env(p.result) !== env(parts[0].result)) throw new Error(`환경이 달라 합치지 않습니다: ${p.dir} (${env(p.result)}) ↔ ${env(parts[0].result)}`)
+    const records = []
+    const runOf = new Map()
+    for (const p of parts)
+        for (const r of p.result.records) {
+            const key = `${p.dir}#${r.run}`
+            if (!runOf.has(key)) runOf.set(key, runOf.size + 1)
+            records.push({ ...r, run: runOf.get(key), mergedFrom: p.dir })
+        }
+    await mkdir(args.out, { recursive: true })
+    const result = { ...parts[0].result, createdAt: new Date().toISOString(), runs: runOf.size, mergedFrom: args.merge, records }
+    result.stats = metricStats(records)
+    result.problems = problemSummary(records)
+    await writeFile(path.join(args.out, "results.json"), JSON.stringify(result, null, 2))
+    await writeFile(path.join(args.out, "summary.md"), summaryMarkdown(result))
+    console.log(`합침: ${parts.length}개 폴더, 실행 ${runOf.size}회, 기록 ${records.length} → ${path.join(args.out, "results.json")}`)
+}
+
 const main = async () => {
     const args = parseArgs(process.argv.slice(2))
     if (args.mode === "compare") await compare(args)
+    else if (args.mode === "merge") await merge(args)
     else await run(args)
 }
 

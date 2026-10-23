@@ -7,7 +7,8 @@ import type { WaterZMode } from "./waterMesh"
 import { WaterTable, waterTableBuffers } from "./waterTable"
 import type { ForestMask } from "./forestMask"
 import { ForestTable, forestTableBuffers } from "./forestTable"
-import { dataCacheStats, heapBytes, MeshChunk, TinMesh } from "./terrainData"
+import { batchLayerSheets, createSheetsBatch, DATA_LAYERS, SheetsBatch } from "./layerSheets"
+import { dataCacheTable, heapBytes, MeshChunk, TinMesh } from "./terrainData"
 import { getTtpSheetsInBbox, MB_PER_TILE, neighborReach, SELECTION_TILE_LIMITS } from "./terrainIndex"
 import type { BuildRequest, BuildResponse, HelperMemory } from "./terrainTileBuild.worker"
 import type { TerrainMode } from "./webgpu/terrainRenderer"
@@ -263,6 +264,12 @@ let walk: { center: [number, number]; radius: number; maxTiles: number } | null 
 /** select 마다 1 오른다. 늦게 끝난 이전 선택의 작업은 버린다 */
 let generation = 0
 let running = false
+/**
+ * 인덱스 묶음(C2 + C1 검토 M1): 선택 도엽은 선택 묶음, 밖 도엽은 걸어 보기 갱신(walk 메시지)마다 새 묶음. 묶음 동안 인덱스 JSON 을 쥐고 도엽마다
+ * 레이어 5K 목록을 한 번만 계산한다(layerSheets.ts)
+ */
+let selectBatch: SheetsBatch = createSheetsBatch()
+let walkBatch: SheetsBatch | null = null
 
 /**
  * 도엽 하나를 보조 워커에 맡겨 만든다. 이웃(5×5, 두 겹)과 그 5K 경로를 조회 결과에서 골라 같이 보낸다.
@@ -270,21 +277,29 @@ let running = false
  * 삼각형이 달라지고 경계에 균열이 났다(충주 330개 공유 변 표본 536곳 >1 cm). 보조 워커는 띠 범위만 합치므로 두 겹을 줘도 비용은
  * 성긴 쪽으로 넓힐 때만 든다
  *
+ * 레이어마다 이 도엽이 쓸 5K(도엽 3857 bbox 에 걸치는 것)도 여기서 정해 싣는다(C2. 보조 워커는 인덱스를 읽지 않는다). 그걸 기다리는 사이 새 선택이
+ * 오면 보내지 않고 null 을 돌려준다(새 선택의 reset 뒤에 옛 원점의 일감이 도착하지 않게)
+ *
  * @param t 만들 도엽
  * @param q 이웃을 찾을 조회 결과(도엽 주변 여유를 포함한 것)
  * @param extra 선택 범위 밖(걸어 보기) 도엽인지
+ * @param gen 부른 쪽의 선택 세대
  */
-const buildTile = (t: QueryTile, q: Query, extra: boolean): Promise<TileData> => {
-    const c = cfg!
+const buildTile = async (t: QueryTile, q: Query, extra: boolean, gen: number): Promise<TileData | null> => {
+    const { origin, style, maxBytes } = cfg!
     ensureHelpers()
     const neighbors = q.tiles.filter((n) => extentsOverlap(n.bbox, neighborReach(t.bbox)))
     const ids5k = new Set(neighbors.map((n) => n.id5k))
     const sheets = q.sheets.filter((s) => ids5k.has(s.id5k)).map((s) => ({ id5k: s.id5k, path: s.path }))
+    // forest=0 이면 산림 인덱스를 읽지 않는다(보조 워커도 산림을 받지 않는다)
+    const keys = style.forest?.enabled === false ? DATA_LAYERS.filter((k) => k !== "forest") : DATA_LAYERS
+    const layers = await batchLayerSheets(extra && walkBatch ? walkBatch : selectBatch, t, keys)
+    if (gen !== generation) return null
     const jobId = nextJobId++
     const helper = helpers[helperIndexOf(t.id5k)]
     return new Promise<TileData>((resolve, reject) => {
         jobs.set(jobId, { resolve, reject })
-        helper.worker.postMessage({ type: "build", jobId, tile: t, neighbors, sheets, origin: c.origin, style: c.style, maxBytes: c.maxBytes, extra } satisfies BuildRequest)
+        helper.worker.postMessage({ type: "build", jobId, tile: t, neighbors, sheets, layers, origin, style, maxBytes, extra } satisfies BuildRequest)
     })
 }
 
@@ -352,8 +367,8 @@ const drainPending = async (gen: number) => {
             const i = pending.findIndex((p) => p.helper === helper)
             if (i < 0) return
             const [next] = pending.splice(i, 1)
-            const data = await buildTile(next.tile, sel.query, next.extra)
-            if (gen !== generation) return
+            const data = await buildTile(next.tile, sel.query, next.extra, gen)
+            if (!data || gen !== generation) return
             loaded.set(data.id, { tile: next.tile, extra: next.extra, center: centroid(next.tile.corners) })
             postTile(data)
             pendingDone++
@@ -382,7 +397,7 @@ const run = async () => {
             const w = walk
             const sel = selection
             // 선택 범위 밖 도엽: 반경 안에서 가까운 순. 멀어진 것은 뺀다
-            const q = await getTtpSheetsInBbox(squareTo3857(w.center, w.radius + NEIGHBOR_MARGIN))
+            const q = await getTtpSheetsInBbox(squareTo3857(w.center, w.radius + NEIGHBOR_MARGIN), walkBatch?.memo)
             if (gen !== generation || walk !== w) continue
             const candidates = q.tiles
                 .filter((t) => !sel.ids.has(t.map_id))
@@ -408,8 +423,8 @@ const run = async () => {
                 loaded.delete(farthest.id)
                 post({ type: "remove", id: farthest.id })
             }
-            const data = await buildTile(candidate.t, q, true)
-            if (gen !== generation) break
+            const data = await buildTile(candidate.t, q, true, gen)
+            if (!data || gen !== generation) break
             loaded.set(data.id, { tile: candidate.t, extra: true, center: centroid(candidate.t.corners) })
             postTile(data)
         }
@@ -421,8 +436,8 @@ const run = async () => {
 }
 
 /**
- * 캐시 메모리 보고(2026-10-23, 계획서 19절): 보조 워커별 캐시(HelperMemory)와 이 워커의 인덱스 JSON 캐시·로드된 도엽.
- * live5k 는 로드된 도엽(선택 + 밖)이 속한 5K(지금 쓰는 것). 보조 워커의 5K 목록 수와 견주면 들고만 있는 5K 가 보인다
+ * 캐시 메모리 보고(2026-10-23, 계획서 19절·3.5): 보조 워커별 캐시 표(HelperMemory)와 이 워커의 캐시 표(인덱스 JSON)·로드된 도엽.
+ * live5k 는 로드된 도엽(선택 + 밖)이 속한 5K(지금 쓰는 것). 보조 워커 캐시 표의 `file.<레이어>` 개수와 견주면 들고만 있는 5K 가 보인다
  */
 const memoryReport = async () => {
     const ask = (w: Worker) =>
@@ -436,7 +451,8 @@ const memoryReport = async () => {
         helpers: await Promise.all(helpers.map((h) => ask(h.worker))),
         coordinator: {
             heap: heapBytes(),
-            data: dataCacheStats,
+            // 이 워커의 캐시 표(index·fixed: ttp·레이어 인덱스 JSON. C5)
+            caches: dataCacheTable(),
             running,
             pending: pending.length,
             loaded: tiles.length,
@@ -455,6 +471,8 @@ const select = async (msg: Extract<TerrainTilesRequest, { type: "select" }>) => 
     loaded.clear()
     pending = []
     walk = null
+    selectBatch = createSheetsBatch()
+    walkBatch = null
     fetchedPaths.clear()
     downloadTotal = 0
     ensureHelpers()
@@ -463,8 +481,8 @@ const select = async (msg: Extract<TerrainTilesRequest, { type: "select" }>) => 
     // 선택 범위에 걸친 도엽과, 경계 도엽의 이웃까지 포함한 조회(이웃 합치기용). 3857 단위는 m 보다 조금 크므로 여유를 넉넉히
     const margin = NEIGHBOR_MARGIN * 1.5
     const [qSel, qAll] = await Promise.all([
-        getTtpSheetsInBbox(msg.bbox),
-        getTtpSheetsInBbox([msg.bbox[0] - margin, msg.bbox[1] - margin, msg.bbox[2] + margin, msg.bbox[3] + margin]),
+        getTtpSheetsInBbox(msg.bbox, selectBatch.memo),
+        getTtpSheetsInBbox([msg.bbox[0] - margin, msg.bbox[1] - margin, msg.bbox[2] + margin, msg.bbox[3] + margin], selectBatch.memo),
     ])
     if (gen !== generation) return
     if (qSel.tiles.length === 0) throw new Error("선택 범위에 도엽이 없습니다")
@@ -533,10 +551,12 @@ self.onmessage = async (e: MessageEvent<TerrainTilesRequest>) => {
         } else {
             if (msg.center) {
                 walk = { center: msg.center, radius: msg.radius, maxTiles: msg.maxTiles }
+                walkBatch = createSheetsBatch()
                 // 둘러보기 진입 때 계단형 재생성이 큐에 있으면 플레이어 가까운 도엽부터(L5-D, 2026-10-15). style 메시지가 walk 보다 먼저 온다
                 sortPendingByDistance(msg.center)
             } else {
                 walk = null
+                walkBatch = null
                 for (const [id, info] of loaded) {
                     if (!info.extra) continue
                     loaded.delete(id)

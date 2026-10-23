@@ -1,8 +1,5 @@
-import type { Extent } from "ol/extent"
-
 import { emptyRoadCodeNames, ROAD_FACE_FLAG, ROAD_LINE_FLAG, RoadCodeNames } from "./roadTable"
-import { fetchGunzip, noteCached, noteJson } from "./terrainData"
-import { getTtpSheetsInBbox } from "./terrainIndex"
+import { boundsAt, dataTier, fetchGunzip, JsonMemo, jsonFetcher, Layer5k, shiftXy, XyBounds, xyBoundsMm } from "./terrainData"
 
 /**
  * 도로 레이어(roads, RDS1) base URL. 경로 규칙은 ttp·buildings 와 같고 base 만 다르다(서버 readme 10절, 전달 문서 2026-10-17).
@@ -161,19 +158,7 @@ type RoadsSheet50k = {
     sheets: { id5k: string; path: string; gz_bytes: number; n_faces: number; n_lines: number }[]
 }
 
-const jsonCache = new Map<string, Promise<unknown>>()
-const fetchJsonCached = <T>(url: string): Promise<T> => {
-    let p = jsonCache.get(url)
-    if (!p) {
-        p = fetch(url).then(async (res) => {
-            if (!res.ok) throw new Error(`${res.status} ${url}`)
-            return noteJson("roads.json", res)
-        })
-        jsonCache.set(url, p)
-        p.catch(() => jsonCache.delete(url))
-    }
-    return p as Promise<T>
-}
+const fetchJson = jsonFetcher("roads")
 
 const namesOf = (codes: Record<string, string> | undefined) => {
     const names = new Array<string>(256).fill("")
@@ -189,7 +174,7 @@ export const emptyRoadCodeTable = emptyRoadCodeNames
 
 /** codes.json 을 받아 코드 값 → 한글 이름 표 넷을 만든다(모듈 캐시) */
 export const loadRoadCodes = async (): Promise<RoadCodeTable> => {
-    const codes = await fetchJsonCached<RoadCodes>(`${ROADS_BASE}/index/v1/codes.json`)
+    const codes = await fetchJson.fixed<RoadCodes>(`${ROADS_BASE}/index/v1/codes.json`)
     return {
         roadSeNames: namesOf(codes.road_se),
         facilityNames: namesOf(codes.tfceqp),
@@ -198,74 +183,67 @@ export const loadRoadCodes = async (): Promise<RoadCodeTable> => {
     }
 }
 
-/** 파싱한 5K 도로 파일 캐시(path → 결과). 도엽 스트리밍이 도엽마다 부를 때 같은 5K 를 다시 받지 않게 */
-const rdsCache = new Map<string, Promise<RdsFile>>()
-const fetchRdsCached = (path: string) => {
-    let p = rdsCache.get(path)
-    if (!p) {
-        p = fetchGunzip(`${ROADS_BASE}/${path}`).then((buf) => parseRds(noteCached("roads.file", buf.byteLength, buf)))
-        rdsCache.set(path, p)
-        p.catch(() => rdsCache.delete(path))
-    }
-    return p
-}
-
-/** 파일 원점 기준 mm 좌표를 공통 원점 기준으로 옮긴 새 배열 */
-const shiftXy = (xy: Int32Array, dx: number, dy: number) => {
-    const out = new Int32Array(xy.length)
-    for (let i = 0; i < xy.length; i += 2) {
-        out[i] = xy[i] + dx
-        out[i + 1] = xy[i + 1] + dy
-    }
-    return out
-}
-
 /**
- * 선택 범위의 도로 조각·선을 받아 공통 원점 기준으로 합친다(전달 문서 4절 1).
- *
- * 1. ttp 인덱스로 범위에 걸린 5K 번호를 고른다(지형·건물과 같은 번호)
- * 2. 도로 50K 인덱스에서 그 5K 의 path 를 보고 조각·선이 하나라도 있는 것만 받는다
- * 3. 좌표를 공통 원점 mm 로 옮기고, flags 의 duplicated 비트가 있는 조각·선은 id 로 중복 제거
- * 범위 안팎 선별은 하지 않는다(지형 위에 얹을 때 지형 밖 조각이 걸러진다).
- *
- * @param bbox3857 지도에서 고른 범위 (EPSG:3857)
- * @param commonOrigin 지형 메쉬의 원점(정수 m, 5179)
- * @returns 조각·선 목록(xy 는 공통 원점 mm 의 새 배열)과 받은 파일 수
+ * 도엽이 쓸 도로 5K(조정자가 도엽마다 부른다. layerSheets.ts, C2 2026-10-23). sheets 는 도엽 3857 bbox 로 ttp 인덱스에서 고른 5K(그 순서).
+ * 도로 50K 인덱스에서 조각·선이 하나라도 있는 것만 같은 순서로 남긴다(C2 전 loadRoads 의 targets 와 같다). memo 는 조정자의 묶음 동안 인덱스를 쥐는 곳
  */
-export const loadRoads = async (
-    bbox3857: Extent,
-    commonOrigin: [number, number],
-): Promise<{ faces: RoadFace[]; lines: RoadLine[]; files: number }> => {
-    const q = await getTtpSheetsInBbox(bbox3857)
-    const ids50k = [...new Set(q.sheets.map((s) => s.id5k.slice(0, 5)))]
-    const indexes = await Promise.all(ids50k.map((id50k) => fetchJsonCached<RoadsSheet50k>(`${ROADS_BASE}/index/v1/${id50k}.json`)))
+export const roadsSheetsOf = async (sheets: { id5k: string }[], memo?: JsonMemo): Promise<Layer5k[]> => {
+    const ids50k = [...new Set(sheets.map((s) => s.id5k.slice(0, 5)))]
+    const indexes = await Promise.all(ids50k.map((id50k) => fetchJson.index50k<RoadsSheet50k>(`${ROADS_BASE}/index/v1/${id50k}.json`, memo)))
     const entryById5k = new Map(indexes.flatMap((ix) => ix.sheets.map((s) => [String(s.id5k), s] as const)))
-    const targets = q.sheets
+    return sheets
         .map((s) => entryById5k.get(s.id5k))
         .filter((e): e is NonNullable<typeof e> => !!e && (e.n_faces > 0 || e.n_lines > 0))
-    const files = await Promise.all(targets.map((t) => fetchRdsCached(t.path)))
+        .map((e) => ({ id5k: String(e.id5k), path: e.path }))
+}
 
+/** 도로 데이터 층 항목(5K 하나, 파일 원점). faceBounds·lineBounds 는 조각·선마다 파일 mm 범위(xyBoundsMm) */
+export type Roads5k = { file: RdsFile; faceBounds: Float64Array; lineBounds: Float64Array; bytes: number }
+const roadsTier = dataTier<Roads5k>("roads")
+/** 도로 5K 파일을 받아 파싱·전처리(데이터 층. 같은 5K 는 다시 받지 않는다) */
+export const fetchRoads5k = (s: Layer5k) =>
+    roadsTier(s.path, async () => {
+        const buf = await fetchGunzip(`${ROADS_BASE}/${s.path}`)
+        const file = parseRds(buf)
+        const faceBounds = xyBoundsMm(file.faces)
+        const lineBounds = xyBoundsMm(file.lines)
+        return { file, faceBounds, lineBounds, bytes: buf.byteLength + faceBounds.byteLength + lineBounds.byteLength }
+    })
+
+/**
+ * 도엽의 도로 조각·선(전달 문서 4절 1, C2 2026-10-23). entries 는 도엽이 걸치는 5K 들(조정자 순서). 그 순서로 합치며 flags 의 duplicated
+ * 비트가 있는 조각·선은 id 로 처음 것만 남기고(조각·선 따로. 도엽 밖 것도 중복 판정에는 들어간다), keepFace·keepLine 이 고른 것만 공통 원점 mm 로
+ * 옮긴다. 판정에 주는 범위는 공통 원점 m(C2 전 5K 목록의 xyBounds 와 같은 값. boundsAt). C2 전 loadRoads + buildTile 거르기와 같은 결과·순서
+ *
+ * @param commonOrigin 지형 메쉬의 원점(정수 m, 5179)
+ */
+export const roadsInTile = (
+    entries: Roads5k[],
+    commonOrigin: [number, number],
+    keepFace: (f: RoadFace, b: XyBounds) => boolean,
+    keepLine: (l: RoadLine, b: XyBounds) => boolean,
+): { faces: RoadFace[]; lines: RoadLine[] } => {
     const seenFaces = new Set<number>()
     const seenLines = new Set<number>()
     const faces: RoadFace[] = []
     const lines: RoadLine[] = []
-    for (const file of files) {
+    for (const { file, faceBounds, lineBounds } of entries) {
         const dx = (file.origin[0] - commonOrigin[0]) * 1000
         const dy = (file.origin[1] - commonOrigin[1]) * 1000
-        for (const f of file.faces) {
+        file.faces.forEach((f, k) => {
             if (f.flags & ROAD_FACE_FLAG.duplicated) {
-                if (seenFaces.has(f.id)) continue
+                if (seenFaces.has(f.id)) return
                 seenFaces.add(f.id)
             }
-            faces.push({ ...f, xy: shiftXy(f.xy, dx, dy) })
-        }
-        for (const l of file.lines) {
+            if (keepFace(f, boundsAt(faceBounds, k, dx, dy))) faces.push({ ...f, xy: shiftXy(f.xy, dx, dy) })
+        })
+        file.lines.forEach((l, k) => {
             if (l.flags & ROAD_LINE_FLAG.duplicated) {
-                if (seenLines.has(l.id)) continue
+                if (seenLines.has(l.id)) return
                 seenLines.add(l.id)
             }
-            lines.push({ ...l, xy: shiftXy(l.xy, dx, dy) })
-        }
+            if (keepLine(l, boundsAt(lineBounds, k, dx, dy))) lines.push({ ...l, xy: shiftXy(l.xy, dx, dy) })
+        })
     }
-    return { faces, lines, files: files.length }
+    return { faces, lines }
 }

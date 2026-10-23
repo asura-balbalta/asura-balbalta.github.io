@@ -132,11 +132,22 @@ npm run render-check -- --params "bbox=14135700,4513980,14136500,4514780&yaw=90&
 
 | 함수 | 하는 일 |
 | --- | --- |
-| `memory()` | 캐시 메모리 보고(Promise). `workers.helpers[i]`: 보조 워커별 지형(5K 파일·자른 TIN)·5K 목록(`lists`)·도엽 결과(`results`)·데이터 모듈 파일/JSON(`data`, 지우지 않는 캐시) 항목 수·바이트. `workers.coordinator`: 인덱스 JSON·로드된 도엽 수·`live5k`(로드된 도엽의 5K)·`running`·`pending`·걸어 보기 중심(5179). `main`: 원점·메인 도엽 사본(`tiles.memory()`)·메인의 데이터 모듈 캐시·JS 힙. `gpu`: 상주 도엽·바이트. typed array 만 센다(항목 객체·문자열 빠짐). 워커 힙은 Chrome 이 주지 않아 null |
+| `memory()` | 캐시 메모리 보고(Promise). 스레드마다 **캐시 표 `caches`**(아래, 2026-10-23 캐시 통일 C5). `workers.helpers[i]`: `built`(만든 도엽 수)·`heap`·`caches`(지형 파일·자른 TIN·레이어 데이터 층·레이어 결과·코드표). `workers.coordinator`: `caches`(ttp·레이어 인덱스 JSON)·로드된 도엽 수·`live5k`(로드된 도엽의 5K)·`running`·`pending`·걸어 보기 중심(5179). `main`: 원점·메인 도엽 사본(`tiles.memory()`)·`caches`(외곽선용 ttp 인덱스)·JS 힙. `gpu`: 상주 도엽·바이트. 워커 힙은 Chrome 이 주지 않아 null |
 | `teleport(x, y)` | 둘러보기 플레이어를 메쉬 로컬 m(`spawn=` 과 같은 좌표)으로 옮긴다. 평소 이동처럼 주변 도엽 스트리밍·GPU 상주가 따라온다. 둘러보기 중이 아니면 오류 |
 | `select(bbox3857)` | 지도에서 범위를 확정한 것과 같은 경로(워커 캐시 reset). 둘러보기 중이면 먼저 나간다. 끝은 `data-busy` 0, 또는 `memory()` 의 `coordinator.running` false·`pending` 0 으로 본다 |
 
 준비 신호로는 `memory()` 를 1.5초마다 불러 `running` false·`pending` 0·도엽 수가 두 번 연속 같으면 멈춘 것으로 본다(2026-10-23 측정 드라이버).
+
+**캐시 표 `caches`**(2026-10-23 캐시 통일 C5, `docs/cache-refactor-plan.md` 3.5): 모든 캐시가 같은 `LruCache` 라 `층.레이어` → `{ count, bytes, max, hits, misses, evictions }` 한 형식이다. **지금 들고 있는 항목**의 개수·바이트이고(전 측정판의 `data` 는 지우지 않는 캐시의 누계였다), 적중·놓침·밀려남은 그 스레드가 뜬 뒤 누계(reset 에도 남음). 바이트는 typed array 와 JSON 글자 수만 센다(항목 객체·문자열 빠짐).
+
+| 층 | 레이어 | 무엇 | 상한(스레드마다) |
+| --- | --- | --- | --- |
+| `fixed` | terrain·buildings·roads·water·forest | `sheets50k.json`(terrain)·`codes.json`(레이어). 레이어마다 하나로 고정 | 없음(`max` Infinity) |
+| `index` | 같음 | 50K 인덱스 JSON. 조정자·메인만 든다(보조 워커는 읽지 않음) | 14 |
+| `file` | terrain·레이어 | 5K 파일(파일 원점): 지형 ttp, 레이어 데이터 층(파일 + 전처리). select 의 reset 에도 남는다 | ttp 64, 레이어 32 |
+| `result` | terrain·레이어 | 도엽 결과(공통 원점, 키에 원점): 자른 TIN, 레이어 결과. reset 에 비운다. 지금 선택의 도엽은 고정 칸(`pinned`·`pinnedBytes`, 개수·바이트·적중은 합계), 선택 밖(둘러보기) 도엽만 LRU(D6 (b)) | 선택 도엽 없음, 밖 도엽 64(`max`) |
+
+`npm run perf-check` 의 메모리 요약은 이 표를 층별로 더한다(데이터 파일 = `file` 중 레이어, ttp = `file.terrain`, TIN = `result.terrain`, 도엽 결과 = `result` 중 레이어, 인덱스 JSON = `index` + `fixed` 의 모든 스레드 합, `cacheEvictions` = 키별 밀려남 합). 보조 워커는 50도엽마다 같은 표를 한 줄로 찍는다(`층.레이어 개수/상한 MB(적중·놓침·밀려남)`).
 
 ## 6. 기능을 더하거나 고칠 때: 전후 비교로 회귀까지 확인(2026-10-14 결정 by @nanangqq)
 

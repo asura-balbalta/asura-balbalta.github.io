@@ -1,7 +1,4 @@
-import type { Extent } from "ol/extent"
-
-import { fetchGunzip, noteCached, noteJson } from "./terrainData"
-import { getTtpSheetsInBbox } from "./terrainIndex"
+import { dataTier, fetchGunzip, JsonMemo, jsonFetcher, Layer5k, shiftXy } from "./terrainData"
 
 /**
  * 건물 레이어(buildings, BFP1) base URL. 경로 규칙은 ttp 와 같고 base 만 다르다(서버 readme 8절, 전달 문서 2026-10-08).
@@ -143,26 +140,14 @@ type BuildingsSheet50k = {
 
 export const DEFAULT_STOREY_HEIGHT_M = 4
 
-const jsonCache = new Map<string, Promise<unknown>>()
-const fetchJsonCached = <T>(url: string): Promise<T> => {
-    let p = jsonCache.get(url)
-    if (!p) {
-        p = fetch(url).then(async (res) => {
-            if (!res.ok) throw new Error(`${res.status} ${url}`)
-            return noteJson("buildings.json", res)
-        })
-        jsonCache.set(url, p)
-        p.catch(() => jsonCache.delete(url))
-    }
-    return p as Promise<T>
-}
+const fetchJson = jsonFetcher("buildings")
 
 /**
  * codes.json 을 받아 "용도 u8 인덱스 → 층고(m)" 표와 "u8 인덱스 → 이름" 표 셋을 만든다.
  * 층고 표에 없는 용도(인덱스 0 포함)는 default. 이름 표가 codes.json 에 없으면(옛 파일) 모두 "".
  */
 export const loadBuildingCodes = async (): Promise<BuildingCodeTable> => {
-    const codes = await fetchJsonCached<BuildingCodes>(`${BUILDINGS_BASE}/index/v1/codes.json`)
+    const codes = await fetchJson.fixed<BuildingCodes>(`${BUILDINGS_BASE}/index/v1/codes.json`)
     const fallback = codes.storey_height_suggested_m.default ?? DEFAULT_STOREY_HEIGHT_M
     const storeyByUse = new Float32Array(256).fill(fallback)
     const useNames = new Array<string>(256).fill("")
@@ -182,98 +167,86 @@ export const loadBuildingCodes = async (): Promise<BuildingCodeTable> => {
 /** 층고 표만 필요할 때(loadBuildingCodes 의 storeyByUse) */
 export const loadStoreyHeights = async (): Promise<Float32Array> => (await loadBuildingCodes()).storeyByUse
 
-/** 파싱한 5K 건물 파일 캐시(path → 결과). 걸어 보기 도엽 스트리밍이 도엽마다 부를 때 같은 5K 를 다시 받지 않게 */
-const bfpCache = new Map<string, Promise<ReturnType<typeof parseBfp>>>()
-const fetchBfpCached = (path: string) => {
-    let p = bfpCache.get(path)
-    if (!p) {
-        p = fetchGunzip(`${BUILDINGS_BASE}/${path}`).then((buf) => parseBfp(noteCached("buildings.file", buf.byteLength, buf)))
-        bfpCache.set(path, p)
-        p.catch(() => bfpCache.delete(path))
-    }
-    return p
-}
-/** 건물명 파일 캐시(id5k → 파싱 결과) */
-const namesCache = new Map<string, Promise<BuildingNamesFile>>()
-const fetchNamesCached = (id5k: string) => {
-    let p = namesCache.get(id5k)
-    if (!p) {
-        p = fetchGunzip(`${BUILDINGS_BASE}/names/v1/${id5k.slice(0, 5)}/${id5k}.json.gz`).then(
-            (bytes) => JSON.parse(new TextDecoder().decode(noteCached("buildings.names", bytes.byteLength, bytes))) as BuildingNamesFile,
-        )
-        namesCache.set(id5k, p)
-        p.catch(() => namesCache.delete(id5k))
-    }
-    return p
-}
-
 /**
- * 5K 번호들의 건물명 파일(names/v1)을 받아 id → 이름으로 합친다. 5K 경계에 걸친 건물은 양쪽 파일에 같은 값이 있어
- * 먼저 본 것을 쓴다. 이름 없는 5K 는 n: 0 인 빈 파일이라 존재 여부를 따로 확인하지 않는다
+ * 도엽이 쓸 건물 5K(조정자가 도엽마다 부른다. layerSheets.ts, C2 2026-10-23). sheets 는 도엽 3857 bbox 로 ttp 인덱스에서 고른 5K(그 순서).
+ * 건물 50K 인덱스에서 n_buildings > 0 인 것만 같은 순서로 남기고 이름 파일(names/v1) 경로를 붙인다(C2 전 loadBuildings 의 targets 와 같다).
+ * memo 는 조정자의 묶음 동안 인덱스를 쥐는 곳
  */
-const loadBuildingNames = async (ids5k: string[]) => {
-    const files = await Promise.all(ids5k.map(fetchNamesCached))
-    const byId = new Map<number, { name: string; dong: string; src: number }>()
-    for (const f of files) for (let i = 0; i < f.n; i++) if (!byId.has(f.id[i])) byId.set(f.id[i], { name: f.name[i], dong: f.dong[i], src: f.src[i] })
-    return byId
-}
-
-/**
- * 선택 범위의 건물을 받아 공통 원점 기준으로 합친다(전달 문서 3절 1~5).
- *
- * 1. ttp 인덱스로 범위에 걸린 5K 번호를 고른다(지형과 같은 번호)
- * 2. 건물 50K 인덱스에서 그 5K 의 path 를 보고 n_buildings > 0 인 것만 받는다
- * 3. 좌표를 공통 원점 mm 로 옮기고, flags 의 duplicated 비트가 있는 건물은 id 로 중복 제거
- * 4. 같은 5K 의 건물명 파일(names/v1)을 받아 id 로 건물명·동명을 붙인다
- * 범위 안팎 선별은 하지 않는다(지형 위에 세울 때 지형 밖 건물이 걸러진다).
- *
- * @param bbox3857 지도에서 고른 범위 (EPSG:3857)
- * @param commonOrigin 지형 메쉬의 원점(정수 m, 5179)
- * @returns 건물 목록(xy 는 공통 원점 mm 의 새 배열)과 받은 파일 수
- */
-export const loadBuildings = async (
-    bbox3857: Extent,
-    commonOrigin: [number, number],
-): Promise<{ buildings: Building[]; files: number }> => {
-    const q = await getTtpSheetsInBbox(bbox3857)
-    const ids50k = [...new Set(q.sheets.map((s) => s.id5k.slice(0, 5)))]
+export const buildingsSheetsOf = async (sheets: { id5k: string }[], memo?: JsonMemo): Promise<Layer5k[]> => {
+    const ids50k = [...new Set(sheets.map((s) => s.id5k.slice(0, 5)))]
     const indexes = await Promise.all(
-        ids50k.map((id50k) => fetchJsonCached<BuildingsSheet50k>(`${BUILDINGS_BASE}/index/v1/${id50k}.json`)),
+        ids50k.map((id50k) => fetchJson.index50k<BuildingsSheet50k>(`${BUILDINGS_BASE}/index/v1/${id50k}.json`, memo)),
     )
     const entryById5k = new Map(indexes.flatMap((ix) => ix.sheets.map((s) => [s.id5k, s] as const)))
-    const targets = q.sheets
+    return sheets
         .map((s) => entryById5k.get(s.id5k))
         .filter((e): e is NonNullable<typeof e> => !!e && e.n_buildings > 0)
+        .map((e) => ({ id5k: e.id5k, path: e.path, names: `names/v1/${e.id5k.slice(0, 5)}/${e.id5k}.json.gz` }))
+}
 
-    let downloaded = 0
-    const [files, names] = await Promise.all([
-        Promise.all(
-            targets.map(async (t) => {
-                const file = await fetchBfpCached(t.path)
-                return file
-            }),
-        ),
-        loadBuildingNames(targets.map((t) => t.id5k)),
-    ])
+/** 건물명(이름 파일의 한 행) */
+type BuildingName = { name: string; dong: string; src: number }
+/**
+ * 건물 데이터 층 항목(5K 하나, 파일 원점). names 는 이름 파일의 id → 이름(파일 안에서 먼저 나온 것). sums 는 건물마다 파일 mm 좌표 합 [x, y]
+ * (도엽에서 공통 원점 무게중심을 C2 전과 같은 double 로 구한다. buildingsInTile)
+ */
+export type Buildings5k = { file: ReturnType<typeof parseBfp>; names: Map<number, BuildingName>; sums: Float64Array; bytes: number }
+const buildingsTier = dataTier<Buildings5k>("buildings")
+/** 건물 5K 파일과 이름 파일을 받아 파싱·전처리(데이터 층. 같은 5K 는 다시 받지 않는다) */
+export const fetchBuildings5k = (s: Layer5k) =>
+    buildingsTier(s.path, async () => {
+        const [buf, namesBuf] = await Promise.all([fetchGunzip(`${BUILDINGS_BASE}/${s.path}`), fetchGunzip(`${BUILDINGS_BASE}/${s.names}`)])
+        const file = parseBfp(buf)
+        // 이름 없는 5K 는 n: 0 인 빈 파일이라 존재 여부를 따로 확인하지 않는다
+        const json = JSON.parse(new TextDecoder().decode(namesBuf)) as BuildingNamesFile
+        const names = new Map<number, BuildingName>()
+        for (let i = 0; i < json.n; i++) if (!names.has(json.id[i])) names.set(json.id[i], { name: json.name[i], dong: json.dong[i], src: json.src[i] })
+        const sums = new Float64Array(file.buildings.length * 2)
+        file.buildings.forEach((b, k) => {
+            let sx = 0, sy = 0
+            for (let i = 0; i < b.xy.length; i += 2) {
+                sx += b.xy[i]
+                sy += b.xy[i + 1]
+            }
+            sums[2 * k] = sx
+            sums[2 * k + 1] = sy
+        })
+        return { file, names, sums, bytes: buf.byteLength + namesBuf.byteLength + sums.byteLength }
+    })
 
-    const seen = new Set<number>()
-    const buildings: Building[] = []
-    for (const file of files) {
-        const dx = (file.origin[0] - commonOrigin[0]) * 1000
-        const dy = (file.origin[1] - commonOrigin[1]) * 1000
-        for (const b of file.buildings) {
-            if (b.flags & BUILDING_FLAG.duplicated) {
-                if (seen.has(b.id)) continue
-                seen.add(b.id)
-            }
-            const xy = new Int32Array(b.xy.length)
-            for (let i = 0; i < xy.length; i += 2) {
-                xy[i] = b.xy[i] + dx
-                xy[i + 1] = b.xy[i + 1] + dy
-            }
-            const nm = names.get(b.id)
-            buildings.push(nm ? { ...b, xy, name: nm.name, dong: nm.dong, nameSrc: nm.src } : { ...b, xy })
+/**
+ * 도엽의 건물(전달 문서 3절 1~5, C2 2026-10-23). entries 는 도엽이 걸치는 5K 들(조정자 순서). 그 순서로 합치며 flags 의 duplicated 비트가
+ * 있는 건물은 id 로 처음 것만 남기고(도엽 밖 건물도 중복 판정에는 들어간다), 공통 원점 m 무게중심이 inside 를 만족하는 것만 공통 원점 mm 로
+ * 옮겨 건물명·동명을 붙인다. 이름은 5K 경계에 걸친 건물이 양쪽 파일에 같은 값으로 있어 앞 5K 의 것을 쓴다.
+ * C2 전(loadBuildings → 5K 목록 무게중심 → buildTile 거르기)과 같은 결과·순서다. 무게중심은 "옮긴 정수 mm 의 합 / n / 1000" 이었고,
+ * 파일 원점이 정수 m 라 그 합이 (파일 mm 합 + n × 원점 차) 와 같은 정수여서 같은 double 이다
+ *
+ * @param commonOrigin 지형 메쉬의 원점(정수 m, 5179)
+ * @param inside 무게중심(공통 원점 m)이 도엽 안인지
+ */
+export const buildingsInTile = (entries: Buildings5k[], commonOrigin: [number, number], inside: (cx: number, cy: number) => boolean): Building[] => {
+    const nameOf = (id: number) => {
+        for (const e of entries) {
+            const nm = e.names.get(id)
+            if (nm) return nm
         }
     }
-    return { buildings, files: files.length }
+    const seen = new Set<number>()
+    const out: Building[] = []
+    for (const { file, sums } of entries) {
+        const dx = (file.origin[0] - commonOrigin[0]) * 1000
+        const dy = (file.origin[1] - commonOrigin[1]) * 1000
+        file.buildings.forEach((b, k) => {
+            if (b.flags & BUILDING_FLAG.duplicated) {
+                if (seen.has(b.id)) return
+                seen.add(b.id)
+            }
+            const n = b.xy.length / 2
+            if (!inside((sums[2 * k] + n * dx) / n / 1000, (sums[2 * k + 1] + n * dy) / n / 1000)) return
+            const xy = shiftXy(b.xy, dx, dy)
+            const nm = nameOf(b.id)
+            out.push(nm ? { ...b, xy, name: nm.name, dong: nm.dong, nameSrc: nm.src } : { ...b, xy })
+        })
+    }
+    return out
 }

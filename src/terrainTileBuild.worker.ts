@@ -1,24 +1,23 @@
-import type { Extent } from "ol/extent"
-import proj4 from "proj4"
-
-import { Building, loadBuildingCodes, loadBuildings } from "./buildingsData"
+import { Buildings5k, buildingsInTile, fetchBuildings5k, loadBuildingCodes } from "./buildingsData"
 import { buildBuildingsMesh } from "./buildingsMesh"
 import { createTerrainSampler } from "./terrainSampler"
 import { BuildingTable, buildingTableBuffers, cloneBuildingTable } from "./buildingTable"
+import type { DataLayerId, TileLayerSheets } from "./layerSheets"
+import { createLruCache, createPinnedLruCache, PinnedStats } from "./lruCache"
 import { computeVertexNormals, NORMAL_SMOOTH_ITERATIONS, positionsBounds, smoothVertexNormals } from "./meshNormals"
-import { loadRoadCodes, loadRoads, RoadFace, RoadLine } from "./roadsData"
+import { fetchRoads5k, loadRoadCodes, Roads5k, roadsInTile } from "./roadsData"
 import { buildRoadsMesh, ROAD_LIFT_M, roadDisplayChunks, RoadMesh } from "./roadsMesh"
 import { cloneRoadTable, ROAD_LINE_FLAG, RoadTable, roadTableBuffers } from "./roadTable"
 import { ClippedMesh, clipMeshToConvexPolygon } from "./terrainClip"
-import { dataCacheStats, fetchGunzip, heapBytes, MeshChunk, TinMesh } from "./terrainData"
+import { CacheTable, cacheTableLine, dataCacheTable, fetchGunzip, heapBytes, MeshChunk, sheetsOf, sortCacheTable, TinMesh, XyBounds } from "./terrainData"
 import { TTP_BASE } from "./terrainIndex"
 import { mergeTtpTilesForTile, parseTtp, TtpTile } from "./terrainPslg"
 import { buildSteppedMeshChunks } from "./terrainSteps"
 import type { QueryTile, TileData, TileStyle } from "./terrainTiles.worker"
-import { loadWater, loadWaterCodes, WaterLine, WaterNames, WaterPiece } from "./waterData"
+import { fetchWater5k, loadWaterCodes, Water5k, waterOfTile } from "./waterData"
 import { buildWaterMesh, WATER_LIFT_M, waterDisplayChunks, WaterMesh } from "./waterMesh"
 import { cloneWaterTable, WaterTable, waterTableBuffers } from "./waterTable"
-import { ForestPolygon, loadForest, loadForestCodes } from "./forestData"
+import { fetchForest5k, Forest5k, forestInTile, loadForestCodes } from "./forestData"
 import { buildForestMask, ForestMask, forestResOf } from "./forestMask"
 import { cloneForestTable, ForestTable, forestTableBuffers } from "./forestTable"
 
@@ -29,10 +28,17 @@ import { cloneForestTable, ForestTable, forestTableBuffers } from "./forestTable
  *
  * - 5K 파일(ttp)은 필요할 때 받아 path 로 캐시한다(받을 때마다 fetched 를 알려 조정자가 진행률을 센다. 다른 보조 워커가 같은
  *   파일을 받으면 브라우저 HTTP 캐시가 중복 전송을 막는다)
- * - 자른 TIN(+매끈한 면 법선)은 도엽별로 TIN_CACHE_BYTES 안에서 캐시해 표현 방식·층 간격 전환 때 삼각분할을 건너뛴다
- * - 건물(L5-A): 5K 단위로 한 번 받아 무게중심을 미리 계산해 두고, 도엽은 그 목록에서 bbox → 폴리곤 순으로 거르기만 한다.
- *   전에는 도엽마다 loadBuildings 가 5K 파일 안 모든 건물의 좌표를 복사해 돌려줘 도엽당 약 35 ms 가 들었다. 세운 결과도 도엽별 캐시
- * - reset 은 select 때 캐시를 모두 비운다
+ * - 자른 TIN(+매끈한 면 법선)은 도엽별로 캐시해 표현 방식·층 간격 전환 때 삼각분할을 건너뛴다(C4: 키에 공통 원점. D6 (b): 선택 도엽은 상한 없음,
+ *   선택 밖 도엽은 TIN_CACHE_MAX(64)개)
+ * - 레이어(캐시 통일 C2, 2026-10-23): 조정자가 일감에 실은 레이어별 5K 목록(job.layers, 도엽 3857 bbox 에 걸치는 5K)의 파일을 데이터 층
+ *   (각 *Data.ts 의 fetchX5k. 파일 원점, 레이어마다 5K 32개 LRU(D1-b), reset 에도 남음)에서 꺼내 도엽마다 합친다(xInTile). 공통 원점 사본은 도엽에
+ *   필요한 것만 만든다. 건물은 파일 원점 좌표 합을 미리 계산해 두어 무게중심 판정에 좌표를 옮기지 않는다(L5-A 의 뜻을 유지)
+ * - 레이어는 등록해서 만든다(C3, registerLayer·LAYERS): 레이어마다 다른 것(키·받기·만들기·복제·화면 조각·로그)만 주고, 결과 캐시(레이어마다 선택
+ *   도엽은 상한 없는 고정 칸·밖 도엽은 64개 LRU(D6 (b)), 키에 공통 원점)·복제·저장·실패 경고·시간은 한 곳이 맡는다. 새 레이어를 더할 때 손댈 곳(C3 검토 L2): LAYERS 에 spec 하나
+ *   (clone 은 typed array 를 모두 slice. 결과 캐시가 transfer 로 비워지지 않게. bytes 는 같은 배열을 센다) · LayerFields·TileData 의 필드
+ *   (`fields = {} as LayerFields` 라 output 이 빠뜨려도 타입이 잡지 못한다) · 아래 transferablesOf 와 조정자 postTile 의 transfer 목록 ·
+ *   DataLayerId·layerSheets.ts(조정자가 실을 5K 목록) · 하네스 tile-golden.mjs 의 parseLayerMs·digest. 메모리 보고·로그는 캐시 표라 따로 손댈 것 없다
+ * - reset 은 select 때 원점에 묶인 캐시(TIN·레이어 결과)를 비운다. 파일 원점인 지형 파일(ttp)·레이어 데이터 층은 남긴다(D4)
  */
 export type BuildJob = {
     type: "build"
@@ -42,6 +48,8 @@ export type BuildJob = {
     neighbors: QueryTile[]
     /** 이웃이 든 5K 파일 경로 */
     sheets: { id5k: string; path: string }[]
+    /** 레이어마다 이 도엽이 쓸 5K(조정자가 layerSheets.ts 로 정한다. C2) */
+    layers: TileLayerSheets
     origin: [number, number]
     style: TileStyle
     maxBytes: number
@@ -58,9 +66,12 @@ export type BuildResponse =
     /** 5K 파일을 실제로 내려받았을 때(진행률용) */
     | { type: "fetched"; path: string }
 
-/** 자른 TIN 캐시의 상한(바이트). 넘으면 오래 안 쓴 도엽부터 버린다(그 도엽은 전환 때 다시 삼각분할) */
-const TIN_CACHE_BYTES = 256 * 1048576
-/** 5K 파일 캐시 상한(개) */
+/**
+ * 자른 TIN 캐시에서 **선택 밖 도엽**(둘러보기 스트리밍)의 상한(도엽 수. 계획서 D2 (b): 바이트 256 MB 에서 결과 층과 같은 개수 64 로).
+ * 넘으면 오래 안 쓴 밖 도엽부터 버린다. 선택 도엽은 상한 없이 고정 칸에 둔다(D6 (b), createPinnedLruCache)
+ */
+const TIN_CACHE_MAX = 64
+/** 5K 지형 파일(ttp) 캐시 상한(개. 계획서 D1-c 지금 값 유지) */
 const TTP_CACHE_MAX = 64
 /**
  * 이웃 합치기의 경계 띠 폭(m, L5-C 2026-10-15). 도엽 하나를 만들 때 이웃 5×5 전체 대신 도엽 범위를 이만큼 넓힌 범위 안의 점만 합쳐
@@ -71,18 +82,6 @@ const NEIGHBOR_BAND_M = 100
 
 const post = (msg: BuildResponse, transfer: Transferable[] = []) => self.postMessage(msg, { transfer })
 
-/** 5179 m 좌표를 3857 로 */
-const to3857 = ([x, y]: [number, number]) => proj4("EPSG:5179", "EPSG:3857", [x, y]) as [number, number]
-const extentOf = (pts: [number, number][]): Extent => {
-    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity
-    for (const [x, y] of pts) {
-        if (x < x0) x0 = x
-        if (y < y0) y0 = y
-        if (x > x1) x1 = x
-        if (y > y1) y1 = y
-    }
-    return [x0, y0, x1, y1]
-}
 /** 점이 다각형 안에 있는지(짝홀 규칙) */
 const pointInPolygon = (x: number, y: number, poly: [number, number][]) => {
     let inside = false
@@ -94,214 +93,370 @@ const pointInPolygon = (x: number, y: number, poly: [number, number][]) => {
     return inside
 }
 
-// ---- 캐시 ----
-/** 5K 파일 캐시: path → 파싱 결과 */
-const ttpCache = new Map<string, Promise<ReturnType<typeof parseTtp>>>()
+// ---- 지형 캐시(캐시 통일 C4, 2026-10-23. 계획서 3.4) ----
+type TtpFile = ReturnType<typeof parseTtp>
+/**
+ * 5K 지형 파일 캐시: path → 파싱 결과(LruCache, TTP_CACHE_MAX). 파일 원점이라 공통 원점과 무관해 레이어 데이터 층처럼 select 의 reset 에도
+ * 남긴다(D4 를 지형 파일에도 적용). 바이트는 파싱 결과가 gunzip 한 버퍼의 view 라 그 버퍼 크기
+ */
+const ttpCache = createLruCache<string, Promise<TtpFile>>({ max: TTP_CACHE_MAX, bytesOf: (f) => f.tiles[0]?.lineXY.buffer.byteLength ?? 0 })
+/**
+ * 5K 지형 파일. 쓸 때마다(남아 있던 파일도) fetched 를 알린다(V6 검토 L1): 조정자는 select 마다 받은 경로를 비우고 같은 경로를 한 번만 세므로,
+ * 파일을 reset 에 남긴 뒤에도 상태 표시줄 "지형 받는 중 k/N" 이 C4 전처럼 새 선택의 5K 수까지 찬다
+ */
 const fetchTtpCached = (path: string) => {
-    let p = ttpCache.get(path)
-    if (!p) {
-        p = fetchGunzip(`${TTP_BASE}/${path}`).then((buf) => {
-            post({ type: "fetched", path })
-            return parseTtp(buf)
-        })
-        ttpCache.set(path, p)
-        p.catch(() => ttpCache.delete(path))
-        if (ttpCache.size > TTP_CACHE_MAX) ttpCache.delete(ttpCache.keys().next().value!)
-    } else {
-        // 최근 사용을 뒤로 보내 오래된 것부터 빠지게
-        ttpCache.delete(path)
-        ttpCache.set(path, p)
-    }
+    const p = ttpCache.getOrLoad(path, () => fetchGunzip(`${TTP_BASE}/${path}`).then(parseTtp))
+    void p.then(
+        () => post({ type: "fetched", path }),
+        () => {},
+    )
     return p
 }
 
-type CachedTin = { positions: Float32Array; indices: Uint32Array; normals?: Float32Array; bytes: number }
-/** 도엽별 자른 TIN(+ 매끈한 면 법선) 캐시: id → 사본. 메인으로 transfer 하는 버퍼와 별개 */
-const tinCache = new Map<string, CachedTin>()
-let tinCacheBytes = 0
-const tinCacheGet = (id: string) => {
-    const hit = tinCache.get(id)
-    if (hit) {
-        tinCache.delete(id)
-        tinCache.set(id, hit)
-    }
-    return hit
-}
-const tinCacheSet = (id: string, tin: ClippedMesh) => {
-    const prev = tinCache.get(id)
-    if (prev) {
-        tinCache.delete(id)
-        tinCacheBytes -= prev.bytes
-    }
-    const entry: CachedTin = {
-        positions: tin.positions.slice(),
-        indices: tin.indices.slice(),
-        normals: tin.normals?.slice(),
-        bytes: tin.positions.byteLength + tin.indices.byteLength + (tin.normals?.byteLength ?? 0),
-    }
-    tinCache.set(id, entry)
-    tinCacheBytes += entry.bytes
-    for (const [oldId, old] of tinCache) {
-        if (tinCacheBytes <= TIN_CACHE_BYTES || oldId === id) break
-        tinCache.delete(oldId)
-        tinCacheBytes -= old.bytes
-    }
-}
+type CachedTin = { positions: Float32Array; indices: Uint32Array; normals?: Float32Array }
+/**
+ * 도엽별 자른 TIN(+ 매끈한 면 법선) 캐시: `${도엽 id}|${공통 원점}` → 사본. 메인으로 transfer 하는 버퍼와 별개.
+ * 선택 도엽(job.extra false)은 고정 칸(상한 없음), 밖 도엽은 LRU(TIN_CACHE_MAX)(D6 (b)). 원점에 묶여 reset 에 둘 다 비운다
+ * (키에 원점이 있어 reset 직전 일감이 늦게 끝나도 새 선택에 섞이지 않는다).
+ * 적중 수는 get 이 센다: 법선이 필요한데 법선 없는 항목이면(smoothNormals 끔 계단형 → tin 전환) 적중으로 세고도 다시 만든다(드묾. V6 검토 정보)
+ */
+const tinCache = createPinnedLruCache<string, CachedTin>({
+    max: TIN_CACHE_MAX,
+    bytesOf: (t) => t.positions.byteLength + t.indices.byteLength + (t.normals?.byteLength ?? 0),
+})
 
-/** 도엽별 세운 건물 결과 캐시(표현 방식과 무관하므로 재생성 때 다시 만들지 않는다). transfer 전에 복사해 둔다 */
-const builtBuildingsCache = new Map<string, { buildings: TinMesh | null; buildingTable: BuildingTable | null; built: number }>()
-/** 메모리 측정(2026-10-15): 이 워커가 만든 도엽 수. 캐시 바이트는 memoryStats 가 캐시 내용에서 센다(2026-10-23) */
+/** 메모리 측정(2026-10-15): 이 워커가 만든 도엽 수. 캐시 바이트는 각 LruCache 가 넣을 때(Promise 는 끝났을 때) 잰 값의 합(C5 캐시 표) */
 let builtCount = 0
 
-/** 5K 단위 건물 목록(무게중심 m 미리 계산): `${id5k}@${ox},${oy}` → 목록 */
-type BuildingWithCenter = { b: Building; cx: number; cy: number }
-const buildings5kCache = new Map<string, Promise<BuildingWithCenter[]>>()
-const buildingsOf5k = (id5k: string, bbox3857: Extent, origin: [number, number]) => {
-    const key = `${id5k}@${origin[0]},${origin[1]}`
-    let p = buildings5kCache.get(key)
-    if (!p) {
-        p = loadBuildings(bbox3857, origin).then(({ buildings }) =>
-            buildings.map((b) => {
-                let sx = 0, sy = 0
-                const n = b.xy.length / 2
-                for (let i = 0; i < b.xy.length; i += 2) {
-                    sx += b.xy[i]
-                    sy += b.xy[i + 1]
+// ---- 레이어 등록(캐시 통일 C3, 2026-10-23. 계획서 3.3) ----
+
+/**
+ * 결과 층에서 **선택 밖 도엽**의 상한: 레이어마다 도엽 결과 수(보조 워커 하나당. 계획서 D1-a, 지금 쓰는 도엽 약 42 × 1.5).
+ * 선택 도엽은 상한 없이 고정 칸에 둔다(D6 (b) 2026-10-23: 큰 선택의 표현 방식 전환이 상한을 순서대로 훑어 모두 다시 만들던 것을 막음)
+ */
+const RESULT_CACHE_MAX = 64
+
+/** 레이어가 TileData 에 채우는 필드 */
+type LayerFields = Pick<
+    TileData,
+    | "buildings"
+    | "buildingTable"
+    | "built"
+    | "roads"
+    | "roadChunks"
+    | "roadTable"
+    | "roadStats"
+    | "water"
+    | "waterChunks"
+    | "waterTable"
+    | "waterStats"
+    | "forestMask"
+    | "forestTable"
+    | "forestSkipped"
+>
+/** 레이어를 만들 때 도엽에서 넘겨받는 것 */
+type LayerCtx = {
+    job: BuildJob
+    t: QueryTile
+    style: TileStyle
+    origin: [number, number]
+    /** 도엽 폴리곤(원점 기준 m)과 그 범위 */
+    poly: [number, number][]
+    bbox: XyBounds
+    /** 범위가 도엽 폴리곤의 범위에 닿는지(도로 조각·면 밖 선, 산림 폴리곤. forestMask 의 거르기와 같은 식) */
+    touches: (b: XyBounds) => boolean
+    /** 이웃을 합친 메쉬와 그 부드러운 법선(필요할 때 한 번만 만든다) */
+    mergedMesh: () => TinMesh
+    mergedNormals: () => Float32Array
+    maxBytes: number
+    /** 계단형에도 매끈한 법선을 싣는지(style.smoothNormals) */
+    smoothStepped: boolean
+}
+/**
+ * 레이어마다 다른 것(계획서 3.3 LayerBuilder). 캐시 조회·복제·저장·바이트·실패 경고·시간은 registerLayer 의 run 이 맡는다.
+ * R = 결과 캐시에 두는 것(공통 원점, 표현 방식과 무관), L = load 가 데이터 층에서 꺼낸 것
+ */
+type LayerSpec<R, L> = {
+    id: DataLayerId
+    /** 실패 경고에 쓰는 이름("도엽 X 건물 실패:") */
+    label: string
+    /** false 면 받지도 만들지도 않는다(forest=0). 없으면 늘 켬 */
+    enabled?: (style: TileStyle) => boolean
+    /** 결과 캐시 키: 도엽 id + 결과에 영향을 주는 스위치 + 공통 원점(새 선택의 다른 원점 결과가 섞이지 않게) */
+    key: (c: LayerCtx) => string
+    empty: () => R
+    /**
+     * 코드표와 도엽이 걸치는 5K 의 데이터 층 항목(job.layers). 던질 수 있는 일(sheetsOf: 조정자가 인덱스를 못 읽은 레이어)을 먼저 하고 받기를 시작한다.
+     * 받기를 먼저 시작하고 던지면 그 Promise 를 아무도 기다리지 않아, 받기도 실패할 때 "Uncaught (in promise)" 가 따로 찍힌다(C2 검토 L1)
+     */
+    load: (c: LayerCtx) => Promise<L>
+    /** 결과와 로그용 메모(지형 밖 수·칠하기 시간 등) */
+    build: (c: LayerCtx, loaded: L) => { result: R; note: string }
+    /** 결과 캐시에 넣을 때와 꺼낼 때의 사본(메인으로 transfer 하는 버퍼와 별개) */
+    clone: (r: R) => R
+    /** 결과의 typed array 바이트(메모리 보고) */
+    bytes: (r: R) => number
+    /** 표현 방식마다 다시 만드는 화면 조각(도로·물). 없으면 [] */
+    display?: (r: R, c: LayerCtx) => MeshChunk[]
+    output: (r: R, chunks: MeshChunk[]) => Partial<LayerFields>
+    /** 도엽 로그 한 줄의 이 레이어 조각. ms 는 받기(wait)를 뺀 시간. 형식은 하네스 parseLayerMs·perf-check cacheFlags 가 읽는다 */
+    log: (r: R, s: { cached: boolean; note: string; wait: number; ms: number }) => string
+}
+/** 등록된 레이어(결과 캐시를 쥐고 도엽마다 run) */
+type RegisteredLayer = {
+    id: DataLayerId
+    run: (c: LayerCtx) => Promise<{ fields: Partial<LayerFields>; log: string }>
+    stats: () => PinnedStats
+    clear: () => void
+}
+/**
+ * 레이어 하나를 등록한다. run 은 결과 캐시를 보고(적중이면 사본) 없으면 load → build 하고 사본을 넣는다. 화면 조각까지 실패하면 경고하고
+ * 그때까지의 결과를 쓴다(C3 전 레이어 블록의 try 와 같은 범위). 결과 캐시는 레이어마다 고정 칸(선택 도엽, 상한 없음) + LRU(밖 도엽,
+ * RESULT_CACHE_MAX)(D6 (b)), select 의 reset 에 둘 다 비운다
+ */
+const registerLayer = <R, L>(spec: LayerSpec<R, L>): RegisteredLayer => {
+    /** 결과와 넣을 때 잰 바이트. 꺼낼 때 바이트가 다르면 사본이 아닌 버퍼가 transfer 로 비워진 것(clone 의 slice 누락)으로 보고 다시 만든다 */
+    const cache = createPinnedLruCache<string, { r: R; bytes: number }>({ max: RESULT_CACHE_MAX, bytesOf: (v) => v.bytes })
+    let warnedDetached = false
+    return {
+        id: spec.id,
+        stats: () => cache.stats(),
+        clear: () => cache.clear(),
+        run: async (c) => {
+            const start = performance.now()
+            let result = spec.empty()
+            let chunks: MeshChunk[] = []
+            let cached = false
+            let note = ""
+            /** 코드표·데이터 층을 기다린 시간(ms. 처음 받는 5K 는 네트워크가 대부분) */
+            let wait = 0
+            if (spec.enabled?.(c.style) !== false) {
+                try {
+                    const key = spec.key(c)
+                    let hit = cache.get(key)
+                    if (hit && spec.bytes(hit.r) !== hit.bytes) {
+                        // 사본 규율이 깨진 경우(C3 검토 L1): 빈 버퍼를 내보내지 않고 놓침으로 다시 만든다. 정상 동작에서는 생기지 않는다
+                        if (!warnedDetached) console.warn(`${spec.label} 결과 캐시 항목의 버퍼가 비었음(clone 의 사본 누락?). 다시 만든다`)
+                        warnedDetached = true
+                        cache.delete(key)
+                        hit = undefined
+                    }
+                    if (hit) {
+                        result = spec.clone(hit.r)
+                        cached = true
+                        note = "(캐시)"
+                    } else {
+                        const loaded = await spec.load(c)
+                        wait = performance.now() - start
+                        const built = spec.build(c, loaded)
+                        result = built.result
+                        note = built.note
+                        const copy = spec.clone(result)
+                        // 선택 도엽은 고정 칸, 선택 밖(둘러보기) 도엽은 LRU(D6 (b))
+                        cache.set(key, { r: copy, bytes: spec.bytes(copy) }, !c.job.extra)
+                    }
+                    if (spec.display) chunks = spec.display(result, c)
+                } catch (err) {
+                    console.warn(`도엽 ${c.t.name} ${spec.label} 실패:`, err)
                 }
-                return { b, cx: sx / n / 1000, cy: sy / n / 1000 }
-            }),
-        )
-        buildings5kCache.set(key, p)
-        p.catch(() => buildings5kCache.delete(key))
+            }
+            const ms = performance.now() - start - wait
+            return { fields: spec.output(result, chunks), log: spec.log(result, { cached, note, wait, ms }) }
+        },
     }
-    return p
 }
 
-/**
- * 도엽별 얹은 도로 결과 캐시(roadsMesh 는 지형 평면 그대로라 표현 방식과 무관. 화면 조각은 표현 방식마다 다시 만든다).
- * 키는 도엽 id + 얹기 스위치(clip·bridge). transfer 전에 복사해 둔다
- */
-const builtRoadsCache = new Map<string, { roads: RoadMesh | null; roadTable: RoadTable | null; stats: TileData["roadStats"] }>()
-/** 5K 단위 도로 조각·선 목록(xy 범위 m 미리 계산): `${id5k}@${ox},${oy}` → 목록 */
-type WithBounds<T> = { item: T; x0: number; y0: number; x1: number; y1: number }
-const roads5kCache = new Map<string, Promise<{ faces: WithBounds<RoadFace>[]; lines: WithBounds<RoadLine>[] }>>()
-const xyBounds = <T extends { xy: Int32Array }>(item: T): WithBounds<T> => {
-    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity
-    for (let i = 0; i < item.xy.length; i += 2) {
-        const x = item.xy[i] / 1000, y = item.xy[i + 1] / 1000
-        if (x < x0) x0 = x
-        if (x > x1) x1 = x
-        if (y < y0) y0 = y
-        if (y > y1) y1 = y
-    }
-    return { item, x0, y0, x1, y1 }
-}
-const roadsOf5k = (id5k: string, bbox3857: Extent, origin: [number, number]) => {
-    const key = `${id5k}@${origin[0]},${origin[1]}`
-    let p = roads5kCache.get(key)
-    if (!p) {
-        p = loadRoads(bbox3857, origin).then(({ faces, lines }) => ({ faces: faces.map(xyBounds), lines: lines.map(xyBounds) }))
-        roads5kCache.set(key, p)
-        p.catch(() => roads5kCache.delete(key))
-    }
-    return p
-}
+const sumBytes = (...xs: ({ byteLength: number } | null | undefined)[]) => xs.reduce((s: number, x) => s + (x?.byteLength ?? 0), 0)
+const tableBytes = (bufs: ArrayBuffer[] | null) => bufs?.reduce((s, b) => s + b.byteLength, 0) ?? 0
+const fetched = (wait: number) => (wait > 50 ? `받기 ${Math.round(wait)}ms + ` : "")
 
-/**
- * 도엽별 얹은 물 결과 캐시(waterMesh 는 지형 평면 그대로. 화면 조각은 표현 방식마다). 키는 도엽 id + 얹기 스위치(clip·zMode·lines·폭).
- * 5K 단위 물 조각·선 목록은 waterOf5k(`${id5k}@${ox},${oy}`)
- */
-const builtWaterCache = new Map<string, { water: WaterMesh | null; waterTable: WaterTable | null; stats: TileData["waterStats"] }>()
-const water5kCache = new Map<string, Promise<{ pieces: WaterPiece[]; lines: WaterLine[]; names: WaterNames }>>()
-const waterOf5k = (id5k: string, bbox3857: Extent, origin: [number, number]) => {
-    const key = `${id5k}@${origin[0]},${origin[1]}`
-    let p = water5kCache.get(key)
-    if (!p) {
-        p = loadWater(bbox3857, origin).then(({ pieces, lines, names }) => ({ pieces, lines, names }))
-        water5kCache.set(key, p)
-        p.catch(() => water5kCache.delete(key))
-    }
-    return p
-}
+type BuildingsResult = { buildings: TinMesh | null; buildingTable: BuildingTable | null; built: number }
+type RoadsResult = { roads: RoadMesh | null; roadTable: RoadTable | null; stats: TileData["roadStats"] }
+type WaterResult = { water: WaterMesh | null; waterTable: WaterTable | null; stats: TileData["waterStats"] }
+type ForestResult = { mask: ForestMask | null; table: ForestTable | null; skipped: number }
 
-/**
- * 도엽별 산림 마스크 캐시(지형 표현 방식과 무관. 계단형 판·벽도 같은 마스크를 xy 로 읽는다). 키는 도엽 id + 픽셀 크기(forestres=).
- * 5K 단위 임상도 폴리곤(flags & 1 중복 제거한 것)은 forestOf5k(`${id5k}@${ox},${oy}`)
- */
-const builtForestCache = new Map<string, { mask: ForestMask | null; table: ForestTable | null; skipped: number }>()
-const forest5kCache = new Map<string, Promise<ForestPolygon[]>>()
-const forestOf5k = (id5k: string, bbox3857: Extent, origin: [number, number]) => {
-    const key = `${id5k}@${origin[0]},${origin[1]}`
-    let p = forest5kCache.get(key)
-    if (!p) {
-        p = loadForest(bbox3857, origin).then(({ polys }) => polys)
-        forest5kCache.set(key, p)
-        p.catch(() => forest5kCache.delete(key))
-    }
-    return p
-}
+/** 등록된 레이어(이 순서로 만든다. 로그 조각도 이 순서) */
+const LAYERS: RegisteredLayer[] = [
+    // 건물: 걸치는 5K 들에서 무게중심이 이 도엽 안인 것만(bbox 로 먼저 거른 뒤 폴리곤). 바닥 높이는 이웃까지 합친 메쉬로. 표현 방식과 무관
+    registerLayer<BuildingsResult, [Awaited<ReturnType<typeof loadBuildingCodes>>, Buildings5k[]]>({
+        id: "buildings",
+        label: "건물",
+        key: (c) => `${c.t.map_id}|${c.origin}`,
+        empty: () => ({ buildings: null, buildingTable: null, built: 0 }),
+        load: (c) => {
+            const sheets = sheetsOf(c.job.layers.buildings)
+            return Promise.all([loadBuildingCodes(), Promise.all(sheets.map(fetchBuildings5k))])
+        },
+        build: (c, [codes, entries]) => {
+            const { x0, y0, x1, y1 } = c.bbox
+            const inside = buildingsInTile(entries, c.origin, (cx, cy) => !(cx < x0 || cx > x1 || cy < y0 || cy > y1) && pointInPolygon(cx, cy, c.poly))
+            if (inside.length === 0) return { result: { buildings: null, buildingTable: null, built: 0 }, note: "" }
+            const r = buildBuildingsMesh(inside, c.mergedMesh(), codes)
+            return { result: { buildings: r.mesh, buildingTable: r.table, built: r.built }, note: "" }
+        },
+        clone: (r) => ({
+            buildings: r.buildings && { ...r.buildings, positions: r.buildings.positions.slice(), indices: r.buildings.indices.slice() },
+            buildingTable: r.buildingTable && cloneBuildingTable(r.buildingTable),
+            built: r.built,
+        }),
+        bytes: (r) => sumBytes(r.buildings?.positions, r.buildings?.indices) + tableBytes(r.buildingTable && buildingTableBuffers(r.buildingTable)),
+        output: (r) => ({ buildings: r.buildings, buildingTable: r.buildingTable, built: r.built }),
+        // 건물은 받기를 따로 적지 않고 받기까지 넣은 시간(C3 전과 같은 형식)
+        log: (r, s) => `건물 ${r.built}${s.cached ? "(캐시)" : ""} ${Math.round(s.wait + s.ms)}ms`,
+    }),
+    // 도로: 걸치는 5K 들에서 도엽 범위에 닿는 조각만(선은 교량 보간·띠용으로 전부 넘긴다). 높이는 이웃까지 합친 메쉬로(roadsMesh A + B).
+    // 얹은 메쉬는 표현 방식과 무관해 캐시하고(키에 얹기 스위치 clip·bridge), 화면 조각(띄움·계단화)은 표현 방식마다 만든다
+    registerLayer<RoadsResult, [Awaited<ReturnType<typeof loadRoadCodes>>, Roads5k[]]>({
+        id: "roads",
+        label: "도로",
+        key: (c) => {
+            const s = c.style.roads ?? {}
+            return `${c.t.map_id}|${s.clip !== false}|${s.bridge !== false}|${c.origin}`
+        },
+        empty: () => ({ roads: null, roadTable: null, stats: { built: 0, bridges: 0, hidden: 0 } }),
+        load: (c) => {
+            const sheets = sheetsOf(c.job.layers.roads)
+            return Promise.all([loadRoadCodes(), Promise.all(sheets.map(fetchRoads5k))])
+        },
+        build: (c, [codes, entries]) => {
+            const s = c.style.roads ?? {}
+            // 도엽 범위에 걸치는 조각·면 밖 선을 모두 넘기고 roadsMesh 가 도엽 폴리곤으로 자른다(지형처럼. 2026-10-19 지적 by @nanangqq: 무게중심
+            // 기준이면 경계 조각이 도엽 밖으로 길게 튀어나갔다). 경계에 걸친 조각은 양쪽 도엽이 각자 자기 부분만 얹는다. 교량 보간용 선은 전부
+            const { faces: inside, lines: linesHere } = roadsInTile(
+                entries,
+                c.origin,
+                (_f, b) => c.touches(b),
+                (l, b) => !(l.flags & ROAD_LINE_FLAG.outsideFace) || c.touches(b),
+            )
+            if (!(inside.length > 0 || linesHere.some((l) => l.flags & ROAD_LINE_FLAG.outsideFace))) {
+                return { result: { roads: null, roadTable: null, stats: { built: 0, bridges: 0, hidden: 0 } }, note: "" }
+            }
+            const r = buildRoadsMesh(inside, linesHere, c.mergedMesh(), codes, { clip: s.clip, bridge: s.bridge, clipTo: c.poly, terrainNormals: c.mergedNormals() })
+            const has = r.mesh.indices.length > 0
+            return {
+                result: { roads: has ? r.mesh : null, roadTable: has ? r.table : null, stats: { built: r.built, bridges: r.bridges, hidden: r.hidden } },
+                note: r.skipped ? `(지형 밖 ${r.skipped})` : "",
+            }
+        },
+        clone: (r) => ({
+            roads: r.roads && { ...r.roads, positions: r.roads.positions.slice(), indices: r.roads.indices.slice(), normals: r.roads.normals.slice() },
+            roadTable: r.roadTable && cloneRoadTable(r.roadTable),
+            stats: r.stats,
+        }),
+        bytes: (r) => sumBytes(r.roads?.positions, r.roads?.indices, r.roads?.normals) + tableBytes(r.roadTable && roadTableBuffers(r.roadTable)),
+        display: (r, c) => {
+            if (!r.roads || !r.roadTable) return []
+            const lift = c.style.roads?.lift ?? ROAD_LIFT_M
+            const zAt = c.style.mode === "stepped" ? (() => { const m = c.mergedMesh(); return createTerrainSampler(m.positions, m.indices) })() : null
+            return roadDisplayChunks(r.roads, r.roadTable, c.style.mode, c.style.step, lift, c.maxBytes, zAt, c.smoothStepped)
+        },
+        // 메인 사본에는 법선을 보내지 않는다(쓰는 곳이 없다: 내보내기는 법선을 안 쓰고, 표현 방식 전환의 화면 조각은 워커 캐시에서 다시 만든다.
+        // 2026-10-19 지적 by @nanangqq). 법선은 워커 캐시와 매끈한 면 화면 조각에만
+        output: (r, chunks) => ({
+            roads: r.roads && { origin: r.roads.origin, positions: r.roads.positions, indices: r.roads.indices },
+            roadChunks: chunks,
+            roadTable: r.roadTable,
+            roadStats: r.stats,
+        }),
+        log: (r, s) => `도로 ${r.stats.built}(교량 ${r.stats.bridges}, 숨김 ${r.stats.hidden})${s.note} ${fetched(s.wait)}${Math.round(s.ms)}ms`,
+    }),
+    // 물: 걸치는 5K 들의 조각·선을 전부 넘기고 waterMesh 가 도엽 범위에 걸친 것만 얹어 도엽 폴리곤으로 자른다(D2. 폴리곤 안 선분 판정에는 조각 전부가
+    // 필요하다). 높이는 이웃까지 합친 메쉬로(A + B, D1 경로). 얹은 메쉬는 캐시하고(키에 얹기 스위치 clip·zMode·lines·폭·분위수) 화면 조각(띄움)은 그때마다
+    registerLayer<WaterResult, [Awaited<ReturnType<typeof loadWaterCodes>>, Water5k[]]>({
+        id: "water",
+        label: "물",
+        key: (c) => {
+            const w = c.style.water ?? {}
+            return `${c.t.map_id}|${w.clip !== false}|${w.zMode ?? "flat"}|${w.lines !== false}|${w.ribbonWidth ?? ""}|${w.levelQuantile ?? ""}|${c.origin}`
+        },
+        empty: () => ({ water: null, waterTable: null, stats: { built: 0, rivers: 0, lakes: 0, ribbons: 0 } }),
+        load: (c) => {
+            const sheets = sheetsOf(c.job.layers.water)
+            return Promise.all([loadWaterCodes(), Promise.all(sheets.map(fetchWater5k))])
+        },
+        build: (c, [codes, entries]) => {
+            const w = c.style.water ?? {}
+            const all = waterOfTile(entries, c.origin)
+            if (!(all.pieces.length > 0 || all.lines.length > 0)) {
+                return { result: { water: null, waterTable: null, stats: { built: 0, rivers: 0, lakes: 0, ribbons: 0 } }, note: "" }
+            }
+            const r = buildWaterMesh(all.pieces, all.lines, c.mergedMesh(), codes, all.names, {
+                clip: w.clip,
+                zMode: w.zMode,
+                lines: w.lines,
+                ribbonWidth: w.ribbonWidth,
+                levelQuantile: w.levelQuantile,
+                clipTo: c.poly,
+                terrainNormals: c.mergedNormals(),
+            })
+            const has = r.mesh.indices.length > 0
+            return {
+                result: { water: has ? r.mesh : null, waterTable: has ? r.table : null, stats: { built: r.built, rivers: r.rivers, lakes: r.lakes, ribbons: r.ribbons } },
+                note: r.skipped ? `(지형 밖 ${r.skipped})` : "",
+            }
+        },
+        clone: (r) => ({
+            water: r.water && { ...r.water, positions: r.water.positions.slice(), indices: r.water.indices.slice(), normals: r.water.normals.slice() },
+            waterTable: r.waterTable && cloneWaterTable(r.waterTable),
+            stats: r.stats,
+        }),
+        bytes: (r) => sumBytes(r.water?.positions, r.water?.indices, r.water?.normals) + tableBytes(r.waterTable && waterTableBuffers(r.waterTable)),
+        // 수면은 자체 면이라 표현 방식과 무관하게 같은 조각(계단화 없음)
+        display: (r, c) => (r.water && r.waterTable ? waterDisplayChunks(r.water, c.style.water?.lift ?? WATER_LIFT_M) : []),
+        output: (r, chunks) => ({
+            water: r.water && { origin: r.water.origin, positions: r.water.positions, indices: r.water.indices },
+            waterChunks: chunks,
+            waterTable: r.waterTable,
+            waterStats: r.stats,
+        }),
+        log: (r, s) => `물 ${r.stats.built}(하천 ${r.stats.rivers}, 호소 ${r.stats.lakes}, 띠 ${r.stats.ribbons})${s.note} ${fetched(s.wait)}${Math.round(s.ms)}ms`,
+    }),
+    // 산림(안 라): 걸치는 5K 들의 임상도 폴리곤을 이 도엽 bbox 격자에 칠한 마스크. 메쉬를 만들지 않고 지형 셰이더가 색만 바꾼다(지형 표현 방식과 무관.
+    // 계단형 판·벽도 같은 마스크를 xy 로 읽는다). 키에 픽셀 크기(forestres=). forest=0 이면 받지도 칠하지도 않는다
+    registerLayer<ForestResult, [Awaited<ReturnType<typeof loadForestCodes>>, Forest5k[]]>({
+        id: "forest",
+        label: "산림",
+        enabled: (style) => style.forest?.enabled !== false,
+        key: (c) => `${c.t.map_id}|${forestResOf(c.style.forest?.res)}|${c.origin}`,
+        empty: () => ({ mask: null, table: null, skipped: 0 }),
+        load: (c) => {
+            const sheets = sheetsOf(c.job.layers.forest)
+            return Promise.all([loadForestCodes(), Promise.all(sheets.map(fetchForest5k))])
+        },
+        build: (c, [codes, entries]) => {
+            // buildForestMask 가 맨 먼저 도엽 범위에 닿는 폴리곤만 남기므로 같은 판정으로 미리 골라 그것만 옮긴다(결과는 전부 넘길 때와 같다)
+            const r = buildForestMask(forestInTile(entries, c.origin, c.touches), c.poly, forestResOf(c.style.forest?.res), codes)
+            return {
+                result: { mask: r.mask, table: r.mask ? r.table : null, skipped: r.skipped },
+                note: `${r.mask ? `${r.mask.width}×${r.mask.height}` : "없음"} 칠하기 ${r.ms.toFixed(1)}ms`,
+            }
+        },
+        clone: (r) => ({ mask: r.mask && { ...r.mask, data: r.mask.data.slice() }, table: r.table && cloneForestTable(r.table), skipped: r.skipped }),
+        bytes: (r) => sumBytes(r.mask?.data) + tableBytes(r.table && forestTableBuffers(r.table)),
+        output: (r) => ({ forestMask: r.mask, forestTable: r.table, forestSkipped: r.skipped }),
+        log: (r, s) => `산림 ${r.table?.count ?? 0}${r.skipped ? `(건너뜀 ${r.skipped})` : ""} ${s.note} ${fetched(s.wait)}${Math.round(s.ms)}ms`,
+    }),
+]
 
+/** select 때 원점에 묶인 캐시(자른 TIN·레이어 결과)를 비운다. 파일 원점인 지형 파일·레이어 데이터 층은 남긴다(D4) */
 const reset = () => {
-    ttpCache.clear()
     tinCache.clear()
-    tinCacheBytes = 0
-    builtBuildingsCache.clear()
-    buildings5kCache.clear()
-    builtRoadsCache.clear()
-    roads5kCache.clear()
-    builtWaterCache.clear()
-    water5kCache.clear()
-    builtForestCache.clear()
-    forest5kCache.clear()
+    for (const layer of LAYERS) layer.clear()
 }
 
 /**
- * 캐시 메모리 측정(2026-10-23, 계획서 19절): 이 워커 캐시의 항목 수·바이트. 층은 데이터 모듈 파일(data, 지우지 않음) · 5K 목록(lists) ·
- * 도엽 결과(results)와 지형(5K 파일·자른 TIN). typed array 만 센다(항목 객체·구멍 배열·이름 문자열은 빠져 실제 힙은 더 크다).
- * 디버그 페이지 memory() 와 50개마다 찍는 로그가 부른다
+ * 캐시 메모리 보고(계획서 3.5, C5 2026-10-23): 이 워커의 모든 LruCache 를 한 표로(caches: `층.레이어` → stats()). 이 워커가 쥐는 것은
+ * file.terrain(ttp)·result.terrain(자른 TIN)·result.<레이어>(레이어 결과)와 데이터 모듈의 file.<레이어>(데이터 층)·fixed.<레이어>(코드표).
+ * 바이트는 typed array(와 JSON 글자 수)만 센다(항목 객체·구멍 배열·이름 문자열은 빠져 실제 힙은 더 크다). 디버그 페이지 memory() 와 50개마다 찍는 로그가 부른다
  */
 const memoryStats = async () => {
-    const sum = (...xs: ({ byteLength: number } | null | undefined)[]) => xs.reduce((s: number, x) => s + (x?.byteLength ?? 0), 0)
-    const tables = (bufs: ArrayBuffer[] | null) => bufs?.reduce((s, b) => s + b.byteLength, 0) ?? 0
-    const xy = (items: { xy: Int32Array }[]) => items.reduce((s, it) => s + it.xy.byteLength, 0)
-    const lists = async <V>(cache: Map<string, Promise<V>>, bytesOf: (v: V) => number) => {
-        let bytes = 0
-        for (const r of await Promise.allSettled(cache.values())) if (r.status === "fulfilled") bytes += bytesOf(r.value)
-        return { count: cache.size, bytes }
-    }
-    const results = <V>(cache: Map<string, V>, bytesOf: (v: V) => number) => {
-        let bytes = 0
-        for (const v of cache.values()) bytes += bytesOf(v)
-        return { count: cache.size, bytes }
-    }
-    return {
-        built: builtCount,
-        heap: heapBytes(),
-        // 5K 파일은 파싱 결과가 gunzip 한 버퍼의 view 라 그 버퍼 크기
-        terrain: { ttp: await lists(ttpCache, (f) => f.tiles[0]?.lineXY.buffer.byteLength ?? 0), tin: { count: tinCache.size, bytes: tinCacheBytes } },
-        lists: {
-            buildings: await lists(buildings5kCache, (l) => xy(l.map((x) => x.b))),
-            roads: await lists(roads5kCache, (l) => xy(l.faces.map((x) => x.item)) + xy(l.lines.map((x) => x.item))),
-            water: await lists(water5kCache, (l) => xy(l.pieces) + xy(l.lines)),
-            forest: await lists(forest5kCache, xy),
-        },
-        results: {
-            buildings: results(builtBuildingsCache, (v) => sum(v.buildings?.positions, v.buildings?.indices) + tables(v.buildingTable && buildingTableBuffers(v.buildingTable))),
-            roads: results(builtRoadsCache, (v) => sum(v.roads?.positions, v.roads?.indices, v.roads?.normals) + tables(v.roadTable && roadTableBuffers(v.roadTable))),
-            water: results(builtWaterCache, (v) => sum(v.water?.positions, v.water?.indices, v.water?.normals) + tables(v.waterTable && waterTableBuffers(v.waterTable))),
-            forest: results(builtForestCache, (v) => sum(v.mask?.data) + tables(v.table && forestTableBuffers(v.table))),
-        },
-        data: dataCacheStats,
-    }
+    const caches: CacheTable = { "file.terrain": ttpCache.stats(), "result.terrain": tinCache.stats(), ...dataCacheTable() }
+    for (const l of LAYERS) caches[`result.${l.id}`] = l.stats()
+    return { built: builtCount, heap: heapBytes(), caches: sortCacheTable(caches) }
 }
 export type HelperMemory = Awaited<ReturnType<typeof memoryStats>>
-/** 50개마다 콘솔에(메모리 측정 2026-10-15. 2026-10-23 표를 넣고 5K 목록·데이터 모듈 바이트를 더함). 넷은 건물·도로·물·산림 순 */
-const logMemory = (m: HelperMemory) => {
-    const mb = (s: { bytes: number }) => (s.bytes / 1048576).toFixed(1)
-    const four = (o: HelperMemory["lists"]) => `${[o.buildings, o.roads, o.water, o.forest].map(mb).join("·")} MB(${[o.buildings, o.roads, o.water, o.forest].map((s) => s.count).join("·")}개)`
-    const data = Object.entries(m.data).map(([k, s]) => `${k} ${mb(s)} MB(${s.count})`).join(", ")
-    console.log(`메모리(보조 워커 캐시): 만든 도엽 ${m.built}, 자른 TIN ${mb(m.terrain.tin)} MB(${m.terrain.tin.count}개), 5K 파일 ${mb(m.terrain.ttp)} MB(${m.terrain.ttp.count}개), 도엽 결과 ${four(m.results)}, 5K 목록 ${four(m.lists)}, 데이터 모듈 ${data}`)
-}
+/** 50개마다 콘솔에(메모리 측정 2026-10-15, C5 에서 캐시 표 한 줄로) */
+const logMemory = (m: HelperMemory) => console.log(`메모리(보조 워커 캐시): 만든 도엽 ${m.built}, ${cacheTableLine(m.caches)}`)
 
 /**
  * 도엽 하나를 만든다(이웃과 합쳐 삼각분할 → 도엽 폴리곤으로 자르기 → 스타일대로 조각 → 건물).
@@ -346,7 +501,8 @@ const buildTile = async (job: BuildJob): Promise<{ data: TileData; transfer: Tra
         }
         return mergedNormalsCache
     }
-    const cachedTin = tinCacheGet(t.map_id)
+    const tinKey = `${t.map_id}|${origin}`
+    const cachedTin = tinCache.get(tinKey)
     let tin: ClippedMesh
     let fromCache = false
     if (cachedTin && (!needNormals || cachedTin.normals)) {
@@ -356,7 +512,7 @@ const buildTile = async (job: BuildJob): Promise<{ data: TileData; transfer: Tra
         // 매끈한 면: 법선은 이웃을 합친 메쉬에서 계산한 뒤 자를 때 같이 실어 경계 정점도 이웃 삼각형을 본 법선을 갖는다
         const m = mergedMesh()
         tin = clipMeshToConvexPolygon(m, poly, needNormals ? mergedNormals() : undefined)
-        tinCacheSet(t.map_id, tin)
+        tinCache.set(tinKey, { positions: tin.positions.slice(), indices: tin.indices.slice(), normals: tin.normals?.slice() }, !extra)
     }
     const t1 = performance.now()
     let terrain: MeshChunk[]
@@ -367,198 +523,35 @@ const buildTile = async (job: BuildJob): Promise<{ data: TileData; transfer: Tra
     }
     const t2 = performance.now()
 
-    // 건물: 5K 단위 목록에서 무게중심이 이 도엽 안인 것만(bbox 로 먼저 거른 뒤 폴리곤). 바닥 높이는 이웃까지 합친 메쉬로
-    let buildings: TinMesh | null = null
-    let buildingTable: BuildingTable | null = null
-    let built = 0
-    const cached = builtBuildingsCache.get(t.map_id)
-    if (cached) {
-        buildings = cached.buildings && { ...cached.buildings, positions: cached.buildings.positions.slice(), indices: cached.buildings.indices.slice() }
-        buildingTable = cached.buildingTable && cloneBuildingTable(cached.buildingTable)
-        built = cached.built
-    } else {
-        try {
-            const [codes, all] = await Promise.all([loadBuildingCodes(), buildingsOf5k(t.id5k, extentOf(t.corners.map(to3857)), origin)])
-            const bx0 = Math.min(...poly.map((p) => p[0])), bx1 = Math.max(...poly.map((p) => p[0]))
-            const by0 = Math.min(...poly.map((p) => p[1])), by1 = Math.max(...poly.map((p) => p[1]))
-            const inside: Building[] = []
-            for (const { b, cx, cy } of all) {
-                if (cx < bx0 || cx > bx1 || cy < by0 || cy > by1) continue
-                if (pointInPolygon(cx, cy, poly)) inside.push(b)
-            }
-            if (inside.length > 0) {
-                const result = buildBuildingsMesh(inside, mergedMesh(), codes)
-                buildings = result.mesh
-                buildingTable = result.table
-                built = result.built
-            }
-            builtBuildingsCache.set(t.map_id, {
-                buildings: buildings && { ...buildings, positions: buildings.positions.slice(), indices: buildings.indices.slice() },
-                buildingTable: buildingTable && cloneBuildingTable(buildingTable),
-                built,
-            })
-        } catch (err) {
-            console.warn(`도엽 ${t.name} 건물 실패:`, err)
-        }
+    // 레이어(등록 순서대로. 결과 캐시·실패 경고·시간은 registerLayer 가 맡는다)
+    const bbox: XyBounds = {
+        x0: Math.min(...poly.map((p) => p[0])),
+        y0: Math.min(...poly.map((p) => p[1])),
+        x1: Math.max(...poly.map((p) => p[0])),
+        y1: Math.max(...poly.map((p) => p[1])),
     }
-    const t3 = performance.now()
-
-    // 도로: 5K 단위 목록에서 무게중심이 이 도엽 안인 조각만(선은 교량 보간·띠용으로 전부 넘긴다). 높이는 이웃까지 합친 메쉬로(roadsMesh A + B).
-    // 얹은 메쉬는 표현 방식과 무관해 캐시하고, 화면 조각(띄움·계단화)은 표현 방식마다 만든다
-    let roads: RoadMesh | null = null
-    let roadTable: RoadTable | null = null
-    let roadStats: TileData["roadStats"] = { built: 0, bridges: 0, hidden: 0 }
-    let roadChunks: MeshChunk[] = []
-    const roadsStyle = style.roads ?? {}
-    const roadsKey = `${t.map_id}|${roadsStyle.clip !== false}|${roadsStyle.bridge !== false}`
-    const cachedRoads = builtRoadsCache.get(roadsKey)
-    let roadsNote = ""
-    /** 5K 도로 파일·코드표를 기다린 시간(ms. 처음 받는 5K 는 네트워크가 대부분) */
-    let roadsWait = 0
-    try {
-        if (cachedRoads) {
-            roads = cachedRoads.roads && {
-                ...cachedRoads.roads,
-                positions: cachedRoads.roads.positions.slice(),
-                indices: cachedRoads.roads.indices.slice(),
-                normals: cachedRoads.roads.normals.slice(),
-            }
-            roadTable = cachedRoads.roadTable && cloneRoadTable(cachedRoads.roadTable)
-            roadStats = cachedRoads.stats
-            roadsNote = "(캐시)"
-        } else {
-            const [codes, all] = await Promise.all([loadRoadCodes(), roadsOf5k(t.id5k, extentOf(t.corners.map(to3857)), origin)])
-            roadsWait = performance.now() - t3
-            const bx0 = Math.min(...poly.map((p) => p[0])), bx1 = Math.max(...poly.map((p) => p[0]))
-            const by0 = Math.min(...poly.map((p) => p[1])), by1 = Math.max(...poly.map((p) => p[1]))
-            // 도엽 범위에 걸치는 조각·면 밖 선을 모두 넘기고 roadsMesh 가 도엽 폴리곤으로 자른다(지형처럼. 2026-10-19 지적 by @nanangqq: 무게중심
-            // 기준이면 경계 조각이 도엽 밖으로 길게 튀어나갔다). 경계에 걸친 조각은 양쪽 도엽이 각자 자기 부분만 얹는다. 교량 보간용 선은 전부
-            const touches = (b: { x0: number; y0: number; x1: number; y1: number }) => b.x1 >= bx0 && b.x0 <= bx1 && b.y1 >= by0 && b.y0 <= by1
-            const inside: RoadFace[] = all.faces.filter(touches).map((b) => b.item)
-            const linesHere = all.lines.filter((b) => !(b.item.flags & ROAD_LINE_FLAG.outsideFace) || touches(b)).map((b) => b.item)
-            if (inside.length > 0 || linesHere.some((l) => l.flags & ROAD_LINE_FLAG.outsideFace)) {
-                const r = buildRoadsMesh(inside, linesHere, mergedMesh(), codes, {
-                    clip: roadsStyle.clip,
-                    bridge: roadsStyle.bridge,
-                    clipTo: poly,
-                    terrainNormals: mergedNormals(),
-                })
-                if (r.mesh.indices.length > 0) {
-                    roads = r.mesh
-                    roadTable = r.table
-                }
-                roadStats = { built: r.built, bridges: r.bridges, hidden: r.hidden }
-                roadsNote = r.skipped ? `(지형 밖 ${r.skipped})` : ""
-            }
-            builtRoadsCache.set(roadsKey, {
-                roads: roads && { ...roads, positions: roads.positions.slice(), indices: roads.indices.slice(), normals: roads.normals.slice() },
-                roadTable: roadTable && cloneRoadTable(roadTable),
-                stats: roadStats,
-            })
-        }
-        if (roads && roadTable) {
-            const lift = roadsStyle.lift ?? ROAD_LIFT_M
-            const zAt = style.mode === "stepped" ? (() => { const m = mergedMesh(); return createTerrainSampler(m.positions, m.indices) })() : null
-            roadChunks = roadDisplayChunks(roads, roadTable, style.mode, style.step, lift, maxBytes, zAt, smoothStepped)
-        }
-    } catch (err) {
-        console.warn(`도엽 ${t.name} 도로 실패:`, err)
+    const ctx: LayerCtx = {
+        job,
+        t,
+        style,
+        origin,
+        poly,
+        bbox,
+        touches: (b) => b.x1 >= bbox.x0 && b.x0 <= bbox.x1 && b.y1 >= bbox.y0 && b.y0 <= bbox.y1,
+        mergedMesh,
+        mergedNormals,
+        maxBytes,
+        smoothStepped,
     }
-    const t4 = performance.now()
-
-    // 물: 5K 단위 목록의 조각·선을 전부 넘기고 waterMesh 가 도엽 범위에 걸친 것만 얹어 도엽 폴리곤으로 자른다(D2. 폴리곤 안 선분 판정에는 조각 전부가
-    // 필요하다). 높이는 이웃까지 합친 메쉬로(A + B, D1 경로). 얹은 메쉬는 캐시하고 화면 조각(띄움·계단화)은 표현 방식마다 만든다
-    let water: WaterMesh | null = null
-    let waterTable: WaterTable | null = null
-    let waterStats: TileData["waterStats"] = { built: 0, rivers: 0, lakes: 0, ribbons: 0 }
-    let waterChunks: MeshChunk[] = []
-    const waterStyle = style.water ?? {}
-    const waterKey = `${t.map_id}|${waterStyle.clip !== false}|${waterStyle.zMode ?? "flat"}|${waterStyle.lines !== false}|${waterStyle.ribbonWidth ?? ""}|${waterStyle.levelQuantile ?? ""}`
-    const cachedWater = builtWaterCache.get(waterKey)
-    let waterNote = ""
-    let waterWait = 0
-    try {
-        if (cachedWater) {
-            water = cachedWater.water && {
-                ...cachedWater.water,
-                positions: cachedWater.water.positions.slice(),
-                indices: cachedWater.water.indices.slice(),
-                normals: cachedWater.water.normals.slice(),
-            }
-            waterTable = cachedWater.waterTable && cloneWaterTable(cachedWater.waterTable)
-            waterStats = cachedWater.stats
-            waterNote = "(캐시)"
-        } else {
-            const [codes, all] = await Promise.all([loadWaterCodes(), waterOf5k(t.id5k, extentOf(t.corners.map(to3857)), origin)])
-            waterWait = performance.now() - t4
-            if (all.pieces.length > 0 || all.lines.length > 0) {
-                const r = buildWaterMesh(all.pieces, all.lines, mergedMesh(), codes, all.names, {
-                    clip: waterStyle.clip,
-                    zMode: waterStyle.zMode,
-                    lines: waterStyle.lines,
-                    ribbonWidth: waterStyle.ribbonWidth,
-                    levelQuantile: waterStyle.levelQuantile,
-                    clipTo: poly,
-                    terrainNormals: mergedNormals(),
-                })
-                if (r.mesh.indices.length > 0) {
-                    water = r.mesh
-                    waterTable = r.table
-                }
-                waterStats = { built: r.built, rivers: r.rivers, lakes: r.lakes, ribbons: r.ribbons }
-                waterNote = r.skipped ? `(지형 밖 ${r.skipped})` : ""
-            }
-            builtWaterCache.set(waterKey, {
-                water: water && { ...water, positions: water.positions.slice(), indices: water.indices.slice(), normals: water.normals.slice() },
-                waterTable: waterTable && cloneWaterTable(waterTable),
-                stats: waterStats,
-            })
-        }
-        // 수면은 자체 면이라 표현 방식과 무관하게 같은 조각(계단화 없음)
-        if (water && waterTable) waterChunks = waterDisplayChunks(water, waterStyle.lift ?? WATER_LIFT_M)
-    } catch (err) {
-        console.warn(`도엽 ${t.name} 물 실패:`, err)
-    }
-    const t5 = performance.now()
-
-    // 산림(안 라): 5K 단위 임상도 폴리곤을 이 도엽 bbox 격자에 칠한 마스크. 메쉬를 만들지 않고 지형 셰이더가 색만 바꾼다.
-    // forest=0 이면 받지도 칠하지도 않는다
-    let forestMask: ForestMask | null = null
-    let forestTable: ForestTable | null = null
-    let forestSkipped = 0
-    let forestNote = ""
-    let forestWait = 0
-    const forestStyle = style.forest ?? {}
-    if (forestStyle.enabled !== false) {
-        const res = forestResOf(forestStyle.res)
-        const forestKey = `${t.map_id}|${res}`
-        const cachedForest = builtForestCache.get(forestKey)
-        try {
-            if (cachedForest) {
-                forestMask = cachedForest.mask && { ...cachedForest.mask, data: cachedForest.mask.data.slice() }
-                forestTable = cachedForest.table && cloneForestTable(cachedForest.table)
-                forestSkipped = cachedForest.skipped
-                forestNote = "(캐시)"
-            } else {
-                const [codes, polys] = await Promise.all([loadForestCodes(), forestOf5k(t.id5k, extentOf(t.corners.map(to3857)), origin)])
-                forestWait = performance.now() - t5
-                const r = buildForestMask(polys, poly, res, codes)
-                forestMask = r.mask
-                forestTable = r.mask ? r.table : null
-                forestSkipped = r.skipped
-                forestNote = `${r.mask ? `${r.mask.width}×${r.mask.height}` : "없음"} 칠하기 ${r.ms.toFixed(1)}ms`
-                builtForestCache.set(forestKey, {
-                    mask: forestMask && { ...forestMask, data: forestMask.data.slice() },
-                    table: forestTable && cloneForestTable(forestTable),
-                    skipped: forestSkipped,
-                })
-            }
-        } catch (err) {
-            console.warn(`도엽 ${t.name} 산림 실패:`, err)
-        }
+    const fields = {} as LayerFields
+    const layerLogs: string[] = []
+    for (const layer of LAYERS) {
+        const r = await layer.run(ctx)
+        Object.assign(fields, r.fields)
+        layerLogs.push(r.log)
     }
     console.log(
-        `도엽 ${t.name}${extra ? "(밖)" : ""}: ${fromCache ? "캐시" : `이웃 ${ttpTiles.length}개 ${mergeNote} 합침`} ${Math.round(t1 - t0)}ms, ${style.mode} ${Math.round(t2 - t1)}ms, 삼각형 ${tin.indices.length / 3}, 건물 ${built}${cached ? "(캐시)" : ""} ${Math.round(t3 - t2)}ms, 도로 ${roadStats.built}(교량 ${roadStats.bridges}, 숨김 ${roadStats.hidden})${roadsNote} ${roadsWait > 50 ? `받기 ${Math.round(roadsWait)}ms + ` : ""}${Math.round(t4 - t3 - roadsWait)}ms, 물 ${waterStats.built}(하천 ${waterStats.rivers}, 호소 ${waterStats.lakes}, 띠 ${waterStats.ribbons})${waterNote} ${waterWait > 50 ? `받기 ${Math.round(waterWait)}ms + ` : ""}${Math.round(t5 - t4 - waterWait)}ms, 산림 ${forestTable?.count ?? 0}${forestSkipped ? `(건너뜀 ${forestSkipped})` : ""} ${forestNote} ${forestWait > 50 ? `받기 ${Math.round(forestWait)}ms + ` : ""}${Math.round(performance.now() - t5 - forestWait)}ms`,
+        `도엽 ${t.name}${extra ? "(밖)" : ""}: ${fromCache ? "캐시" : `이웃 ${ttpTiles.length}개 ${mergeNote} 합침`} ${Math.round(t1 - t0)}ms, ${style.mode} ${Math.round(t2 - t1)}ms, 삼각형 ${tin.indices.length / 3}, ${layerLogs.join(", ")}`,
     )
 
     builtCount++
@@ -579,22 +572,21 @@ const buildTile = async (job: BuildJob): Promise<{ data: TileData; transfer: Tra
         bounds: { min: [minX, minY, xy.min[2]], max: [maxX, maxY, xy.max[2]] },
         terrain,
         tin: { origin, positions: tin.positions, indices: tin.indices },
-        buildings,
-        buildingTable,
-        built,
-        // 메인 사본에는 법선을 보내지 않는다(쓰는 곳이 없다: 내보내기는 법선을 안 쓰고, 표현 방식 전환의 화면 조각은 워커 캐시에서 다시 만든다.
-        // 2026-10-19 지적 by @nanangqq). 법선은 워커 캐시와 매끈한 면 화면 조각에만
-        roads: roads && { origin: roads.origin, positions: roads.positions, indices: roads.indices },
-        roadChunks,
-        roadTable,
-        roadStats,
-        water: water && { origin: water.origin, positions: water.positions, indices: water.indices },
-        waterChunks,
-        waterTable,
-        waterStats,
-        forestMask,
-        forestTable,
-        forestSkipped,
+        // 레이어 필드(등록된 레이어의 output. 메인 사본의 도로·물에는 법선이 없다)
+        buildings: fields.buildings,
+        buildingTable: fields.buildingTable,
+        built: fields.built,
+        roads: fields.roads,
+        roadChunks: fields.roadChunks,
+        roadTable: fields.roadTable,
+        roadStats: fields.roadStats,
+        water: fields.water,
+        waterChunks: fields.waterChunks,
+        waterTable: fields.waterTable,
+        waterStats: fields.waterStats,
+        forestMask: fields.forestMask,
+        forestTable: fields.forestTable,
+        forestSkipped: fields.forestSkipped,
     }
     return { data, transfer: transferablesOf(data) }
 }

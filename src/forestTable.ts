@@ -70,7 +70,7 @@ export type ForestTable = {
     year: Uint16Array
     /** FOREST_FLAG 비트 */
     flags: Uint8Array
-    /** 이 도엽 마스크에 칠한 픽셀 수(0 = 픽셀 중심에 하나도 안 걸림) */
+    /** 이 도엽 마스크에 칠한 픽셀 중 중심이 도엽 폴리곤 안인 수(계획서 3.6, 2026-10-23. bbox 귀퉁이에만 칠한 폴리곤은 행이 없다) */
     pixels: Uint32Array
 } & ForestCodeNames
 

@@ -22,8 +22,10 @@
  *
  * 사용:
  *   npm run tile-golden -- [--label before] [--order baseline|reverse|shuffle:<seed>|fresh|switch] [--configs tin,stepped,forest0,roadsclip0]
- *                          [--perturb vertex|mask|mask-outside|tri-order|tri-flip] [--out <dir>]
- *   npm run tile-golden -- --compare <a> <b> [--allow bbox-rows] [--common]   # 폴더 또는 golden.json. 실패가 있으면 종료 코드 1. --common 은 양쪽에 다 있는 기록만
+ *                          [--perturb vertex|mask|mask-outside|tri-order|tri-flip] [--out <dir>] [--logs(도엽 로그 줄 → logs.json)]
+ *   npm run tile-golden -- --compare <a> <b> [--allow bbox-rows] [--common]   # 폴더 또는 golden.json. 실패가 있으면 종료 코드 1. --common 은 양쪽에 다 있는 기록만.
+ *                                                                              # a = 기준(전), b = 새 코드(산림 허용 2 는 이 방향만 통과)
+ *                                                    [--fresh <dir>]            # 허용 6: a 와 다르지만 b 가 fresh 기준(도엽마다 새 워커)과 같은 묶음은 fresh-6
  *   npm run tile-golden -- --timing [--runs 5] [--configs tin,stepped] [--label timing-before]
  *   npm run tile-golden -- --c0 [--sheets 37608033,...] [--no-result]
  *   npm run tile-golden -- --describe <id5k | x0,y0,x1,y1>  # 5K 의 1K 25장(자리·3857 범위), 또는 선택 bbox 에 걸리는 도엽. 도엽 고를 때
@@ -180,6 +182,8 @@ let workerInputs = []
 class Helper {
     constructor(data) {
         this.worker = new Worker(SELF_FILE, { workerData: data })
+        /** C0 "자기 5K 만": C2 뒤 보조 워커는 레이어 인덱스를 읽지 않으므로 buildOne 이 일감의 레이어 목록을 이 5K 로 거른다 */
+        this.own5k = data.own5k ?? null
         this.waiters = []
         this.fetched = []
         this.worker.on("message", (m) => {
@@ -212,7 +216,7 @@ const taBytes = (ta) => Buffer.from(ta.buffer, ta.byteOffset, ta.byteLength)
 const numStr = (v) => (Object.is(v, -0) ? "-0" : String(v))
 
 function parseArgs(argv) {
-    const a = { label: "golden", order: "baseline", configs: null, perturb: null, out: null, compare: null, timing: false, runs: 5, c0: false, sheets: null, result: true, describe: null, analyze: null, allow: [], common: false, c0tile: null }
+    const a = { label: "golden", order: "baseline", configs: null, perturb: null, out: null, compare: null, timing: false, runs: 5, c0: false, sheets: null, result: true, describe: null, analyze: null, allow: [], common: false, c0tile: null, logs: false }
     for (let i = 0; i < argv.length; i++) {
         const k = argv[i]
         const take = () => {
@@ -229,6 +233,8 @@ function parseArgs(argv) {
             case "--compare": a.compare = [take(), take()]; break
             case "--allow": a.allow = take().split(","); break
             case "--common": a.common = true; break
+            case "--fresh": a.fresh = take(); break
+            case "--logs": a.logs = true; break
             case "--timing": a.timing = true; break
             case "--runs": a.runs = Number(take()); break
             case "--c0": a.c0 = true; break
@@ -246,7 +252,7 @@ function parseArgs(argv) {
 async function main() {
     const args = parseArgs(process.argv.slice(2))
     if (args.compare) {
-        const code = await compareGoldens(...args.compare, args.allow, args.common)
+        const code = await compareGoldens(...args.compare, args.allow, args.common, args.fresh)
         process.exit(code)
     }
     installFetch()
@@ -432,7 +438,8 @@ const parseLayerMs = (line) => {
         buildings: n(/, 건물 \d+(?:\(캐시\))? (\d+)ms, 도로/),
         roads: n(/, 도로 \d+\(교량 \d+, 숨김 \d+\)(?:\([^)]*\))? (?:받기 (\d+)ms \+ )?(\d+)ms, 물/),
         water: n(/, 물 \d+\(하천 \d+, 호소 \d+, 띠 \d+\)(?:\([^)]*\))? (?:받기 (\d+)ms \+ )?(\d+)ms, 산림/),
-        forest: n(/, 산림 \d+(?:\(건너뜀 \d+\))? .*?(?:받기 (\d+)ms \+ )?(\d+)ms$/),
+        // 산림이 끝 조각이 아니어도 읽게(C3 검토 L3): 다음 ", " 또는 줄 끝 앞의 "(받기 Nms + )Nms"
+        forest: n(/, 산림 \d+(?:\(건너뜀 \d+\))? .*?(?:받기 (\d+)ms \+ )?(\d+)ms(?:, |$)/),
     }
 }
 
@@ -441,6 +448,8 @@ let nextJobId = 1
 async function buildOne(helper, scene, tileId, style) {
     const base = scene.jobs.get(tileId)
     const job = { type: "build", jobId: nextJobId++, ...base, style }
+    // C0 자기 5K 만(C2 뒤): own5kTransform 이 레이어 인덱스에서 이웃 5K 를 비우던 것과 같은 거르기를 일감에서 한다
+    if (helper.own5k) job.layers = Object.fromEntries(Object.entries(job.layers).map(([k, v]) => [k, Array.isArray(v) ? v.filter((s) => s.id5k === helper.own5k) : v]))
     const r = await helper.request(job)
     if (r.kind !== "result") throw new Error(`예상 밖 응답 ${r.kind}`)
     const line = r.logs.find((l) => l.startsWith("도엽 ")) ?? ""
@@ -660,6 +669,7 @@ async function runGolden(lib, bundles, args) {
     await mkdir(outDir, { recursive: true })
     const records = {}
     const timing = []
+    const tileLogs = []
     const warnings = []
     const fetchTotals = {}
     let network = 0
@@ -688,6 +698,8 @@ async function runGolden(lib, bundles, args) {
         const key = `${config}|${scene.name}|${r.job.tile.map_id}`
         records[key] = digestTile(r.msg.data, r.job)
         timing.push({ key, wall: Math.round(r.wall * 10) / 10, cpu: Math.round(r.cpu * 10) / 10, layers: r.layers })
+        // --logs(C3 2026-10-23): 도엽 로그 줄을 남겨 층별 "(캐시)" 적중을 전후로 견준다(perf-check cacheFlags 와 같은 표시)
+        if (args.logs) tileLogs.push({ key, line: r.logs.find((l) => l.startsWith("도엽 ")) ?? "" })
         process.stdout.write(`\r${Object.keys(records).length} 도엽 ${key}                    `)
     }
     const styleOf = (c) => ({ ...STYLE_DEFAULT, ...spec.configs[c] })
@@ -754,6 +766,7 @@ async function runGolden(lib, bundles, args) {
     }
     await writeFile(path.join(outDir, "golden.json"), JSON.stringify({ meta, records, oracle }))
     await writeFile(path.join(outDir, "timing.json"), JSON.stringify({ meta: { made: meta.made, commit: meta.commit, order: args.order, note: "한 번 잰 값(참고). 기준 시간은 --timing" }, tiles: timing }, null, 1))
+    if (args.logs) await writeFile(path.join(outDir, "logs.json"), JSON.stringify(tileLogs, null, 1))
     console.log(`기록 ${Object.keys(records).length}개 → ${path.relative(ROOT, outDir)}/golden.json (${meta.seconds}s, 요청 ${meta.fetch.requests}, 네트워크 ${network}, 경고 ${warnings.length})`)
     if (warnings.length) console.log(warnings.slice(0, 10).join("\n"))
     if (perturbNote) console.log(`흔들기: ${JSON.stringify(perturbNote)}`)
@@ -794,7 +807,7 @@ const LAYER_OF = {
     forestMask: "forest", forestTable: "forest", forestSkipped: "forest",
 }
 const MESH_OF_TABLE = { roadTable: ["roads", "roadChunks"], waterTable: ["water", "waterChunks"], buildingTable: ["buildings"] }
-const RANK = { same: 0, order: 1, "outside-1": 2, "corner-2": 2, derived: 2, "bbox-rows": 3, real: 4 }
+const RANK = { same: 0, order: 1, "outside-1": 2, "corner-2": 2, derived: 2, "fresh-6": 2, "bbox-rows": 3, real: 4 }
 const multisetDiff = (a, b) => {
     const count = new Map()
     for (const x of a) count.set(x, (count.get(x) ?? 0) + 1)
@@ -812,9 +825,11 @@ const multisetDiff = (a, b) => {
  * - same: 바이트 같음
  * - order: 정확한 해시는 다르나 순서 무관 해시(삼각형·표 행 정렬)가 같음(허용 3)
  * - outside-1: 산림 마스크가 도엽 폴리곤 밖 픽셀만 다름(허용 1)
- * - corner-2: 산림 표가 귀퉁이에만 걸친 폴리곤 행(기준값: 폴리곤 안 픽셀 0)이나 3.6 픽셀 수 정정(행의 픽셀 수 = 기준값 폴리곤 안 픽셀)만 다름(허용 2)
+ * - corner-2: 산림 표가 귀퉁이에만 걸친 폴리곤 행(기준값: 폴리곤 안 픽셀 0)이나 3.6 픽셀 수 정정(같은 id·속성 행 한 쌍의 픽셀 수가 기준값
+ *   {전체, 폴리곤 안} 짝)만 다름(허용 2). **방향이 있다**: a(첫 인자) = 3.6 전 기준(전체·귀퉁이 행), b = 새 코드. 반대면 real(V6 검토 L3)
  * - bbox-rows: 도로·물 표가 도엽 폴리곤과 겹치지 않는 항목(기준값 bboxOnly)의 "못 얹은" 행만 다르고 메쉬는 같음(계획서에 없는 차이. 판단 필요)
  * - derived: 통계(숨김 수·건너뜀 수)가 위 허용 차이에서 따라 바뀜
+ * - fresh-6: (`--fresh` 를 줄 때만) a 와는 real 이지만 b 가 fresh 기준과 같은 묶음(허용 6: 순서 의존을 없애 생긴 차이. compareGoldens)
  * - real: 그 밖. 실패
  */
 function classifyRecord(a, b, oracle) {
@@ -837,11 +852,27 @@ function classifyRecord(a, b, oracle) {
         }
         if (g === "forestTable" && oracle) {
             const { onlyA, onlyB } = multisetDiff(a.rows.forestTable, b.rows.forestTable)
-            const ok = [...onlyA, ...onlyB].every((r) => {
-                const [, id, px] = /^s(\d+):(\d+):/.exec(r)
-                const o = oracle.forestPixels[id]
-                return o && (o[1] === 0 || Number(px) === o[1])
-            })
+            // 허용 2(C5 에서 엄격하게, V6 검토 L3 으로 방향까지): a = 기준(3.6 전 코드: 전체 픽셀·귀퉁이 행), b = 새 코드(폴리곤 안 픽셀·귀퉁이 행 없음).
+            // 다른 행은 (가) a 에만 있는 귀퉁이 행(기준값 폴리곤 안 0)이거나, (나) 같은 id·같은 속성 행이 양쪽에 하나씩이고 a 가 기준값 전체·b 가 기준값
+            // 폴리곤 안인 3.6 정정뿐이어야 한다. 반대 방향(b 에 귀퉁이 행·전체 픽셀)은 새 코드끼리 견줄 때의 퇴행이라 real
+            const parse = (r) => {
+                const [, id, px, attr] = /^s(\d+):(\d+):(.*)$/.exec(r)
+                return { id, px: Number(px), attr }
+            }
+            const pa = onlyA.map(parse), pb = onlyB.map(parse)
+            const corner = (x) => oracle.forestPixels[x.id]?.[1] === 0
+            /** a 쪽 행 x 가 3.6 정정 짝인지(a 전체 → b 폴리곤 안) */
+            const pairOk = (x) => {
+                const o = oracle.forestPixels[x.id]
+                const ys = pb.filter((z) => z.id === x.id)
+                return !!o && pa.filter((z) => z.id === x.id).length === 1 && ys.length === 1 && ys[0].attr === x.attr && x.px === o[0] && ys[0].px === o[1]
+            }
+            const ok =
+                pa.every((x) => (corner(x) && !pb.some((y) => y.id === x.id)) || pairOk(x)) &&
+                pb.every((y) => {
+                    const x = pa.find((z) => z.id === y.id)
+                    return !!x && pairOk(x)
+                })
             out[g] = ok ? { cls: "corner-2", rows: [onlyA.length, onlyB.length] } : { cls: "real", onlyA: onlyA.slice(0, 5), onlyB: onlyB.slice(0, 5) }
             continue
         }
@@ -870,8 +901,16 @@ function classifyRecord(a, b, oracle) {
  * 두 golden 을 비교한다. 실패(종료 코드 1): real·빠진 기록, 그리고 allow 에 없는 bbox-rows(계획서 허용 목록에 없는 차이라 결정 by @nanangqq 전에는 실패로 둔다).
  * same·order·outside-1·corner-2·derived(허용 차이에서 따라온 통계)는 통과
  */
-async function compareGoldens(pa, pb, allow = [], common = false) {
+async function compareGoldens(pa, pb, allow = [], common = false, freshPath = null) {
     const A = await loadGolden(pa), B = await loadGolden(pb)
+    // --fresh(허용 6, 2026-10-23 수락 by @nanangqq): 순서 의존을 없애 a(순서대로 만든 기준)와 달라졌지만 b(새 코드)가 fresh 기준(같은 기준 코드를 도엽마다
+    // 새 워커로)과 같은 묶음은 fresh-6. 방향이 있다: b 가 fresh 와 같아야 하고, a 쪽이 fresh 와 같고 b 가 다르면 real 그대로
+    // b 가 fresh 기준과 같은 코드(meta.commit 같음, 둘 다 없음 포함)면 쓰지 않는다: 반대 방향(b 가 기준 코드)에서 무엇이든 fresh 와 같아 보이는 것을 막는다
+    let F = freshPath ? await loadGolden(freshPath) : null
+    if (F && B.meta.commit === F.meta.commit) {
+        console.log(`--fresh 무시: b(${B.meta.commit})가 fresh 기준과 같은 코드`)
+        F = null
+    }
     // common: 양쪽에 다 있는 기록만(설정 일부만 돌린 golden 과 비교할 때). 기본은 한쪽에만 있는 기록도 실패
     const keys = [...new Set([...Object.keys(A.records), ...Object.keys(B.records)])].filter((k) => !common || (A.records[k] && B.records[k])).sort()
     const result = { a: pa, b: pb, aMeta: { commit: A.meta.commit, order: A.meta.order, perturb: A.meta.perturb }, bMeta: { commit: B.meta.commit, order: B.meta.order, perturb: B.meta.perturb }, records: {}, counts: {}, byGroup: {} }
@@ -886,6 +925,10 @@ async function compareGoldens(pa, pb, allow = [], common = false) {
         const [, scene, tile] = k.split("|")
         const oracle = A.oracle?.[`${scene}|${tile}`] ?? B.oracle?.[`${scene}|${tile}`]
         const groups = classifyRecord(a, b, oracle)
+        if (F?.records[k] && Object.values(groups).some((g) => g.cls === "real")) {
+            const vsFresh = classifyRecord(F.records[k], b, oracle)
+            for (const [g, v] of Object.entries(groups)) if (v.cls === "real" && vsFresh[g]?.cls === "same") groups[g] = { cls: "fresh-6", was: v }
+        }
         const worst = Object.values(groups).reduce((w, g) => (RANK[g.cls] > RANK[w] ? g.cls : w), "same")
         result.counts[worst] = (result.counts[worst] ?? 0) + 1
         for (const [g, v] of Object.entries(groups)) {

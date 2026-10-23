@@ -1,7 +1,7 @@
 import type { Extent } from "ol/extent"
 import proj4 from "proj4"
 
-import { noteJson, TileInfo } from "./terrainData"
+import { JsonMemo, jsonFetcher, TileInfo } from "./terrainData"
 
 /**
  * terrain_tile_pslg(ttp) 운영 base URL(R2 버킷 asrbbt-layers 의 커스텀 도메인, 운영·로컬 개발 공통 기본값).
@@ -54,20 +54,8 @@ export const SELECTION_TILE_LIMITS = { warn: 2000, max: 4000 }
 /** 도엽당 메모리 추정(MB. 위 측정값). 안내 문구용 */
 export const MB_PER_TILE = 0.32
 
-/** 같은 인덱스 JSON 을 한 번만 받는다(모듈 수명 동안. Worker 는 요청마다 새로 만들어지므로 그 안에서만 유효) */
-const jsonCache = new Map<string, Promise<unknown>>()
-const fetchJsonCached = <T>(url: string): Promise<T> => {
-    let p = jsonCache.get(url)
-    if (!p) {
-        p = fetch(url).then(async (res) => {
-            if (!res.ok) throw new Error(`${res.status} ${url}`)
-            return noteJson("index.json", res)
-        })
-        jsonCache.set(url, p)
-        p.catch(() => jsonCache.delete(url))
-    }
-    return p as Promise<T>
-}
+/** 같은 인덱스 JSON 을 한 번만 받는다(스레드마다 따로. 이름공간 "terrain": sheets50k.json 은 고정 칸, 50K 인덱스는 최근 JSON_50K_CACHE_MAX 개) */
+const fetchJson = jsonFetcher("terrain")
 
 const extentsOverlap = (a: Extent, b: Extent) => a[0] <= b[2] && b[0] <= a[2] && a[1] <= b[3] && b[1] <= a[3]
 
@@ -137,14 +125,15 @@ export const bboxToPolygon5179 = (bbox3857: Extent): [number, number][] => {
  *    선별 전용이고, 정확한 판정은 corners 로 한다
  *
  * @param bbox3857 지도에서 고른 범위 [minX, minY, maxX, maxY] (EPSG:3857)
+ * @param memo 조정자의 묶음 동안 인덱스를 쥐는 곳(C2. 없으면 이름공간 캐시만)
  * @returns 공통 원점, 걸친 1K 목록, 5K 파일 목록
  */
-export const getTtpSheetsInBbox = async (bbox3857: Extent): Promise<TtpSheetsInBbox> => {
+export const getTtpSheetsInBbox = async (bbox3857: Extent, memo?: JsonMemo): Promise<TtpSheetsInBbox> => {
     const selection = bboxToPolygon5179(bbox3857)
     const selectionExtent = extentOf(selection)
-    const index = await fetchJsonCached<Sheets50kIndex>(`${TTP_BASE}/index/v1/sheets50k.json`)
+    const index = await fetchJson.fixed<Sheets50kIndex>(`${TTP_BASE}/index/v1/sheets50k.json`, memo)
     const hit50k = index.sheets.filter((s) => extentsOverlap(s.bbox_3857, bbox3857))
-    const sheets50k = await Promise.all(hit50k.map((s) => fetchJsonCached<Sheet50kIndex>(`${TTP_BASE}/${s.path}`)))
+    const sheets50k = await Promise.all(hit50k.map((s) => fetchJson.index50k<Sheet50kIndex>(`${TTP_BASE}/${s.path}`, memo)))
     const tiles: TtpSheetsInBbox["tiles"] = []
     const sheets: TtpSheetsInBbox["sheets"] = []
     for (const sheet50k of sheets50k) {

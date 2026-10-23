@@ -1,8 +1,5 @@
-import type { Extent } from "ol/extent"
-
 import { emptyForestCodeNames, FOREST_FLAG, ForestCodeNames } from "./forestTable"
-import { fetchGunzip, noteCached, noteJson } from "./terrainData"
-import { getTtpSheetsInBbox } from "./terrainIndex"
+import { boundsAt, dataTier, fetchGunzip, JsonMemo, jsonFetcher, Layer5k, shiftXy, XyBounds, xyBoundsMm } from "./terrainData"
 
 /**
  * 산림 레이어(forest, FRS1. 산림청 임상도 1:5000) base URL. 경로 규칙은 ttp·buildings·roads·water 와 같고 base 만 다르다(서버 README 12절).
@@ -115,32 +112,6 @@ export const parseFrs = (buf: ArrayBuffer): FrsFile => {
 /** `{base}/index/v1/codes.json`: 코드 → 한글 이름(키는 코드 값 문자열) */
 type ForestCodes = Partial<Record<"frtp" | "koftr" | "storunst" | "fror" | "dmcls" | "agcls" | "dnst" | "height", Record<string, string>>>
 
-/** 출처 한 건(sheets50k.json 의 attribution.sources[]). 라이선스 문구는 하드코딩하지 않고 여기서 읽는다 */
-export type ForestAttributionSource = {
-    name: string
-    provider: string
-    asof?: string
-    portal?: string
-    url?: string
-    license?: string
-    license_url?: string
-    license_note?: string
-}
-
-/** `{base}/index/v1/sheets50k.json` */
-export type ForestSheets50k = {
-    layer: string
-    version: string
-    generated: string
-    n_50k: number
-    n_5k: number
-    n_poly: number
-    gz_bytes: number
-    note?: string
-    attribution?: { short: string; sources: ForestAttributionSource[]; processing?: string; disclaimer?: string }
-    sheets: { id50k: string; path: string; n_5k: number; n_poly: number; gz_bytes: number }[]
-}
-
 /** `{base}/index/v1/{50K}.json` 의 5K 항목 */
 export type ForestSheet5k = {
     id5k: string
@@ -162,19 +133,7 @@ export type ForestSheet5k = {
 /** `{base}/index/v1/{50K}.json` */
 type ForestSheet50k = { id50k: string; sheets: ForestSheet5k[] }
 
-const jsonCache = new Map<string, Promise<unknown>>()
-const fetchJsonCached = <T>(url: string): Promise<T> => {
-    let p = jsonCache.get(url)
-    if (!p) {
-        p = fetch(url).then(async (res) => {
-            if (!res.ok) throw new Error(`${res.status} ${url}`)
-            return noteJson("forest.json", res)
-        })
-        jsonCache.set(url, p)
-        p.catch(() => jsonCache.delete(url))
-    }
-    return p as Promise<T>
-}
+const fetchJson = jsonFetcher("forest")
 
 const namesOf = (codes: Record<string, string> | undefined) => {
     const names = new Array<string>(256).fill("")
@@ -190,7 +149,7 @@ export const emptyForestCodeTable = emptyForestCodeNames
 
 /** codes.json 을 받아 코드 값 → 한글 이름 표를 만든다(모듈 캐시. 한 번만 받는다) */
 export const loadForestCodes = async (): Promise<ForestCodeNames> => {
-    const codes = await fetchJsonCached<ForestCodes>(`${FOREST_BASE}/index/v1/codes.json`)
+    const codes = await fetchJson.fixed<ForestCodes>(`${FOREST_BASE}/index/v1/codes.json`)
     return {
         frtpNames: namesOf(codes.frtp),
         koftrNames: namesOf(codes.koftr),
@@ -203,69 +162,54 @@ export const loadForestCodes = async (): Promise<ForestCodeNames> => {
     }
 }
 
-/** sheets50k.json(50K 목록 + attribution). 출처 표시(attribution.ts)가 라이선스 문구를 여기서 읽는다 */
-export const loadForestIndex = () => fetchJsonCached<ForestSheets50k>(`${FOREST_BASE}/index/v1/sheets50k.json`)
-
-/** 50K 인덱스에서 5K 항목들(id5k → 항목). 크기·폴리곤 수를 받기 전에 본다 */
-export const loadForestSheets = async (ids50k: string[]): Promise<Map<string, ForestSheet5k>> => {
-    const indexes = await Promise.all(ids50k.map((id50k) => fetchJsonCached<ForestSheet50k>(`${FOREST_BASE}/index/v1/${id50k}.json`)))
-    return new Map(indexes.flatMap((ix) => ix.sheets.map((s) => [String(s.id5k), s] as const)))
+/**
+ * 도엽이 쓸 산림 5K(조정자가 도엽마다 부른다. layerSheets.ts, C2 2026-10-23). sheets 는 도엽 3857 bbox 로 ttp 인덱스에서 고른 5K(그 순서).
+ * 산림 50K 인덱스에서 `n_poly > 0` 인 것만 같은 순서로 남긴다(산림 없는 5K 는 32 B 헤더만. C2 전 loadForest 의 targets 와 같다).
+ * memo 는 조정자의 묶음 동안 인덱스를 쥐는 곳
+ */
+export const forestSheetsOf = async (sheets: { id5k: string }[], memo?: JsonMemo): Promise<Layer5k[]> => {
+    const ids50k = [...new Set(sheets.map((s) => s.id5k.slice(0, 5)))]
+    const indexes = await Promise.all(ids50k.map((id50k) => fetchJson.index50k<ForestSheet50k>(`${FOREST_BASE}/index/v1/${id50k}.json`, memo)))
+    const entryById5k = new Map(indexes.flatMap((ix) => ix.sheets.map((s) => [String(s.id5k), s] as const)))
+    return sheets
+        .map((s) => entryById5k.get(s.id5k))
+        .filter((e): e is ForestSheet5k => !!e && e.n_poly > 0)
+        .map((e) => ({ id5k: String(e.id5k), path: e.path }))
 }
 
-/** 파싱한 5K 산림 파일 캐시(path → 결과). 도엽 스트리밍이 도엽마다 부를 때 같은 5K 를 다시 받지 않게 */
-const frsCache = new Map<string, Promise<FrsFile>>()
-const fetchFrsCached = (path: string) => {
-    let p = frsCache.get(path)
-    if (!p) {
-        p = fetchGunzip(`${FOREST_BASE}/${path}`).then((buf) => parseFrs(noteCached("forest.file", buf.byteLength, buf)))
-        frsCache.set(path, p)
-        p.catch(() => frsCache.delete(path))
-    }
-    return p
-}
+/** 산림 데이터 층 항목(5K 하나, 파일 원점). bounds 는 폴리곤마다 파일 mm 범위(xyBoundsMm) */
+export type Forest5k = { file: FrsFile; bounds: Float64Array; bytes: number }
+const forestTier = dataTier<Forest5k>("forest")
+/** 산림 5K 파일을 받아 파싱·전처리(데이터 층. 같은 5K 는 다시 받지 않는다) */
+export const fetchForest5k = (s: Layer5k) =>
+    forestTier(s.path, async () => {
+        const buf = await fetchGunzip(`${FOREST_BASE}/${s.path}`)
+        const file = parseFrs(buf)
+        const bounds = xyBoundsMm(file.polys)
+        return { file, bounds, bytes: buf.byteLength + bounds.byteLength }
+    })
 
 /**
- * 선택 범위의 임상도 폴리곤을 받아 공통 원점 기준으로 합친다(서버 README 12.3).
+ * 도엽의 임상도 폴리곤(서버 README 12.3, C2 2026-10-23). entries 는 도엽이 걸치는 5K 들(조정자 순서). 그 순서로 합치며
+ * **flags & 1(duplicated) 인 폴리곤만 id 로 처음 것만 남기고**(폴리곤은 걸친 5K 마다 통째로 복제돼 있다. 도엽 밖 것도 중복 판정에는 들어간다),
+ * keep 이 고른 것만 공통 원점 mm 로 옮긴다. buildForestMask 가 맨 먼저 같은 범위 판정으로 거르므로(나머지는 쓰지 않는다) keep 에 그 판정을 주면
+ * C2 전(5K 의 폴리곤 전부를 넘김)과 같은 마스크·표가 나온다. 판정에 주는 범위는 공통 원점 m(boundsAt)
  *
- * 1. ttp 인덱스로 범위에 걸린 5K 번호를 고른다(지형·건물·도로·물과 같은 번호)
- * 2. 산림 50K 인덱스에서 그 5K 의 path 를 보고 `n_poly > 0` 인 것만 받는다(산림 없는 5K 는 32 B 헤더만)
- * 3. 좌표를 공통 원점 mm 로 옮기고, **flags & 1(duplicated) 인 폴리곤만 id 로 중복 제거**(폴리곤은 걸친 5K 마다 통째로 복제돼 있다)
- * 범위 안팎 선별은 하지 않는다(지형 위에 얹을 때 도엽 폴리곤으로 잘린다).
- *
- * @param bbox3857 지도에서 고른 범위 (EPSG:3857)
  * @param commonOrigin 지형 메쉬의 원점(정수 m, 5179)
- * @returns 폴리곤 목록(xy 는 공통 원점 mm 의 새 배열), 받은 파일 수, 중복으로 뺀 수
  */
-export const loadForest = async (
-    bbox3857: Extent,
-    commonOrigin: [number, number],
-): Promise<{ polys: ForestPolygon[]; files: number; duplicates: number }> => {
-    const q = await getTtpSheetsInBbox(bbox3857)
-    const entryById5k = await loadForestSheets([...new Set(q.sheets.map((s) => s.id5k.slice(0, 5)))])
-    const targets = q.sheets.map((s) => entryById5k.get(s.id5k)).filter((e): e is ForestSheet5k => !!e && e.n_poly > 0)
-    const files = await Promise.all(targets.map((t) => fetchFrsCached(t.path)))
-
+export const forestInTile = (entries: Forest5k[], commonOrigin: [number, number], keep: (b: XyBounds) => boolean): ForestPolygon[] => {
     const seen = new Set<number>()
     const polys: ForestPolygon[] = []
-    let duplicates = 0
-    for (const file of files) {
+    for (const { file, bounds } of entries) {
         const dx = (file.origin[0] - commonOrigin[0]) * 1000
         const dy = (file.origin[1] - commonOrigin[1]) * 1000
-        for (const p of file.polys) {
+        file.polys.forEach((p, k) => {
             if (p.flags & FOREST_FLAG.duplicated) {
-                if (seen.has(p.id)) {
-                    duplicates++
-                    continue
-                }
+                if (seen.has(p.id)) return
                 seen.add(p.id)
             }
-            const xy = new Int32Array(p.xy.length)
-            for (let i = 0; i < xy.length; i += 2) {
-                xy[i] = p.xy[i] + dx
-                xy[i + 1] = p.xy[i + 1] + dy
-            }
-            polys.push({ ...p, xy })
-        }
+            if (keep(boundsAt(bounds, k, dx, dy))) polys.push({ ...p, xy: shiftXy(p.xy, dx, dy) })
+        })
     }
-    return { polys, files: files.length, duplicates }
+    return polys
 }
