@@ -802,10 +802,11 @@ function App({
     if (terrain) layerNotes.roads = `${terrain.roads.built.toLocaleString()} 조각` + (terrain.roads.bridges > 0 ? ` · 교량 ${terrain.roads.bridges}` : "")
     const layerNoteTitles: Partial<Record<LayerId, string>> = {}
     if (terrain) {
-        // 산림: 패널 첫 열(약 150px)에 맞게 "폴리곤 N" 만 보이고 임상별 수는 마우스를 올리면(title). 다른 행처럼 한 줄
+        // 산림: 패널 첫 열(약 150px)에 맞게 "폴리곤 N" 만 보이고 임상별 수는 마우스를 올리면(title). 다른 행처럼 한 줄.
+        // 건너뛴 무효 도형 수는 화면에 보이지 않는다(2026-10-23 결정 by @nanangqq. 콘솔 로그에는 남고, 레이어별 정리는 로그 정리 때)
         const [none, conifer, broadleaf, mixed, bamboo] = terrain.forest.types
         const total = terrain.forest.types.reduce((a, b) => a + b, 0)
-        layerNotes.forest = `폴리곤 ${total.toLocaleString()}` + (terrain.forest.skipped > 0 ? ` · 건너뜀 ${terrain.forest.skipped.toLocaleString()}` : "")
+        layerNotes.forest = `폴리곤 ${total.toLocaleString()}`
         layerNoteTitles.forest = `침엽 ${conifer.toLocaleString()} · 활엽 ${broadleaf.toLocaleString()} · 혼효 ${mixed.toLocaleString()} · 죽림 ${bamboo.toLocaleString()} · 무립목지 ${none.toLocaleString()}`
     }
     if (terrain) layerNotes.water = `하천 ${terrain.water.rivers.toLocaleString()} · 호소 ${terrain.water.lakes.toLocaleString()}` + (terrain.water.ribbons > 0 ? ` · 띠 ${terrain.water.ribbons.toLocaleString()}` : "")
