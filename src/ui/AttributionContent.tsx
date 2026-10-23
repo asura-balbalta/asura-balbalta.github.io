@@ -2,6 +2,7 @@ import { Button, Dialog, DialogActions, DialogBody, DialogContent, DialogSurface
 import React, { useEffect, useState } from "react"
 
 import {
+    AS_IS_LAYERS,
     Attribution,
     ATTRIBUTION_TXT_URL,
     AttributionSource,
@@ -49,7 +50,7 @@ const SourceItem = ({ s }: { s: AttributionSource }) => (
             ) : (
                 s.license
             )}
-            {s.processing && ` · 가공: ${s.processing}`}
+            {s.processing && ` · ${s.processing_label ?? "가공"}: ${s.processing}`}
         </div>
         {s.license_note && <div className="ui-attribution-note">{s.license_note}</div>}
     </li>
@@ -58,7 +59,7 @@ const SourceItem = ({ s }: { s: AttributionSource }) => (
 /**
  * 출처 표시문(src/attribution.ts 머리말). 통합 창(AttributionDialog)과 페이지(#/attribution, AttributionPage)가 같이 쓴다.
  * layer 를 주면(레이어 패널 "출처보기") 그 레이어의 인덱스만 받아 그 자료만 그리고, 검색·바탕 지도 항목은 뺀다. 라이선스 링크 줄과
- * 면책은 둘 다 둔다. 단 산림은 라이선스가 "확인 중"(인덱스 문구)이라 공공누리·CC BY 링크 줄을 빼고 면책만 둔다.
+ * 면책은 둘 다 둔다. 단 원자료를 고치지 않고 쓰는 레이어(AS_IS_LAYERS, 산림)의 창은 "가공하여" 문구·링크 줄·면책을 뺀다.
  * 받는 동안은 "불러오는 중", 받으면 그린다. 모양은 ui.css(.ui-attribution)
  *
  * @param props.layer 이 레이어의 출처만. 없으면 전부
@@ -74,11 +75,12 @@ export const AttributionContent = ({ layer }: { layer?: LayerId }) => {
     }, [layer])
     if (!data) return <div className="ui-attribution">불러오는 중…</div>
     const label = layer && LAYER_DEFS.find((d) => d.id === layer)?.label
+    const asIs = !!layer && AS_IS_LAYERS.has(layer)
     return (
         <div className="ui-attribution">
             <p>
                 {label
-                    ? `이 서비스의 ${label} 데이터는 아래 공공데이터를 가공하여 사용합니다.`
+                    ? `이 서비스의 ${label} 데이터는 아래 공공데이터를 ${asIs ? "" : "가공하여 "}사용합니다.`
                     : "이 서비스의 지형·건물 데이터는 아래 공공데이터를 가공하여 사용합니다."}
             </p>
             <ul>
@@ -96,7 +98,7 @@ export const AttributionContent = ({ layer }: { layer?: LayerId }) => {
                     </ul>
                 </>
             )}
-            {layer !== "forest" && (
+            {!asIs && (
                 <p className="ui-attribution-links">
                     <a href={KOGL_URL} target="_blank" rel="noreferrer">
                         공공누리 제1유형
@@ -111,7 +113,7 @@ export const AttributionContent = ({ layer }: { layer?: LayerId }) => {
                     </a>
                 </p>
             )}
-            <p className="ui-attribution-disclaimer">{data.disclaimer}</p>
+            {!asIs && <p className="ui-attribution-disclaimer">{data.disclaimer}</p>}
             {!data.fromServer && <p className="ui-attribution-note">서버의 최신 표시문을 받지 못해 내장 문구를 보여 줍니다.</p>}
         </div>
     )

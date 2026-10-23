@@ -60,7 +60,15 @@ export type AttributionSource = {
     license_note?: string
     /** 가공 내용. 서버는 레이어 단위 `processing` 으로 주므로 받은 뒤 각 source 에 붙인다 */
     processing?: string
+    /** processing 앞 머리말. 없으면 "가공"(AS_IS_LAYERS 는 "제공 방식". fetchLayerAttribution 이 붙인다) */
+    processing_label?: string
 }
+
+/**
+ * 원자료를 고치지 않고 쓰는 레이어(2026-10-23 결정 by @nanangqq). 산림(임상도, 브이월드 표시 CC BY-NC-ND)은 처리 내용을 "가공" 이 아니라
+ * "제공 방식" 으로 적고, 레이어 출처 창에서 "가공하여" 문구·라이선스 링크 줄·면책 문장을 싣지 않는다
+ */
+export const AS_IS_LAYERS: ReadonlySet<LayerId> = new Set<LayerId>(["forest"])
 
 /** 서버 인덱스의 `attribution` 키(안내문 2.1절) */
 type IndexAttribution = {
@@ -144,15 +152,16 @@ const FALLBACK_SOURCES: Record<LayerId, AttributionSource[]> = {
             processing: "좌표 변환, 5K 도엽 단위 분할, 형식 변환, 작은 연못 제외",
         },
     ],
-    // 산림: 라이선스는 "확인 중"(2026-10-22). 실제 문구는 서버 인덱스(sheets50k.json attribution)에서 읽고, 여기는 받지 못할 때만 쓴다
+    // 산림: 실제 문구는 서버 인덱스(sheets50k.json attribution)에서 읽고, 여기는 받지 못할 때만 쓴다(AS_IS_LAYERS)
     forest: [
         {
             name: "임상도(1:5000) 산림 폴리곤·임상·수종·경급·영급·밀도·임분고",
             provider: "산림청",
             portal: "브이월드 데이터마켓",
             url: "https://www.vworld.kr/dtmk/dtmk_ntads_s002.do?svcCde=MK&dsId=30136",
-            license: "확인 중 (서버 출처 정보를 받지 못함. 출처 페이지를 다시 열어 주세요)",
-            processing: "좌표 변환, 5K 도엽 단위 묶음(폴리곤은 자르지 않음), 형식 변환",
+            license: "CC BY-NC-ND",
+            license_url: "https://www.vworld.kr/dtmk/dtmk_ntads_s002.do?svcCde=MK&dsId=30136",
+            processing: "5K 도엽 단위로 통째로 복사(폴리곤은 자르거나 고치지 않음)",
         },
     ],
 }
@@ -198,9 +207,10 @@ export const fetchLayerAttribution = (id: LayerId): Promise<LayerAttribution> =>
         .then((json) => json?.attribution ?? null)
         .catch(() => null)
         .then((a): LayerAttribution => {
-            if (!a?.sources?.length) return { sources: FALLBACK_SOURCES[id], disclaimer: ATTRIBUTION_DISCLAIMER, fromServer: false }
+            const label = AS_IS_LAYERS.has(id) ? { processing_label: "제공 방식" } : {}
+            if (!a?.sources?.length) return { sources: FALLBACK_SOURCES[id].map((s) => ({ ...s, ...label })), disclaimer: ATTRIBUTION_DISCLAIMER, fromServer: false }
             return {
-                sources: a.sources.map((s) => ({ ...s, processing: s.processing ?? a.processing })),
+                sources: a.sources.map((s) => ({ ...s, processing: s.processing ?? a.processing, ...label })),
                 disclaimer: a.disclaimer || ATTRIBUTION_DISCLAIMER,
                 fromServer: true,
             }
