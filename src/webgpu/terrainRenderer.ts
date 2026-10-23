@@ -184,6 +184,11 @@ export type RenderDebug = {
     forestColor?: string[]
     /** false 면 먼 거리 계단 부드럽게를 끈다(smoothfar=0. 표시: stepFade·stepNormal 끔, 생성: 계단형 매끈한 법선 안 만듦). 없으면 품질 설정 smoothFar */
     smoothFar?: boolean
+    /**
+     * 궤도 보기 초기 카메라가 바라보는 높이(m, orbitz=). 없으면 첫 도엽 z 범위의 가운데. 5K 가 여럿인 범위는 보조 워커가 경쟁해 첫 도엽이
+     * 실행마다 달라 매끈한 면 캡처가 갈린다(2026-10-23 한강 여의도 2.7 %). 렌더러는 쓰지 않고 TerrainViewCanvas 가 카메라를 맞출 때 읽는다
+     */
+    orbitZ?: number
 }
 /**
  * 둘러보기 중 장면에 그릴 반경(m). 이보다 먼 도엽은 그리지 않는다(L4, 2026-10-14). 안개 1/1200 에서 5 km 의 가시도는 약 1.5 % 라

@@ -13,6 +13,7 @@ import { installDebugHooks } from "./hooks"
  * 주소: `index.html#/debug/walk?bbox=minx,miny,maxx,maxy&spawn=x,y&yaw=90&pitch=-10&ao=0&shadow=0&sky=0&edge=0.25&sun=60&aodebug=1&lock=0`
  * - bbox: 선택 범위(EPSG:3857 extent. 앱의 selection 과 같은 형식). 있으면 지도가 뜨는 대로 확정해 지형을 받고 3D 로 넘어간다
  * - walk=0 이면 3D 까지만(기본은 bbox 가 있으면 둘러보기 자동 진입)
+ * - orbitz: 궤도 보기 초기 카메라가 바라보는 높이(m). 없으면 첫 도엽 z 범위 가운데(5K 가 여럿이면 첫 도엽이 실행마다 달라진다. 매끈한 면 회귀 캡처용)
  * - spawn: 시작 xy(메쉬 로컬, m. 메쉬 origin 을 뺀 EPSG:5179). 없으면 범위 가운데
  * - yaw·pitch: 시작 방향(°, yaw 0 = 동쪽·반시계, 90 = 북쪽)·위아래(°, 위로 +). 없으면 북쪽·수평
  * - hover: 지표 위 이 높이(m)에서 공중 정지한 채 시작(Space 한 번이면 풀린다). 높은 곳에서 본 장면을 같은 자리에서 다시 찍을 때
@@ -126,6 +127,7 @@ export const parseWalkParams = (params: URLSearchParams): { preset: AppPreset; r
         forestRes: number(params, "forestres"),
         forestWalls: flag(params, "forestwalls"),
         forestColor: params.has("forestcolor") ? params.get("forestcolor")!.split(",").map((h) => `#${h.trim()}`) : undefined,
+        orbitZ: number(params, "orbitz"),
     }
     return { preset, renderDebug, notes }
 }

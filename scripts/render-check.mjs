@@ -276,6 +276,9 @@ const waitReady = async (page, { timeout, stable }, orbit) => {
     if (orbit) {
         // 궤도 보기(walk=0): 둘러보기에 들어가지 않으므로 선택 도엽 로딩이 끝난 상태(ready, busy 0)를 기다린다
         // data-busy 는 L1(2026-10-14) 부터 있다. 없는 옛 빌드도 잴 수 있게 "1 이 아니면" 으로 본다
+        // 페이지가 막 뜬 때(범위 확정 전)도 ready·busy 0 이라, 먼저 궤도 HUD(첫 도엽이 올라와 3D 화면이 된 뒤에만 보임)를 기다린다
+        // (2026-10-23 확인: 이것 없이는 0.2초에 통과해 지도·로딩 도중을 찍었다)
+        await page.waitForSelector(".ui-orbit-hud", { timeout })
         await page.waitForSelector('[data-debug-page][data-debug-state="ready"]:not([data-busy="1"])', { timeout })
         return { tiles: 0, readyMs: Date.now() - started, timedOut: false }
     }
@@ -283,6 +286,8 @@ const waitReady = async (page, { timeout, stable }, orbit) => {
     const deadline = started + timeout
     let last = null
     let since = Date.now()
+    /** 조정자 "쉼" 을 처음 확인했을 때의 상태(busy/도엽 수). 같은 상태로 stable 동안 더 있고 다시 쉼이면 준비 */
+    let idleKey = null
     while (Date.now() < deadline) {
         const [busy, tiles] = await page.evaluate(() => {
             const el = document.querySelector("[data-debug-page]")
@@ -293,7 +298,17 @@ const waitReady = async (page, { timeout, stable }, orbit) => {
             last = key
             since = Date.now()
         } else if (busy === "0" && Date.now() - since >= stable) {
-            return { tiles: Number(tiles), readyMs: Date.now() - started, timedOut: false }
+            // 도엽 수가 stable 동안 그대로여도 조정자가 밖 도엽을 만드는 중일 수 있다(2026-10-23 남산 산림: 계단형 재생성 2.3초 뒤 밖 도엽이
+            // 와서 그 전에 찍혀 실행마다 밖 도엽 0/1 로 갈렸다). 디버그 훅(memory, 92a8954 부터)이 있으면 조정자가 쉬는지(running false·
+            // pending 0)를 **두 번**, 그 사이 stable 동안 상태가 그대로인지 본다. 한 번만 보면 안 되는 이유: memory() 는 보조 워커 답을
+            // 기다린 뒤 running 을 읽어, 밖 도엽을 막 끝낸 순간엔 "쉼" 인데 메인의 도엽 수는 아직 안 바뀐 때가 있다. 훅이 없는 옛 빌드는 전과 같다
+            const idle = await page.evaluate(async () => {
+                const m = await window.__asrbbtDebug?.memory?.()
+                return m ? !m.workers.coordinator.running && m.workers.coordinator.pending === 0 : null
+            })
+            if (idle === null || (idle && idleKey === key)) return { tiles: Number(tiles), readyMs: Date.now() - started, timedOut: false, idle }
+            idleKey = idle ? key : null
+            since = Date.now()
         }
         await page.waitForTimeout(250)
     }

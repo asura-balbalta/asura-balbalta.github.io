@@ -398,9 +398,11 @@ export const TerrainViewCanvas = ({
                         if (!walkRef.current && tiles.bounds) {
                             // 카메라는 선택 도엽의 xy 범위와 **첫 도엽**의 z 범위로. 누적 z 범위를 쓰면 캔버스가 붙는 순간까지 도착한 도엽 수에
                             // 따라 높이가 달라져 같은 주소라도 캡처가 미세하게 달랐다(2026-10-14 L2 비교에서 발견)
+                            // 디버그 orbitz= 가 있으면 그 높이로 고정한다(5K 가 여럿이면 첫 도엽이 보조 워커 경쟁으로 실행마다 달라서. 2026-10-23)
                             const xy = tiles.bounds
-                            const z = event.tile.bounds
-                            cameraRef.current = initialCamera({ min: [xy.min[0], xy.min[1], z.min[2]], max: [xy.max[0], xy.max[1], z.max[2]] })
+                            const zMin = renderDebugRef.current?.orbitZ ?? event.tile.bounds.min[2]
+                            const zMax = renderDebugRef.current?.orbitZ ?? event.tile.bounds.max[2]
+                            cameraRef.current = initialCamera({ min: [xy.min[0], xy.min[1], zMin], max: [xy.max[0], xy.max[1], zMax] })
                             renderer.updaters.cameraUpdater(cameraRef.current)
                         }
                     }
