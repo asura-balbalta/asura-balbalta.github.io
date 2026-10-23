@@ -10,7 +10,7 @@ import { loadRoadCodes, loadRoads, RoadFace, RoadLine } from "./roadsData"
 import { buildRoadsMesh, ROAD_LIFT_M, roadDisplayChunks, RoadMesh } from "./roadsMesh"
 import { cloneRoadTable, ROAD_LINE_FLAG, RoadTable, roadTableBuffers } from "./roadTable"
 import { ClippedMesh, clipMeshToConvexPolygon } from "./terrainClip"
-import { fetchGunzip, MeshChunk, TinMesh } from "./terrainData"
+import { dataCacheStats, fetchGunzip, heapBytes, MeshChunk, TinMesh } from "./terrainData"
 import { TTP_BASE } from "./terrainIndex"
 import { mergeTtpTilesForTile, parseTtp, TtpTile } from "./terrainPslg"
 import { buildSteppedMeshChunks } from "./terrainSteps"
@@ -47,7 +47,11 @@ export type BuildJob = {
     maxBytes: number
     extra: boolean
 }
-export type BuildRequest = BuildJob | { type: "reset" }
+export type BuildRequest =
+    | BuildJob
+    | { type: "reset" }
+    /** 캐시 메모리 보고(디버그 페이지 memory(), 계획서 19절). 조정자가 port 로 받는다 */
+    | { type: "memory"; port: MessagePort }
 export type BuildResponse =
     | { type: "built"; jobId: number; data: TileData }
     | { type: "failed"; jobId: number; message: string }
@@ -146,9 +150,8 @@ const tinCacheSet = (id: string, tin: ClippedMesh) => {
 
 /** 도엽별 세운 건물 결과 캐시(표현 방식과 무관하므로 재생성 때 다시 만들지 않는다). transfer 전에 복사해 둔다 */
 const builtBuildingsCache = new Map<string, { buildings: TinMesh | null; buildingTable: BuildingTable | null; built: number }>()
-/** 메모리 측정(2026-10-15): 이 워커가 만든 도엽 수와 건물 결과 캐시 바이트 */
+/** 메모리 측정(2026-10-15): 이 워커가 만든 도엽 수. 캐시 바이트는 memoryStats 가 캐시 내용에서 센다(2026-10-23) */
 let builtCount = 0
-let builtBuildingsBytes = 0
 
 /** 5K 단위 건물 목록(무게중심 m 미리 계산): `${id5k}@${ox},${oy}` → 목록 */
 type BuildingWithCenter = { b: Building; cx: number; cy: number }
@@ -179,7 +182,6 @@ const buildingsOf5k = (id5k: string, bbox3857: Extent, origin: [number, number])
  * 키는 도엽 id + 얹기 스위치(clip·bridge). transfer 전에 복사해 둔다
  */
 const builtRoadsCache = new Map<string, { roads: RoadMesh | null; roadTable: RoadTable | null; stats: TileData["roadStats"] }>()
-let builtRoadsBytes = 0
 /** 5K 단위 도로 조각·선 목록(xy 범위 m 미리 계산): `${id5k}@${ox},${oy}` → 목록 */
 type WithBounds<T> = { item: T; x0: number; y0: number; x1: number; y1: number }
 const roads5kCache = new Map<string, Promise<{ faces: WithBounds<RoadFace>[]; lines: WithBounds<RoadLine>[] }>>()
@@ -210,7 +212,6 @@ const roadsOf5k = (id5k: string, bbox3857: Extent, origin: [number, number]) => 
  * 5K 단위 물 조각·선 목록은 waterOf5k(`${id5k}@${ox},${oy}`)
  */
 const builtWaterCache = new Map<string, { water: WaterMesh | null; waterTable: WaterTable | null; stats: TileData["waterStats"] }>()
-let builtWaterBytes = 0
 const water5kCache = new Map<string, Promise<{ pieces: WaterPiece[]; lines: WaterLine[]; names: WaterNames }>>()
 const waterOf5k = (id5k: string, bbox3857: Extent, origin: [number, number]) => {
     const key = `${id5k}@${origin[0]},${origin[1]}`
@@ -228,7 +229,6 @@ const waterOf5k = (id5k: string, bbox3857: Extent, origin: [number, number]) => 
  * 5K 단위 임상도 폴리곤(flags & 1 중복 제거한 것)은 forestOf5k(`${id5k}@${ox},${oy}`)
  */
 const builtForestCache = new Map<string, { mask: ForestMask | null; table: ForestTable | null; skipped: number }>()
-let builtForestBytes = 0
 const forest5kCache = new Map<string, Promise<ForestPolygon[]>>()
 const forestOf5k = (id5k: string, bbox3857: Extent, origin: [number, number]) => {
     const key = `${id5k}@${origin[0]},${origin[1]}`
@@ -248,14 +248,59 @@ const reset = () => {
     builtBuildingsCache.clear()
     buildings5kCache.clear()
     builtRoadsCache.clear()
-    builtRoadsBytes = 0
     roads5kCache.clear()
     builtWaterCache.clear()
-    builtWaterBytes = 0
     water5kCache.clear()
     builtForestCache.clear()
-    builtForestBytes = 0
     forest5kCache.clear()
+}
+
+/**
+ * 캐시 메모리 측정(2026-10-23, 계획서 19절): 이 워커 캐시의 항목 수·바이트. 층은 데이터 모듈 파일(data, 지우지 않음) · 5K 목록(lists) ·
+ * 도엽 결과(results)와 지형(5K 파일·자른 TIN). typed array 만 센다(항목 객체·구멍 배열·이름 문자열은 빠져 실제 힙은 더 크다).
+ * 디버그 페이지 memory() 와 50개마다 찍는 로그가 부른다
+ */
+const memoryStats = async () => {
+    const sum = (...xs: ({ byteLength: number } | null | undefined)[]) => xs.reduce((s: number, x) => s + (x?.byteLength ?? 0), 0)
+    const tables = (bufs: ArrayBuffer[] | null) => bufs?.reduce((s, b) => s + b.byteLength, 0) ?? 0
+    const xy = (items: { xy: Int32Array }[]) => items.reduce((s, it) => s + it.xy.byteLength, 0)
+    const lists = async <V>(cache: Map<string, Promise<V>>, bytesOf: (v: V) => number) => {
+        let bytes = 0
+        for (const r of await Promise.allSettled(cache.values())) if (r.status === "fulfilled") bytes += bytesOf(r.value)
+        return { count: cache.size, bytes }
+    }
+    const results = <V>(cache: Map<string, V>, bytesOf: (v: V) => number) => {
+        let bytes = 0
+        for (const v of cache.values()) bytes += bytesOf(v)
+        return { count: cache.size, bytes }
+    }
+    return {
+        built: builtCount,
+        heap: heapBytes(),
+        // 5K 파일은 파싱 결과가 gunzip 한 버퍼의 view 라 그 버퍼 크기
+        terrain: { ttp: await lists(ttpCache, (f) => f.tiles[0]?.lineXY.buffer.byteLength ?? 0), tin: { count: tinCache.size, bytes: tinCacheBytes } },
+        lists: {
+            buildings: await lists(buildings5kCache, (l) => xy(l.map((x) => x.b))),
+            roads: await lists(roads5kCache, (l) => xy(l.faces.map((x) => x.item)) + xy(l.lines.map((x) => x.item))),
+            water: await lists(water5kCache, (l) => xy(l.pieces) + xy(l.lines)),
+            forest: await lists(forest5kCache, xy),
+        },
+        results: {
+            buildings: results(builtBuildingsCache, (v) => sum(v.buildings?.positions, v.buildings?.indices) + tables(v.buildingTable && buildingTableBuffers(v.buildingTable))),
+            roads: results(builtRoadsCache, (v) => sum(v.roads?.positions, v.roads?.indices, v.roads?.normals) + tables(v.roadTable && roadTableBuffers(v.roadTable))),
+            water: results(builtWaterCache, (v) => sum(v.water?.positions, v.water?.indices, v.water?.normals) + tables(v.waterTable && waterTableBuffers(v.waterTable))),
+            forest: results(builtForestCache, (v) => sum(v.mask?.data) + tables(v.table && forestTableBuffers(v.table))),
+        },
+        data: dataCacheStats,
+    }
+}
+export type HelperMemory = Awaited<ReturnType<typeof memoryStats>>
+/** 50개마다 콘솔에(메모리 측정 2026-10-15. 2026-10-23 표를 넣고 5K 목록·데이터 모듈 바이트를 더함). 넷은 건물·도로·물·산림 순 */
+const logMemory = (m: HelperMemory) => {
+    const mb = (s: { bytes: number }) => (s.bytes / 1048576).toFixed(1)
+    const four = (o: HelperMemory["lists"]) => `${[o.buildings, o.roads, o.water, o.forest].map(mb).join("·")} MB(${[o.buildings, o.roads, o.water, o.forest].map((s) => s.count).join("·")}개)`
+    const data = Object.entries(m.data).map(([k, s]) => `${k} ${mb(s)} MB(${s.count})`).join(", ")
+    console.log(`메모리(보조 워커 캐시): 만든 도엽 ${m.built}, 자른 TIN ${mb(m.terrain.tin)} MB(${m.terrain.tin.count}개), 5K 파일 ${mb(m.terrain.ttp)} MB(${m.terrain.ttp.count}개), 도엽 결과 ${four(m.results)}, 5K 목록 ${four(m.lists)}, 데이터 모듈 ${data}`)
 }
 
 /**
@@ -352,7 +397,6 @@ const buildTile = async (job: BuildJob): Promise<{ data: TileData; transfer: Tra
                 buildingTable: buildingTable && cloneBuildingTable(buildingTable),
                 built,
             })
-            if (buildings) builtBuildingsBytes += buildings.positions.byteLength + buildings.indices.byteLength
         } catch (err) {
             console.warn(`도엽 ${t.name} 건물 실패:`, err)
         }
@@ -411,7 +455,6 @@ const buildTile = async (job: BuildJob): Promise<{ data: TileData; transfer: Tra
                 roadTable: roadTable && cloneRoadTable(roadTable),
                 stats: roadStats,
             })
-            if (roads) builtRoadsBytes += roads.positions.byteLength + roads.indices.byteLength + roads.normals.byteLength
         }
         if (roads && roadTable) {
             const lift = roadsStyle.lift ?? ROAD_LIFT_M
@@ -470,7 +513,6 @@ const buildTile = async (job: BuildJob): Promise<{ data: TileData; transfer: Tra
                 waterTable: waterTable && cloneWaterTable(waterTable),
                 stats: waterStats,
             })
-            if (water) builtWaterBytes += water.positions.byteLength + water.indices.byteLength + water.normals.byteLength
         }
         // 수면은 자체 면이라 표현 방식과 무관하게 같은 조각(계단화 없음)
         if (water && waterTable) waterChunks = waterDisplayChunks(water, waterStyle.lift ?? WATER_LIFT_M)
@@ -510,8 +552,6 @@ const buildTile = async (job: BuildJob): Promise<{ data: TileData; transfer: Tra
                     table: forestTable && cloneForestTable(forestTable),
                     skipped: forestSkipped,
                 })
-                if (forestMask) builtForestBytes += forestMask.data.byteLength
-                if (forestTable) for (const b of forestTableBuffers(forestTable)) builtForestBytes += b.byteLength
             }
         } catch (err) {
             console.warn(`도엽 ${t.name} 산림 실패:`, err)
@@ -522,9 +562,7 @@ const buildTile = async (job: BuildJob): Promise<{ data: TileData; transfer: Tra
     )
 
     builtCount++
-    if (builtCount % 50 === 0) {
-        console.log(`메모리(보조 워커 캐시): 만든 도엽 ${builtCount}, 자른 TIN ${(tinCacheBytes / 1048576).toFixed(1)} MB(${tinCache.size}개), 건물 결과 ${(builtBuildingsBytes / 1048576).toFixed(1)} MB(${builtBuildingsCache.size}개), 도로 결과 ${(builtRoadsBytes / 1048576).toFixed(1)} MB(${builtRoadsCache.size}개), 물 결과 ${(builtWaterBytes / 1048576).toFixed(1)} MB(${builtWaterCache.size}개), 산림 마스크 ${(builtForestBytes / 1048576).toFixed(1)} MB(${builtForestCache.size}개), 5K 파일 ${ttpCache.size}개, 5K 건물 목록 ${buildings5kCache.size}개, 5K 도로 목록 ${roads5kCache.size}개, 5K 물 목록 ${water5kCache.size}개, 5K 산림 목록 ${forest5kCache.size}개`)
-    }
+    if (builtCount % 50 === 0) void memoryStats().then(logMemory)
     const xy = positionsBounds(tin.positions)
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
     for (const [x, y] of poly) {
@@ -603,6 +641,10 @@ self.onmessage = async (e: MessageEvent<BuildRequest>) => {
     const msg = e.data
     if (msg.type === "reset") {
         reset()
+        return
+    }
+    if (msg.type === "memory") {
+        msg.port.postMessage(await memoryStats())
         return
     }
     try {

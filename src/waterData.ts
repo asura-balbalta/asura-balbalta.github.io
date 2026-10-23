@@ -1,6 +1,6 @@
 import type { Extent } from "ol/extent"
 
-import { fetchGunzip } from "./terrainData"
+import { fetchGunzip, noteCached, noteJson } from "./terrainData"
 import { getTtpSheetsInBbox } from "./terrainIndex"
 import { emptyWaterCodeNames, WaterCodeNames } from "./waterTable"
 
@@ -151,7 +151,7 @@ const fetchJsonCached = <T>(url: string): Promise<T> => {
     if (!p) {
         p = fetch(url).then(async (res) => {
             if (!res.ok) throw new Error(`${res.status} ${url}`)
-            return res.json()
+            return noteJson("water.json", res)
         })
         jsonCache.set(url, p)
         p.catch(() => jsonCache.delete(url))
@@ -182,7 +182,7 @@ const wtrCache = new Map<string, Promise<WtrFile>>()
 const fetchWtrCached = (path: string) => {
     let p = wtrCache.get(path)
     if (!p) {
-        p = fetchGunzip(`${WATER_BASE}/${path}`).then(parseWtr)
+        p = fetchGunzip(`${WATER_BASE}/${path}`).then((buf) => parseWtr(noteCached("water.file", buf.byteLength, buf)))
         wtrCache.set(path, p)
         p.catch(() => wtrCache.delete(path))
     }
@@ -195,7 +195,7 @@ const fetchNamesCached = (path: string) => {
     let p = namesCache.get(path)
     if (!p) {
         p = fetchGunzip(`${WATER_BASE}/${path}`).then((buf) => {
-            const json = JSON.parse(new TextDecoder().decode(buf)) as WaterNamesFile
+            const json = JSON.parse(new TextDecoder().decode(noteCached("water.names", buf.byteLength, buf))) as WaterNamesFile
             const map: WaterNames = new Map()
             for (let i = 0; i < json.name_id.length; i++) map.set(json.name_id[i], { name: json.name[i] ?? "", riverNo: json.river_no?.[i] ?? "" })
             return map

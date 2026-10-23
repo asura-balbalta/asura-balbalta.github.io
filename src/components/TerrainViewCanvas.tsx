@@ -53,6 +53,9 @@ export type WalkStart = {
     hover?: number
 }
 
+/** 디버그 페이지 훅(src/debug/hooks.ts, 계획서 19절)이 쓰는 캔버스 손잡이. teleport 는 둘러보기 중이 아니면 false */
+export type CanvasDebug = { teleport: (x: number, y: number) => boolean; gpu: () => { tiles: number; bytes: number } | null }
+
 /**
  * 메쉬 범위에 맞춘 초기 카메라를 만든다.
  * 메쉬 중심을 바라보고, 남쪽에서 약 34° 높이로 내려다보며, 메쉬 가로·세로 중 긴 쪽의 1.2배 거리에 둔다.
@@ -104,6 +107,7 @@ const initialCamera = ({ min, max }: MeshBounds): OrbitCamera => ({
  * @param props.onBuildingPin 포커스 중 클릭했을 때 그 건물(없는 곳을 클릭하면 null). 걸어 보기에서 나가면 null
  * @param props.onBuildingLock 포커스 중 더블클릭(350 ms 안 두 번)했을 때. 부모가 펼친 정보의 고정을 켠다
  * @param props.lockedBuilding 더블클릭으로 고정한 건물(부모 상태). 조준점이 어디를 봐도 이 건물은 계속 강조한다
+ * @param props.debugRef 디버그 페이지 훅에 줄 손잡이(순간 이동·GPU 상주)를 채울 곳. 운영은 없음
  */
 export const TerrainViewCanvas = ({
     tiles,
@@ -128,6 +132,7 @@ export const TerrainViewCanvas = ({
     onBuildingPin,
     onBuildingLock,
     lockedBuilding = null,
+    debugRef,
 }: {
     tiles: TerrainTilesClient
     layers?: LayerStates
@@ -153,6 +158,7 @@ export const TerrainViewCanvas = ({
     onBuildingPin?: (hit: BuildingHit | null) => void
     onBuildingLock?: () => void
     lockedBuilding?: BuildingHit | null
+    debugRef?: React.RefObject<CanvasDebug | null>
 }) => {
     // 콜백이 렌더마다 새로 만들어져도 effect 를 다시 돌리지 않도록 ref 로 받는다
     const onWalkMoveRef = useRef(onWalkMove)
@@ -212,6 +218,17 @@ export const TerrainViewCanvas = ({
     useEffect(() => {
         pushHighlightRef.current()
     }, [lockedBuilding, renderer])
+    // 디버그 페이지 훅(계획서 19절). teleport 는 평소 이동처럼 onMove → 주변 도엽 스트리밍·상주 갱신을 탄다
+    useEffect(() => {
+        if (!debugRef) return
+        debugRef.current = {
+            teleport: (x, y) => (walkRef.current ? (walkRef.current.teleport(x, y), true) : false),
+            gpu: () => renderer?.updaters.residentStats() ?? null,
+        }
+        return () => {
+            debugRef.current = null
+        }
+    }, [debugRef, renderer])
     const cameraRef = useRef<OrbitCamera | null>(null)
     /**
      * 눌려 있는 포인터(마우스 버튼·손가락)의 pointerId → 마지막 위치. 하나면 끌어서 회전, 둘이면 두 점 거리 변화로 확대·축소.

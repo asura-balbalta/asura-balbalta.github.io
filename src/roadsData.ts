@@ -1,7 +1,7 @@
 import type { Extent } from "ol/extent"
 
 import { emptyRoadCodeNames, ROAD_FACE_FLAG, ROAD_LINE_FLAG, RoadCodeNames } from "./roadTable"
-import { fetchGunzip } from "./terrainData"
+import { fetchGunzip, noteCached, noteJson } from "./terrainData"
 import { getTtpSheetsInBbox } from "./terrainIndex"
 
 /**
@@ -167,7 +167,7 @@ const fetchJsonCached = <T>(url: string): Promise<T> => {
     if (!p) {
         p = fetch(url).then(async (res) => {
             if (!res.ok) throw new Error(`${res.status} ${url}`)
-            return res.json()
+            return noteJson("roads.json", res)
         })
         jsonCache.set(url, p)
         p.catch(() => jsonCache.delete(url))
@@ -203,7 +203,7 @@ const rdsCache = new Map<string, Promise<RdsFile>>()
 const fetchRdsCached = (path: string) => {
     let p = rdsCache.get(path)
     if (!p) {
-        p = fetchGunzip(`${ROADS_BASE}/${path}`).then(parseRds)
+        p = fetchGunzip(`${ROADS_BASE}/${path}`).then((buf) => parseRds(noteCached("roads.file", buf.byteLength, buf)))
         rdsCache.set(path, p)
         p.catch(() => rdsCache.delete(path))
     }

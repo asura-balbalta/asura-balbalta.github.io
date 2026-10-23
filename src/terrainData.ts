@@ -59,3 +59,23 @@ export const fetchGunzip = async (url: string) => {
     return new Response(raw).arrayBuffer()
 }
 
+/**
+ * 캐시 메모리 측정(2026-10-23, 계획서 19절): 데이터 모듈의 파일·JSON 캐시(지우지 않는다)에 들어간 항목 수와 바이트(gunzip 뒤. JSON 은 글자 수라
+ * 대략). 키는 "레이어.종류". 워커·메인 스레드마다 따로 쌓이고 디버그 페이지 memory() 가 읽는다
+ */
+export const dataCacheStats: Record<string, { count: number; bytes: number }> = {}
+/** 캐시 항목 하나가 풀릴 때 적는다. value 를 그대로 돌려줘 then 사슬에 끼운다 */
+export const noteCached = <T>(key: string, bytes: number, value: T): T => {
+    const s = (dataCacheStats[key] ??= { count: 0, bytes: 0 })
+    s.count++
+    s.bytes += bytes
+    return value
+}
+/** fetch 응답을 JSON 으로 읽으며 글자 수를 적는다(res.json() 과 같은 결과) */
+export const noteJson = async (key: string, res: Response) => {
+    const text = await res.text()
+    return JSON.parse(noteCached(key, text.length, text))
+}
+/** 이 스레드의 JS 힙 사용량(Chrome 전용 performance.memory, 거친 값). 없으면 null */
+export const heapBytes = () => (performance as Performance & { memory?: { usedJSHeapSize: number } }).memory?.usedJSHeapSize ?? null
+

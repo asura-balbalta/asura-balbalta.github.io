@@ -7,9 +7,9 @@ import type { WaterZMode } from "./waterMesh"
 import { WaterTable, waterTableBuffers } from "./waterTable"
 import type { ForestMask } from "./forestMask"
 import { ForestTable, forestTableBuffers } from "./forestTable"
-import type { MeshChunk, TinMesh } from "./terrainData"
+import { dataCacheStats, heapBytes, MeshChunk, TinMesh } from "./terrainData"
 import { getTtpSheetsInBbox, MB_PER_TILE, neighborReach, SELECTION_TILE_LIMITS } from "./terrainIndex"
-import type { BuildRequest, BuildResponse } from "./terrainTileBuild.worker"
+import type { BuildRequest, BuildResponse, HelperMemory } from "./terrainTileBuild.worker"
 import type { TerrainMode } from "./webgpu/terrainRenderer"
 
 /**
@@ -93,6 +93,8 @@ export type TerrainTilesRequest =
           /** 선택 범위 밖 도엽 상한 */
           maxTiles: number
       }
+    /** 캐시 메모리 보고(디버그 페이지 memory(), 계획서 19절). 보조 워커마다 묻고 이 워커 몫과 합쳐 port 로 돌려준다 */
+    | { type: "memory"; port: MessagePort }
 
 /** 도엽의 자리(선택 직후 목록용) */
 export type TileSummary = {
@@ -418,6 +420,35 @@ const run = async () => {
     }
 }
 
+/**
+ * 캐시 메모리 보고(2026-10-23, 계획서 19절): 보조 워커별 캐시(HelperMemory)와 이 워커의 인덱스 JSON 캐시·로드된 도엽.
+ * live5k 는 로드된 도엽(선택 + 밖)이 속한 5K(지금 쓰는 것). 보조 워커의 5K 목록 수와 견주면 들고만 있는 5K 가 보인다
+ */
+const memoryReport = async () => {
+    const ask = (w: Worker) =>
+        new Promise<HelperMemory>((resolve) => {
+            const ch = new MessageChannel()
+            ch.port1.onmessage = (e) => resolve(e.data)
+            w.postMessage({ type: "memory", port: ch.port2 } satisfies BuildRequest, [ch.port2])
+        })
+    const tiles = [...loaded.values()]
+    return {
+        helpers: await Promise.all(helpers.map((h) => ask(h.worker))),
+        coordinator: {
+            heap: heapBytes(),
+            data: dataCacheStats,
+            running,
+            pending: pending.length,
+            loaded: tiles.length,
+            extra: tiles.filter((t) => t.extra).length,
+            live5k: [...new Set(tiles.map((t) => t.tile.id5k))],
+            fetched5k: fetchedPaths.size,
+            walk: walk?.center ?? null,
+        },
+    }
+}
+export type WorkerMemory = Awaited<ReturnType<typeof memoryReport>>
+
 /** 선택: 도엽 목록·원점 → 보조 워커 캐시 비우기 → 중심에서 가까운 순으로 큐에 넣기(5K 파일은 보조 워커가 필요할 때 받는다) */
 const select = async (msg: Extract<TerrainTilesRequest, { type: "select" }>) => {
     const gen = ++generation
@@ -475,6 +506,8 @@ self.onmessage = async (e: MessageEvent<TerrainTilesRequest>) => {
     try {
         if (msg.type === "select") {
             await select(msg)
+        } else if (msg.type === "memory") {
+            msg.port.postMessage(await memoryReport())
         } else if (msg.type === "rebuild") {
             if (!cfg) return
             const queued = new Set(pending.map((p) => p.tile.map_id))

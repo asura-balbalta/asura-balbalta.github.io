@@ -124,6 +124,18 @@ npm run render-check -- --params "bbox=14135700,4513980,14136500,4514780&yaw=90&
 
 예: `http://localhost:3000/#/debug/app?gpu=0`
 
+### 디버그 훅 `window.__asrbbtDebug`(`src/debug/hooks.ts`, 2026-10-23 계획서 19절)
+
+두 디버그 페이지(`#/debug/walk`·`#/debug/app`)에서만 설치된다(AppRoot `onDebugApi`. 운영 주소에는 없다). 내장 브라우저 `javascript_tool` 로 부른다.
+
+| 함수 | 하는 일 |
+| --- | --- |
+| `memory()` | 캐시 메모리 보고(Promise). `workers.helpers[i]`: 보조 워커별 지형(5K 파일·자른 TIN)·5K 목록(`lists`)·도엽 결과(`results`)·데이터 모듈 파일/JSON(`data`, 지우지 않는 캐시) 항목 수·바이트. `workers.coordinator`: 인덱스 JSON·로드된 도엽 수·`live5k`(로드된 도엽의 5K)·`running`·`pending`·걸어 보기 중심(5179). `main`: 원점·메인 도엽 사본(`tiles.memory()`)·메인의 데이터 모듈 캐시·JS 힙. `gpu`: 상주 도엽·바이트. typed array 만 센다(항목 객체·문자열 빠짐). 워커 힙은 Chrome 이 주지 않아 null |
+| `teleport(x, y)` | 둘러보기 플레이어를 메쉬 로컬 m(`spawn=` 과 같은 좌표)으로 옮긴다. 평소 이동처럼 주변 도엽 스트리밍·GPU 상주가 따라온다. 둘러보기 중이 아니면 오류 |
+| `select(bbox3857)` | 지도에서 범위를 확정한 것과 같은 경로(워커 캐시 reset). 둘러보기 중이면 먼저 나간다. 끝은 `data-busy` 0, 또는 `memory()` 의 `coordinator.running` false·`pending` 0 으로 본다 |
+
+준비 신호로는 `memory()` 를 1.5초마다 불러 `running` false·`pending` 0·도엽 수가 두 번 연속 같으면 멈춘 것으로 본다(2026-10-23 측정 드라이버).
+
 ## 6. 기능을 더하거나 고칠 때: 전후 비교로 회귀까지 확인(2026-10-14 결정 by @nanangqq)
 
 기능 하나를 더하거나 고칠 때마다 디버그 페이지와 자동 캡처로 **새 기능이 동작하는지**와 **이전 기능이 망가지지 않았는지**를 한 번에 본다. 같은 주소·크기면 같은 자리·각도가 보장되므로 전후 PNG·지표를 그대로 견줄 수 있다.

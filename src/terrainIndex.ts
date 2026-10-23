@@ -1,7 +1,7 @@
 import type { Extent } from "ol/extent"
 import proj4 from "proj4"
 
-import { TileInfo } from "./terrainData"
+import { noteJson, TileInfo } from "./terrainData"
 
 /**
  * terrain_tile_pslg(ttp) 운영 base URL(R2 버킷 asrbbt-layers 의 커스텀 도메인, 운영·로컬 개발 공통 기본값).
@@ -61,7 +61,7 @@ const fetchJsonCached = <T>(url: string): Promise<T> => {
     if (!p) {
         p = fetch(url).then(async (res) => {
             if (!res.ok) throw new Error(`${res.status} ${url}`)
-            return res.json()
+            return noteJson("index.json", res)
         })
         jsonCache.set(url, p)
         p.catch(() => jsonCache.delete(url))

@@ -4,6 +4,7 @@ import type { Extent } from "ol/extent"
 import AppRoot, { AppDebugState, AppPreset } from "../app.tsx"
 import type { AoDebugMode } from "../webgpu/ao"
 import type { RenderDebug } from "../webgpu/terrainRenderer"
+import { installDebugHooks } from "./hooks"
 
 /**
  * 둘러보기 디버그 페이지(docs/design-code-plan.md 7절 J3). 같은 App 을 초기 상태 프리셋과 렌더 디버그 설정으로 띄워, 범위 선택 →
@@ -142,7 +143,7 @@ export const WalkDebugPage = ({ params }: { params: URLSearchParams }) => {
     const debugState = state.walking ? "walking" : state.busy ? "loading" : "ready"
     return (
         <>
-            <AppRoot preset={preset} renderDebug={renderDebug} onDebugState={setState} />
+            <AppRoot preset={preset} renderDebug={renderDebug} onDebugState={setState} onDebugApi={installDebugHooks} />
             <div
                 data-debug-page="walk"
                 data-debug-state={debugState}

@@ -1,6 +1,7 @@
 import React, { useMemo } from "react"
 
 import AppRoot, { AppEnv } from "../app.tsx"
+import { installDebugHooks } from "./hooks"
 
 /**
  * 운영 화면 디버그 페이지: 같은 App 을 브라우저 환경만 흉내 내어 띄운다(docs/design-code-plan.md 8절). 지형·둘러보기 프리셋은
@@ -50,7 +51,7 @@ export const AppDebugPage = ({ params }: { params: URLSearchParams }) => {
     for (const [key, value] of new URLSearchParams(query)) rows.push([key, value])
     return (
         <>
-            <AppRoot env={env} />
+            <AppRoot env={env} onDebugApi={installDebugHooks} />
             <div
                 data-debug-page="app"
                 style={{

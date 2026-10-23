@@ -50,6 +50,8 @@ export type Player = {
     setGroundStep: (step: number | null) => void
     /** 다시 포커스(포인터 잠금 요청). Esc 로 풀린 뒤 화면을 클릭했을 때 */
     focus: () => void
+    /** 그 자리(메쉬 로컬 m)로 순간 이동(디버그 페이지 teleport, 계획서 19절). 발은 그 자리 지표(없으면 지금 높이), 속도 0. onMove 로 바로 알린다 */
+    teleport: (x: number, y: number) => void
 }
 
 /** 조절할 수 있는 물리 값 */
@@ -365,5 +367,13 @@ export const createPlayer = ({
             if (g !== null) ground = g
         },
         focus: requestLock,
+        teleport: (tx, ty) => {
+            x = tx
+            y = ty
+            vx = vy = vz = 0
+            ground = groundAt(x, y) ?? ground
+            z = ground
+            notify()
+        },
     }
 }

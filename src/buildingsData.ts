@@ -1,6 +1,6 @@
 import type { Extent } from "ol/extent"
 
-import { fetchGunzip } from "./terrainData"
+import { fetchGunzip, noteCached, noteJson } from "./terrainData"
 import { getTtpSheetsInBbox } from "./terrainIndex"
 
 /**
@@ -149,7 +149,7 @@ const fetchJsonCached = <T>(url: string): Promise<T> => {
     if (!p) {
         p = fetch(url).then(async (res) => {
             if (!res.ok) throw new Error(`${res.status} ${url}`)
-            return res.json()
+            return noteJson("buildings.json", res)
         })
         jsonCache.set(url, p)
         p.catch(() => jsonCache.delete(url))
@@ -187,7 +187,7 @@ const bfpCache = new Map<string, Promise<ReturnType<typeof parseBfp>>>()
 const fetchBfpCached = (path: string) => {
     let p = bfpCache.get(path)
     if (!p) {
-        p = fetchGunzip(`${BUILDINGS_BASE}/${path}`).then(parseBfp)
+        p = fetchGunzip(`${BUILDINGS_BASE}/${path}`).then((buf) => parseBfp(noteCached("buildings.file", buf.byteLength, buf)))
         bfpCache.set(path, p)
         p.catch(() => bfpCache.delete(path))
     }
@@ -199,7 +199,7 @@ const fetchNamesCached = (id5k: string) => {
     let p = namesCache.get(id5k)
     if (!p) {
         p = fetchGunzip(`${BUILDINGS_BASE}/names/v1/${id5k.slice(0, 5)}/${id5k}.json.gz`).then(
-            (bytes) => JSON.parse(new TextDecoder().decode(bytes)) as BuildingNamesFile,
+            (bytes) => JSON.parse(new TextDecoder().decode(noteCached("buildings.names", bytes.byteLength, bytes))) as BuildingNamesFile,
         )
         namesCache.set(id5k, p)
         p.catch(() => namesCache.delete(id5k))

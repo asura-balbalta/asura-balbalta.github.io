@@ -1,7 +1,7 @@
 import type { Extent } from "ol/extent"
 
 import { emptyForestCodeNames, FOREST_FLAG, ForestCodeNames } from "./forestTable"
-import { fetchGunzip } from "./terrainData"
+import { fetchGunzip, noteCached, noteJson } from "./terrainData"
 import { getTtpSheetsInBbox } from "./terrainIndex"
 
 /**
@@ -168,7 +168,7 @@ const fetchJsonCached = <T>(url: string): Promise<T> => {
     if (!p) {
         p = fetch(url).then(async (res) => {
             if (!res.ok) throw new Error(`${res.status} ${url}`)
-            return res.json()
+            return noteJson("forest.json", res)
         })
         jsonCache.set(url, p)
         p.catch(() => jsonCache.delete(url))
@@ -217,7 +217,7 @@ const frsCache = new Map<string, Promise<FrsFile>>()
 const fetchFrsCached = (path: string) => {
     let p = frsCache.get(path)
     if (!p) {
-        p = fetchGunzip(`${FOREST_BASE}/${path}`).then(parseFrs)
+        p = fetchGunzip(`${FOREST_BASE}/${path}`).then((buf) => parseFrs(noteCached("forest.file", buf.byteLength, buf)))
         frsCache.set(path, p)
         p.catch(() => frsCache.delete(path))
     }

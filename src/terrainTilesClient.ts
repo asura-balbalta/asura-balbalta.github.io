@@ -7,7 +7,7 @@ import { mergeWaterTables, NOT_BUILT, WATER_KIND, WaterTable, waterTableBuffers 
 import { ForestTable, forestTableBuffers, forestTypeCounts } from "./forestTable"
 import type { MeshChunk } from "./terrainData"
 import type { TinMesh } from "./terrainData"
-import type { TerrainTilesRequest, TerrainTilesResponse, TileData, TileStyle, TileSummary } from "./terrainTiles.worker"
+import type { TerrainTilesRequest, TerrainTilesResponse, TileData, TileStyle, TileSummary, WorkerMemory } from "./terrainTiles.worker"
 import type { MeshBounds } from "./webgpu/terrainRenderer"
 
 /** esbuild 가 src/terrainTiles.worker.ts 를 별도 entry 로 묶어 내는 파일. index.html 의 index.js 와 같은 폴더(dist)에 있다 */
@@ -367,6 +367,13 @@ export const createTerrainTiles = () => {
             return { count, triangles, buildings, roads, water, forest }
         },
         memory: memoryStats,
+        /** 워커 쪽 캐시 메모리 보고(디버그 페이지 memory(), 계획서 19절). 운영에서는 부르지 않는다 */
+        workerMemory: () =>
+            new Promise<WorkerMemory>((resolve) => {
+                const ch = new MessageChannel()
+                ch.port1.onmessage = (e) => resolve(e.data)
+                worker.postMessage({ type: "memory", port: ch.port2 } satisfies TerrainTilesRequest, [ch.port2])
+            }),
         /**
          * 선택 도엽(밖 도엽 제외)의 TIN·건물을 각각 한 메쉬로 합친다(내보내기용). 도엽 경계의 정점은 중복되지만 파일에는 무해하다.
          * 건물 메쉬에는 도엽별 건물 표를 정점·삼각형 오프셋에 맞춰 합친 표(table)를 붙여 SKP·3DM 이 건물마다 그룹·속성을 만들 수 있게 한다(L3)

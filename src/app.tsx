@@ -9,7 +9,7 @@ import { getDistance } from "ol/sphere"
 // Firebase 앱 초기화(부수효과). 값은 아직 쓰지 않는다
 import "./fb"
 import { basemapAttribution, BasemapProvider } from "./basemap"
-import { TerrainViewCanvas } from "./components/TerrainViewCanvas"
+import { CanvasDebug, TerrainViewCanvas } from "./components/TerrainViewCanvas"
 import type { ExportKind } from "./export/download"
 import { exportableLayers, runExport } from "./export/runExport"
 import { INITIAL_LAYER_STATES, LAYER_DEFS, LayerId, LayerStates } from "./layers"
@@ -81,6 +81,15 @@ export type AppDebugState = {
     walking: boolean
     /** 둘러보기 중 들고 있는 주변 도엽 수 */
     tiles: number
+}
+
+/** 디버그 페이지 훅(window.__asrbbtDebug, src/debug/hooks.ts. 계획서 19절)에 넘기는 앱 손잡이. 운영은 없음 */
+export type AppDebugApi = {
+    tiles: TerrainTilesClient
+    /** 캔버스 손잡이(순간 이동·GPU 상주). 3D 캔버스가 없으면 null */
+    canvas: () => CanvasDebug | null
+    /** 사용자가 지도에서 범위를 확정한 것과 같은 경로(둘러보기 중이면 먼저 나간다. 범위 그리기는 둘러보기 중 막혀 있다) */
+    select: (bbox: Extent) => void
 }
 
 /** localStorage 의 JSON 값. 없거나 깨졌으면 기본값. 걸어 보기의 테스트용 물리 값·알약 위치 저장에 쓴다 */
@@ -190,13 +199,21 @@ const extentKmText = (extent: Extent) => {
  * @param props.renderDebug 렌더 디버그 설정(디버그 페이지). 운영은 없음
  * @param props.onDebugState 앱 상태(busy·walking·도엽 수)가 바뀔 때(디버그 페이지의 준비 신호). 운영은 없음
  * @param props.env 브라우저 환경 흉내(디버그 페이지 `#/debug/app`). 운영은 없음
+ * @param props.onDebugApi 디버그 페이지 훅에 앱 손잡이를 넘긴다(언마운트 때 null). 운영은 없음
  */
 export default function AppRoot({
     preset,
     renderDebug,
     onDebugState,
     env,
-}: { preset?: AppPreset; renderDebug?: RenderDebug; onDebugState?: (state: AppDebugState) => void; env?: AppEnv } = {}) {
+    onDebugApi,
+}: {
+    preset?: AppPreset
+    renderDebug?: RenderDebug
+    onDebugState?: (state: AppDebugState) => void
+    env?: AppEnv
+    onDebugApi?: (api: AppDebugApi | null) => void
+} = {}) {
     // 색상표(장면 색)가 톤(UI·지도 라이트/다크)을 정한다. 톤 버튼은 그 톤의 내장 색상표를 고르는 것(계획서 13절 P2)
     const paletteStore = usePalettes(INITIAL_THEME)
     const theme = paletteStore.palette.tone
@@ -216,6 +233,7 @@ export default function AppRoot({
                 renderDebug={renderDebug}
                 onDebugState={onDebugState}
                 env={env}
+                onDebugApi={onDebugApi}
             />
             {/* 모바일은 탭 막대 위(ui.css --ui-above-tabbar: 20 + 56 + 8) */}
             <AppToaster bottom={isMobile ? 84 : 40} />
@@ -236,6 +254,7 @@ export default function AppRoot({
  * @param props.renderDebug 렌더 디버그 설정. TerrainViewCanvas 로 그대로 넘긴다
  * @param props.onDebugState 앱 상태가 바뀔 때(디버그 페이지의 준비 신호)
  * @param props.env 브라우저 환경 흉내(디버그 페이지). 없는 항목은 실제 판별(WEBGPU_AVAILABLE·LIQUID_GLASS_DEFAULT)
+ * @param props.onDebugApi 디버그 페이지 훅에 앱 손잡이를 넘긴다(AppDebugApi)
  */
 function App({
     theme,
@@ -247,6 +266,7 @@ function App({
     renderDebug,
     onDebugState,
     env,
+    onDebugApi,
 }: {
     theme: Theme
     setTheme: (theme: Theme) => void
@@ -258,6 +278,7 @@ function App({
     renderDebug?: RenderDebug
     onDebugState?: (state: AppDebugState) => void
     env?: AppEnv
+    onDebugApi?: (api: AppDebugApi | null) => void
 }) {
     /** WebGPU 를 쓸 수 있는지. 페이지가 사는 동안 바뀌지 않는다 */
     const webgpuSupported = env?.webgpu ?? WEBGPU_AVAILABLE
@@ -414,6 +435,20 @@ function App({
         if (document.pointerLockElement) document.exitPointerLock()
         setWalking(false)
     }
+    /** 디버그 페이지 훅의 캔버스 손잡이(TerrainViewCanvas 가 채운다. 운영은 onDebugApi 가 없어 캔버스에 넘기지 않는다) */
+    const canvasDebugRef = useRef<CanvasDebug | null>(null)
+    useEffect(() => {
+        if (!onDebugApi) return
+        onDebugApi({
+            tiles,
+            canvas: () => canvasDebugRef.current,
+            select: (bbox) => {
+                stopWalking()
+                squareToolRef.current?.confirm(bbox)
+            },
+        })
+        return () => onDebugApi(null)
+    }, [onDebugApi, tiles])
     const onWalkMove = (move: PlayerMove) => {
         const map = mapRef.current
         if (!map || !terrain) return
@@ -821,6 +856,7 @@ function App({
                     onBuildingPin={pinBuilding}
                     onBuildingLock={toggleBuildingLock}
                     lockedBuilding={buildingLocked ? pinnedBuilding : null}
+                    debugRef={onDebugApi && canvasDebugRef}
                     onError={(err) => {
                         // 렌더러를 못 만들면(어댑터 없음 등) 도엽은 받아도 올릴 곳이 없다. 원인을 보이고 잠금을 푼다
                         setBusy(false)
