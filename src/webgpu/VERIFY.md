@@ -191,7 +191,7 @@ npm run verify -- --refresh-baseline        # 기준 다시 찍기(아래 정책
 **기준 정책**
 
 - 기준 두 폴더: `docs/render-checks/golden-baseline/`(골든 + `manifest.json`: 커밋·Node·기록 수), `docs/render-checks/capture-baseline/`(54장 + `index.json` + `manifest.json`: 커밋·Chrome·장면 해시·완전 여부). **git 제외, 기계마다 따로**다(다른 Mac·Chrome 의 캡처와 섞지 않는다).
-- **커밋 뒤에는 HEAD 에서 `--refresh-baseline`** 으로 "후" 를 새 기준으로 만든다. **Chrome 이 올라가면**(실행이 버전 차이로 멈추면) 변경 전 커밋에서 다시 찍는다. 장면 목록(`verify-scenes.json`)·골든 도엽 세트를 바꿨을 때도.
+- **화면·워커 출력이 바뀐 커밋 뒤에는 HEAD 에서 `--refresh-baseline`** 으로 "후" 를 새 기준으로 만든다(기준 = 마지막으로 받아들인 상태). 배포 커밋(호스팅 캐시만)·문서·검증 스크립트만의 커밋 뒤에는 기준이 그대로 유효하므로 갱신하지 않는다. 기준 커밋과 HEAD 사이에 출력에 닿는 파일이 바뀐 커밋이 있으면 실행이 "갱신 권장" 을 알린다. **Chrome 이 올라가면**(실행이 버전 차이로 멈추면) 변경 전 커밋에서 다시 찍는다. 장면 목록(`verify-scenes.json`)·골든 도엽 세트를 바꿨을 때도.
 - 갱신은 출력에 닿는 커밋 안 된 변경(문서·검증 스크립트 밖)이 있으면 거부한다(`--allow-dirty` 로 일부러). 이전 기준은 지우지 않고 `<폴더>-<그 커밋>` 으로 옮긴다(필요 없으면 지워도 됨). 전체 갱신은 약 11분.
 
 ### 장면 내력과 레이어별 메모
@@ -218,7 +218,7 @@ npm run verify -- --refresh-baseline        # 기준 다시 찍기(아래 정책
    - 다르면 안 되는 곳이 다르면 3절(재현 → 좁히기 → 수치 → 수정)로.
 5. **동작 확인.** 내장 브라우저에서 디버그 주소로 들어가 콘솔 오류·조작(2절)을 본다. 운영 주소(해시 없음)도 한 번 열어 디버그 분기가 운영을 건드리지 않는지 본다.
 6. **기록.** 계획서 해당 절에 before/after 지표 요약 한 줄과 쓴 주소. 보고서에 넣을 PNG 만 `docs/report-assets/` 로 복사(`docs/render-checks/` 는 git 제외). 커밋은 Chrome 확인 by @nanangqq 뒤.
-7. **커밋 뒤 기준 갱신.** HEAD 에서 `npm run build` → `npm run verify -- --refresh-baseline`(새 기준 = 이번 "후").
+7. **커밋 뒤 기준 갱신.** 화면·워커 출력이 바뀐 커밋이면 HEAD 에서 `npm run build` → `npm run verify -- --refresh-baseline`(새 기준 = 이번 "후"). 배포·문서·스크립트만의 커밋이면 건너뛴다.
 
 손으로 찍을 때(특정 자리·높이 훑기 등)는 전처럼 `npm run render-check -- --params … --out …` 과 `--compare` 를 직접 쓴다(3.5절).
 

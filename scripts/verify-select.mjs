@@ -186,7 +186,8 @@ const newestMtime = (dir) => {
  */
 const checkEnv = async (args, needs) => {
     const notes = []
-    if (needs.captures) {
+    // dryRun: 서버·빌드 검사는 건너뛰고 기준 정보·갱신 권장만 모은다
+    if (needs.captures && !needs.dryRun) {
         try {
             const res = await fetch(`${args.server}/`)
             if (!res.ok) throw new Error(`HTTP ${res.status}`)
@@ -201,9 +202,25 @@ const checkEnv = async (args, needs) => {
         if (srcT > distT) notes.push(`경고: src 코드가 dist 보다 ${Math.round((srcT - distT) / 1000)}초 새롭습니다. npm run build 를 안 했으면 캡처는 옛 빌드입니다(Ctrl+C 뒤 빌드)`)
     }
     const chrome = chromeVersion()
+    /**
+     * 기준 커밋이 HEAD 와 다를 때, 그 사이 커밋이 출력에 닿는 파일(ui·docs·none 밖)을 건드렸으면 갱신을 권한다(2026-10-31 질문 by @nanangqq).
+     * 배포 커밋(호스팅 캐시만)·문서·검증 스크립트만 바뀐 커밋 뒤에는 기준이 그대로 유효하므로 조용히 넘어간다
+     */
+    const staleNote = (m, label) => {
+        if (!m?.commit || m.commit.endsWith("+dirty")) return
+        let head = ""
+        try { head = git("rev-parse", "--short", "HEAD") } catch { return }
+        if (m.commit === head) return
+        let changed = []
+        try { changed = lines(git("diff", "--name-only", "--relative", `${m.commit}..HEAD`)) } catch { return }
+        // 출력에 닿지 않는 분류: ui(캡처가 가리는 UI), none(문서 등), script(검증·보조 스크립트), export(내보내기 파일만), golden-tool(하네스)
+        const touching = changed.map(classify).filter((c) => !["ui", "none", "script", "export", "golden-tool"].includes(c.cls))
+        if (touching.length > 0) notes.push(`주의: ${label} 기준 커밋 ${m.commit} 이후 출력에 닿는 파일이 바뀐 커밋이 있습니다(${touching.slice(0, 3).map((c) => c.file).join(", ")}${touching.length > 3 ? ` 외 ${touching.length - 3}` : ""}). 차이가 이전 커밋 탓일 수 있으니 HEAD 에서 --refresh-baseline 을 권합니다`)
+    }
     if (needs.captures && needs.compare) {
         const m = readJson(path.resolve(ROOT, args.baseline, "manifest.json"))
         if (!m) throw new EnvError(`캡처 기준이 없습니다(${args.baseline}/manifest.json). npm run verify -- --refresh-baseline 으로 HEAD 에서 먼저 찍으세요`)
+        staleNote(m, "캡처")
         if (chrome && m.browser?.version !== chrome)
             throw new EnvError(`Chrome 버전이 기준과 다릅니다(기준 ${m.browser?.name} ${m.browser?.version}, 지금 ${chrome}). 버전이 다른 캡처는 비교하지 않습니다(VERIFY.md 7절 4). 변경 전 커밋에서 npm run verify -- --refresh-baseline 으로 기준을 새로 찍으세요`)
         if (m.complete === false) throw new EnvError(`캡처 기준이 불완전합니다(${args.baseline}/manifest.json errors). --refresh-baseline 다시`)
@@ -212,6 +229,7 @@ const checkEnv = async (args, needs) => {
     if (needs.golden && needs.compare) {
         const m = readJson(path.resolve(ROOT, args.golden, "manifest.json"))
         if (!m || !existsSync(path.resolve(ROOT, args.golden, "golden.json"))) throw new EnvError(`골든 기준이 없습니다(${args.golden}). npm run verify -- --refresh-baseline 먼저`)
+        staleNote(m, "골든")
         if (m.node !== process.version) notes.push(`주의: 골든 기준의 Node ${m.node} ≠ 지금 ${process.version}. 수학 함수 차이로 다를 수 있으니 차이가 나면 기준 커밋에서 --refresh-baseline`)
         notes.push(`골든 기준: ${m.commit} Node ${m.node} (${m.createdAt})`)
     }
@@ -354,7 +372,7 @@ const refreshBaseline = async (args) => {
     if (gCode !== 0) throw new EnvError(`골든을 만들지 못했습니다(종료 코드 ${gCode})`)
     const g = readJson(path.resolve(ROOT, args.golden, "golden.json"))
     const gMeta = g.meta
-    writeFileSync(path.resolve(ROOT, args.golden, "manifest.json"), JSON.stringify({ kind: "golden-baseline", commit, subject, createdAt: new Date().toISOString(), node: process.version, records: Object.keys(g.records).length, goldenCommit: gMeta.commit, workerDirty: gMeta.workerDirty, policy: "커밋 뒤 HEAD 에서 다시 찍는다(VERIFY.md 6절). 기계마다 따로(git 제외)" }, null, 2))
+    writeFileSync(path.resolve(ROOT, args.golden, "manifest.json"), JSON.stringify({ kind: "golden-baseline", commit, subject, createdAt: new Date().toISOString(), node: process.version, records: Object.keys(g.records).length, goldenCommit: gMeta.commit, workerDirty: gMeta.workerDirty, policy: "화면·워커 출력이 바뀐 커밋 뒤, 또는 Chrome 이 올라가면 HEAD 에서 다시 찍는다(VERIFY.md 6절). 배포·문서·스크립트만의 커밋 뒤에는 그대로. 기계마다 따로(git 제외)" }, null, 2))
 
     // 2) 전체 캡처
     const cCode = capture(SCENES.scenes, path.resolve(ROOT, args.baseline))
@@ -398,7 +416,16 @@ const main = async () => {
     const classified = files.map(classify)
     const plan = makePlan(classified, args.full)
     printPlan(source, classified, plan, SCENES.sizes, args.full)
-    if (args.dryRun) return 0
+    if (args.dryRun) {
+        // 계획만 볼 때도 기준 정보·갱신 권장은 보여 준다(서버 없음 같은 환경 오류는 참고로만)
+        try {
+            const { notes } = await checkEnv(args, { captures: plan.scenes.length > 0, golden: plan.golden, compare: true, dryRun: true })
+            for (const n of notes) console.log(n)
+        } catch (e) {
+            console.log(`(참고) ${e.message}`)
+        }
+        return 0
+    }
     if (!plan.golden && plan.scenes.length === 0) {
         console.log("검증할 것이 없습니다.")
         return 0
