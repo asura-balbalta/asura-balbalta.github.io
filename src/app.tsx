@@ -136,9 +136,9 @@ type TerrainInfo = {
     forest: { types: number[]; skipped: number }
 }
 
-/** 렌더 디버그 설정 중 도로 얹기 스위치(디버그 페이지 roadsclip=0·roadsbridge=0·roadslift=)를 도엽 스타일로 */
+/** 렌더 디버그 설정 중 도로 얹기 스위치(디버그 페이지 roadsclip=0·roadsbridge=0·roadslift=·stepmerge=0·liftfix=0)를 도엽 스타일로 */
 const roadsStyleOf = (debug?: RenderDebug): RoadsStyle | undefined =>
-    debug && { clip: debug.roadsClip, bridge: debug.roadsBridge, lift: debug.roadsLift }
+    debug && { clip: debug.roadsClip, bridge: debug.roadsBridge, lift: debug.roadsLift, merge: debug.roadsMerge, liftFix: debug.roadsLiftFix }
 /** 렌더 디버그 설정 중 물 얹기 스위치(waterclip=0·waterz=·waterlines=0·waterlift=·waterwidth=)를 도엽 스타일로 */
 const waterStyleOf = (debug?: RenderDebug): WaterStyle | undefined =>
     debug && { clip: debug.waterClip, zMode: debug.waterZ, lines: debug.waterLines, lift: debug.waterLift, ribbonWidth: debug.waterWidth, levelQuantile: debug.waterQ }

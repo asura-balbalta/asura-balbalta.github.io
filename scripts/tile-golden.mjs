@@ -27,6 +27,7 @@
  *                                                                              # a = 기준(전), b = 새 코드(산림 허용 2 는 이 방향만 통과)
  *                                                    [--fresh <dir>]            # 허용 6: a 와 다르지만 b 가 fresh 기준(도엽마다 새 워커)과 같은 묶음은 fresh-6
  *   npm run tile-golden -- --timing [--runs 5] [--configs tin,stepped] [--label timing-before]
+ *   공통: [--style '{"roads":{"merge":false}}'](모든 설정의 스타일에 덮어쓰기. 객체 항목은 한 단계 합침)
  *   npm run tile-golden -- --c0 [--sheets 37608033,...] [--no-result]
  *   npm run tile-golden -- --describe <id5k | x0,y0,x1,y1>  # 5K 의 1K 25장(자리·3857 범위), 또는 선택 bbox 에 걸리는 도엽. 도엽 고를 때
  *   npm run tile-golden -- --analyze <map_id>          # 도엽 하나의 C0 자료 대조를 항목까지
@@ -41,6 +42,7 @@ import { fileURLToPath, pathToFileURL } from "node:url"
 import { format } from "node:util"
 import { isMainThread, parentPort, Worker, workerData } from "node:worker_threads"
 import { gunzipSync, gzipSync } from "node:zlib"
+import { serialize } from "node:v8"
 
 const SELF_FILE = fileURLToPath(import.meta.url)
 const ROOT = path.resolve(path.dirname(SELF_FILE), "..")
@@ -235,6 +237,8 @@ function parseArgs(argv) {
             case "--common": a.common = true; break
             case "--fresh": a.fresh = take(); break
             case "--logs": a.logs = true; break
+            case "--dump": a.dump = take(); break
+            case "--style": a.style = JSON.parse(take()); break
             case "--timing": a.timing = true; break
             case "--runs": a.runs = Number(take()); break
             case "--c0": a.c0 = true; break
@@ -436,7 +440,11 @@ const parseLayerMs = (line) => {
         merge: n(/: (?:캐시|이웃 .*? 합침) (\d+)ms, /),
         mode: n(/, (?:tin|stepped) (\d+)ms, 삼각형/),
         buildings: n(/, 건물 \d+(?:\(캐시\))? (\d+)ms, 도로/),
-        roads: n(/, 도로 \d+\(교량 \d+, 숨김 \d+\)(?:\([^)]*\))? (?:받기 (\d+)ms \+ )?(\d+)ms, 물/),
+        // 계단형 접힘 수정(R1b 2026-10-31)·판 합치기(R1 2026-10-25)가 켜져 있으면 ms 뒤에 " 접힘 i회(정점 m 버림 k) Y.Yms"·" 판 합침 N→M(실패 k) X.Xms" 가
+        // 이 순서로 붙는다(도로 단계 ms 에 포함)
+        roads: n(/, 도로 \d+\(교량 \d+, 숨김 \d+\)(?:\([^)]*\))? (?:받기 (\d+)ms \+ )?(\d+)ms(?: (?:접힘|판 합침) [^,]*)?, 물/),
+        roadMerge: n(/, 도로 \d+\(교량 \d+, 숨김 \d+\)[^,]*? 판 합침 \d+→\d+\(실패 \d+\) ([\d.]+)ms, 물/),
+        roadFold: n(/, 도로 \d+\(교량 \d+, 숨김 \d+\)[^,]*? 접힘 \d+회\(정점 \d+ 버림 \d+\) ([\d.]+)ms(?: 판 합침 [^,]*)?, 물/),
         water: n(/, 물 \d+\(하천 \d+, 호소 \d+, 띠 \d+\)(?:\([^)]*\))? (?:받기 (\d+)ms \+ )?(\d+)ms, 산림/),
         // 산림이 끝 조각이 아니어도 읽게(C3 검토 L3): 다음 ", " 또는 줄 끝 앞의 "(받기 Nms + )Nms"
         forest: n(/, 산림 \d+(?:\(건너뜀 \d+\))? .*?(?:받기 (\d+)ms \+ )?(\d+)ms(?:, |$)/),
@@ -654,6 +662,15 @@ const flipMaskPixel = (data, job, inside) => {
 // ---- golden ----
 
 const STYLE_DEFAULT = { mode: "tin", step: 1, smoothNormals: true }
+/**
+ * 설정 하나의 스타일 = 기본값 + 설정 + --style 덮어쓰기(R1 2026-10-25: 모든 설정에 같은 스위치를 줄 때. 예 '{"roads":{"merge":false}}').
+ * 값이 객체인 항목(roads·water·forest)은 한 단계 더 합친다(roadsclip0 의 roads.clip 이 남게)
+ */
+const withStyle = (config, override) => {
+    const out = { ...STYLE_DEFAULT, ...config }
+    for (const [k, v] of Object.entries(override ?? {})) out[k] = v && typeof v === "object" && !Array.isArray(v) ? { ...(out[k] ?? {}), ...v } : v
+    return out
+}
 
 /**
  * 설정 × 장면 × 도엽을 정한 순서로 만들어 golden.json 을 쓴다.
@@ -700,9 +717,16 @@ async function runGolden(lib, bundles, args) {
         timing.push({ key, wall: Math.round(r.wall * 10) / 10, cpu: Math.round(r.cpu * 10) / 10, layers: r.layers })
         // --logs(C3 2026-10-23): 도엽 로그 줄을 남겨 층별 "(캐시)" 적중을 전후로 견준다(perf-check cacheFlags 와 같은 표시)
         if (args.logs) tileLogs.push({ key, line: r.logs.find((l) => l.startsWith("도엽 ")) ?? "" })
+        // --dump <dir>(stepmerge R0 2026-10-25, 읽기 전용): 기록마다 그릴 지형·도로 조각과 단계 ms 를 v8 직렬화로 남긴다(해시·비교에는 영향 없음)
+        if (args.dump) {
+            await mkdir(path.resolve(ROOT, args.dump), { recursive: true })
+            const d = r.msg.data
+            const pick = (cs) => cs.map((c) => ({ positions: c.positions, indices: c.indices, normals: c.normals ?? null }))
+            await writeFile(path.resolve(ROOT, args.dump, `${key.replace(/\|/g, "__")}.v8`), serialize({ key, layers: r.layers, wall: r.wall, line: r.logs.find((l) => l.startsWith("도엽 ")) ?? "", terrain: pick(d.terrain), roadChunks: pick(d.roadChunks), roads: d.roads && pick([d.roads])[0], roadTable: d.roadTable && { count: d.roadTable.count, faceBase: d.roadTable.faceBase, faceCount: d.roadTable.faceCount, facility: d.roadTable.facility }, tin: pick([d.tin])[0] }))
+        }
         process.stdout.write(`\r${Object.keys(records).length} 도엽 ${key}                    `)
     }
-    const styleOf = (c) => ({ ...STYLE_DEFAULT, ...spec.configs[c] })
+    const styleOf = (c) => withStyle(spec.configs[c], args.style)
 
     if (args.order === "fresh") {
         for (const c of configNames) {
@@ -981,7 +1005,7 @@ async function runTiming(lib, bundles, args) {
     let network = 0
     for (let run = 0; run < args.runs; run++) {
         for (const c of configNames) {
-            const style = { ...STYLE_DEFAULT, ...spec.configs[c] }
+            const style = withStyle(spec.configs[c], args.style)
             const h = new Helper({ bundle: bundles.worker })
             await h.ready
             for (const phase of ["cold", "warm"]) {
@@ -1005,7 +1029,7 @@ async function runTiming(lib, bundles, args) {
     }
     process.stdout.write("\n")
     if (network) console.log(`경고: 시간 재는 중 네트워크 받기 ${network}회(로컬 캐시가 비어 있었다). 다시 재세요`)
-    const LAYERS = ["merge", "mode", "buildings", "roads", "water", "forest"]
+    const LAYERS = ["merge", "mode", "buildings", "roads", "roadMerge", "roadFold", "water", "forest"]
     const perTile = {}
     for (const [key, xs] of Object.entries(samples)) {
         perTile[key] = {

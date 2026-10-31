@@ -1,3 +1,4 @@
+import earcut from "earcut"
 import { MeshChunk, TinMesh } from "./terrainData"
 
 type P = [number, number, number]
@@ -394,4 +395,485 @@ export function* buildSteppedMeshChunks(
     console.log(
         `계단형(${step}m): 원본 삼각형 ${I0.length / 3} → ${totalTriangles}, 정점 ${totalVertices}, ${chunkCount}조각, ${Math.round(performance.now() - started)}ms (yield 한 뒤 받는 쪽이 조각을 처리하는 시간 포함. Worker 에서는 postMessage 시간)`,
     )
+}
+
+/** 판 합치기 통계(도엽 로그 "판 합침 N→M(실패 k)" 와 검증용). 여러 조각에 걸쳐 더해 간다 */
+export type StepMergeStats = {
+    /** 판 삼각형(세 정점 z 가 같은 것) 수, 합치기 전 */
+    plateBefore: number
+    /** 합친 뒤 판 삼각형 수(원래대로 둔 것 포함) */
+    plateAfter: number
+    /** 다시 삼각분할한 성분 수 */
+    merged: number
+    /** 실패해 원래 삼각형을 둔 성분 수(이유별은 reasons) */
+    failed: number
+    reasons: Record<string, number>
+    /** 시계 방향(넓이 음수)·넓이 0 이라 성분에 넣지 않고 그대로 둔 판 삼각형 수 */
+    skippedTris: number
+    /** earcut 가 버린 경계 정점(같은 직선 위)을 부채꼴로 다시 끼운 수(벽·이웃과의 T자 이음 방지) */
+    reinserted: number
+    /** 정점 수 합치기 전 → 뒤(참조되는 것만 남긴 뒤) */
+    vertsBefore: number
+    vertsAfter: number
+    ms: number
+}
+
+export const emptyStepMergeStats = (): StepMergeStats => ({
+    plateBefore: 0, plateAfter: 0, merged: 0, failed: 0, reasons: {}, skippedTris: 0, reinserted: 0, vertsBefore: 0, vertsAfter: 0, ms: 0,
+})
+
+/** 성분 실패 이유(StepMergeStats.reasons 의 키) */
+const MERGE_FAIL = ["", "orientation", "nonmanifold", "open-loop", "no-outer", "zero-loop", "hole-unassigned", "reinsert", "bad-triangle", "area-mismatch"] as const
+/** 넓이 검증의 상대 허용치(R0 와 같음) */
+const MERGE_AREA_TOLERANCE = 1e-6
+
+/**
+ * 계단형 조각(buildSteppedMeshChunks 의 출력을 liftSteppedChunk 로 띄운 것)에서 같은 층의 평평한 판을 다시 삼각분할해 삼각형·정점을 줄인다
+ * (docs/stepped-merge-plan.md R1 2026-10-25, 띄운 뒤로 옮김 R1b 2026-10-31). 판은 원본 삼각형 조각을 그대로 넣어 만들어져 안쪽에 지형 삼각형 경계 정점이 남는데,
+ * 이 정점들이 합치면 사라진다(R0: 도로 판 −55 %).
+ *
+ * 1. 판 삼각형 = 세 정점 z 가 정확히 같은 것(판 z 는 층 값을 그대로 넣고 띄우기가 같은 lift 를 더해 층마다 같다). 나머지(벽)는 그대로 둔다. 넓이가 0 이거나 시계 방향인 판 삼각형도
+ *    성분에 넣지 않고 그대로 둔다(R0: 드레이프에서 온 시계 방향 조각 하나가 큰 성분 전체를 실패시켰다).
+ * 2. 정점 번호 기준 방향 변(a→b)을 정점별로 모아(CSR) 반대 변(b→a)이 하나면 안쪽 변으로 보고 두 삼각형을 union-find 로 잇는다.
+ *    같은 방향 변이 둘 이상(겹친 면)·반대 변이 둘 이상(비다양체)이면 그 성분은 실패. 판의 정점은 층별로 합쳐져 있어(조각 안) 다른 층과 정점을 공유하지 않는다.
+ * 3. 성분마다 경계 변(반대 변 없음)을 이어 고리를 만든다. 한 정점에서 나가는 경계 변이 여럿(핀치)이면 들어온 방향에서 시계 방향으로 처음 만나는 변.
+ *    넓이 양수 = 바깥, 음수 = 구멍. 구멍은 그 변 바로 왼쪽(판 쪽) 점을 담는 가장 작은 바깥에 붙인다.
+ * 4. 바깥마다 earcut(구멍 포함). earcut 는 정확히 같은 직선 위의 경계 정점을 버리는데, 그 정점을 벽·이웃이 쓰면 T자 이음(핀홀)이 되므로
+ *    버려진 정점을 그 경계 변을 가진 삼각형에서 부채꼴로 다시 끼운다(넓이 그대로).
+ * 5. 안전망: 합친 삼각형 넓이 합이 원래 성분 넓이와 MERGE_AREA_TOLERANCE 안이 아니거나 넓이 0 이하 삼각형이 있으면 그 성분만 원래 삼각형을 둔다.
+ *    합친 수가 원래보다 적지 않으면 원래대로 둔다.
+ *
+ * 합친 삼각형은 기존 정점 번호를 그대로 쓰므로 정점별 매끈한 법선(normals)이 그대로 맞다(계획서 D1 (a)). 끝에 참조되지 않는 정점을 빼고
+ * 순서를 유지해 압축한다. 합친 성분이 없으면 받은 조각을 그대로 돌려준다.
+ *
+ * @param chunk 계단형 조각. 띄운 뒤라면 접힘 수정(liftSteppedChunk fixFolds)을 거친 것이어야 한다: 벽 밀기가 뒤집은 판 삼각형은 성분에서 빠지고
+ *   그 둘레 고리가 접힌 채 earcut 에 들어가 합친 판이 가장자리를 덜 덮는다(R1 6.5)
+ * @param stats 통계를 더할 곳(선택)
+ * @returns 판을 합친 조각
+ */
+export const mergeSteppedPlates = (chunk: MeshChunk, stats?: StepMergeStats): MeshChunk => {
+    const started = performance.now()
+    const P = chunk.positions
+    const I = chunk.indices
+    const nT = I.length / 3
+    const nV = P.length / 3
+    const X = (v: number) => P[3 * v]
+    const Y = (v: number) => P[3 * v + 1]
+    const area2 = (a: number, b: number, c: number) => (X(b) - X(a)) * (Y(c) - Y(a)) - (Y(b) - Y(a)) * (X(c) - X(a))
+
+    // 1) 판 후보: z 가 같고 반시계(넓이 양수)
+    const cand = new Uint8Array(nT)
+    let plateBefore = 0
+    let skipped = 0
+    let nc = 0
+    for (let t = 0; t < nT; t++) {
+        const a = I[3 * t], b = I[3 * t + 1], c = I[3 * t + 2]
+        const z = P[3 * a + 2]
+        if (P[3 * b + 2] !== z || P[3 * c + 2] !== z) continue
+        plateBefore++
+        if (area2(a, b, c) > 0) {
+            cand[t] = 1
+            nc++
+        } else skipped++
+    }
+
+    // 2) 방향 변 CSR(시작 정점별 → 끝 정점·삼각형)
+    const outStart = new Int32Array(nV + 1)
+    for (let t = 0; t < nT; t++) if (cand[t]) for (let k = 0; k < 3; k++) outStart[I[3 * t + k] + 1]++
+    for (let v = 0; v < nV; v++) outStart[v + 1] += outStart[v]
+    const outTo = new Int32Array(3 * nc)
+    const outTri = new Int32Array(3 * nc)
+    {
+        const cur = outStart.slice(0, nV)
+        for (let t = 0; t < nT; t++) {
+            if (!cand[t]) continue
+            for (let k = 0; k < 3; k++) {
+                const j = cur[I[3 * t + k]]++
+                outTo[j] = I[3 * t + ((k + 1) % 3)]
+                outTri[j] = t
+            }
+        }
+    }
+    const parent = new Int32Array(nT)
+    for (let t = 0; t < nT; t++) parent[t] = t
+    const find = (x: number) => {
+        while (parent[x] !== x) {
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        }
+        return x
+    }
+    /** 삼각형별 실패 이유(MERGE_FAIL 번호, 0 = 없음) */
+    const badTri = new Uint8Array(nT)
+    // 경계 변(반대 변 없음): 시작·끝 정점·삼각형
+    const bA = new Int32Array(3 * nc)
+    const bB = new Int32Array(3 * nc)
+    const bT = new Int32Array(3 * nc)
+    let nB = 0
+    for (let t = 0; t < nT; t++) {
+        if (!cand[t]) continue
+        for (let k = 0; k < 3; k++) {
+            const a = I[3 * t + k], b = I[3 * t + ((k + 1) % 3)]
+            let same = 0, opp = 0, oppTri = -1
+            for (let j = outStart[a]; j < outStart[a + 1]; j++) if (outTo[j] === b) same++
+            for (let j = outStart[b]; j < outStart[b + 1]; j++) {
+                if (outTo[j] === a) {
+                    opp++
+                    oppTri = outTri[j]
+                }
+            }
+            if (same > 1) badTri[t] = 1
+            else if (opp > 1) badTri[t] = 2
+            else if (opp === 1) parent[find(t)] = find(oppTri)
+            else {
+                bA[nB] = a
+                bB[nB] = b
+                bT[nB] = t
+                nB++
+            }
+        }
+    }
+
+    // 3) 성분 번호·삼각형 수·넓이·실패 이유
+    const compOf = new Int32Array(nT).fill(-1)
+    const rootComp = new Int32Array(nT).fill(-1)
+    let nComp = 0
+    for (let t = 0; t < nT; t++) {
+        if (!cand[t]) continue
+        const r = find(t)
+        if (rootComp[r] < 0) rootComp[r] = nComp++
+        compOf[t] = rootComp[r]
+    }
+    const compTris = new Int32Array(nComp)
+    const compArea2 = new Float64Array(nComp)
+    const compBad = new Uint8Array(nComp)
+    for (let t = 0; t < nT; t++) {
+        const c = compOf[t]
+        if (c < 0) continue
+        compTris[c]++
+        compArea2[c] += area2(I[3 * t], I[3 * t + 1], I[3 * t + 2])
+        if (badTri[t] && !compBad[c]) compBad[c] = badTri[t]
+    }
+    // 성분별 경계 변(CSR), 정점별 경계 나가는 변(CSR)
+    const bComp = new Int32Array(nB)
+    const compBStart = new Int32Array(nComp + 1)
+    const vBStart = new Int32Array(nV + 1)
+    for (let e = 0; e < nB; e++) {
+        bComp[e] = compOf[bT[e]]
+        compBStart[bComp[e] + 1]++
+        vBStart[bA[e] + 1]++
+    }
+    for (let c = 0; c < nComp; c++) compBStart[c + 1] += compBStart[c]
+    for (let v = 0; v < nV; v++) vBStart[v + 1] += vBStart[v]
+    const compBEdge = new Int32Array(nB)
+    const vBEdge = new Int32Array(nB)
+    {
+        const cc = compBStart.slice(0, nComp)
+        const cv = vBStart.slice(0, nV)
+        for (let e = 0; e < nB; e++) {
+            compBEdge[cc[bComp[e]]++] = e
+            vBEdge[cv[bA[e]]++] = e
+        }
+    }
+
+    // 4) 성분마다 고리 → earcut → 버려진 경계 정점 다시 끼우기 → 넓이 검증
+    const used = new Uint8Array(nB)
+    /** 정점이 이번 바깥 묶음의 earcut 결과에 쓰였는지(묶음 번호로 표시해 매번 비우지 않는다) */
+    const stamp = new Int32Array(nV)
+    let stampNo = 0
+    /** 성분별 합친 삼각형(merged 안의 시작·끝 인덱스). -1 이면 원래대로 */
+    const compFrom = new Int32Array(nComp).fill(-1)
+    const compTo = new Int32Array(nComp)
+    const merged: number[] = []
+    let nMerged = 0, nFailed = 0, reinserted = 0, plateAfter = skipped
+    const reasons: Record<string, number> = {}
+    const fail = (c: number, code: number) => {
+        nFailed++
+        reasons[MERGE_FAIL[code]] = (reasons[MERGE_FAIL[code]] ?? 0) + 1
+        plateAfter += compTris[c]
+    }
+
+    for (let c = 0; c < nComp; c++) {
+        if (compTris[c] === 1) {
+            plateAfter++
+            continue
+        }
+        if (compBad[c]) {
+            fail(c, compBad[c])
+            continue
+        }
+        // 고리 잇기
+        const loops: number[][] = []
+        let failCode = 0
+        for (let k = compBStart[c]; k < compBStart[c + 1] && !failCode; k++) {
+            const e0 = compBEdge[k]
+            if (used[e0]) continue
+            used[e0] = 1
+            const start = bA[e0]
+            const loop = [start]
+            let u = start
+            let v = bB[e0]
+            while (v !== start) {
+                loop.push(v)
+                let pick = -1, count = 0
+                for (let j = vBStart[v]; j < vBStart[v + 1]; j++) {
+                    const e = vBEdge[j]
+                    if (used[e] || bComp[e] !== c) continue
+                    count++
+                    if (pick < 0) pick = e
+                }
+                if (count > 1) {
+                    // 핀치: 들어온 방향(v → u)에서 시계 방향으로 처음 만나는 변
+                    const back = Math.atan2(Y(u) - Y(v), X(u) - X(v))
+                    let best = Infinity
+                    for (let j = vBStart[v]; j < vBStart[v + 1]; j++) {
+                        const e = vBEdge[j]
+                        if (used[e] || bComp[e] !== c) continue
+                        let cw = back - Math.atan2(Y(bB[e]) - Y(v), X(bB[e]) - X(v))
+                        while (cw <= 0) cw += 2 * Math.PI
+                        while (cw > 2 * Math.PI) cw -= 2 * Math.PI
+                        if (cw < best) {
+                            best = cw
+                            pick = e
+                        }
+                    }
+                }
+                if (pick < 0) {
+                    failCode = 3
+                    break
+                }
+                used[pick] = 1
+                u = v
+                v = bB[pick]
+            }
+            if (!failCode) loops.push(loop)
+        }
+        if (failCode) {
+            fail(c, failCode)
+            continue
+        }
+        // 바깥·구멍(성분 첫 정점 기준 좌표로 넓이)
+        const ox = X(loops[0][0]), oy = Y(loops[0][0])
+        const ringArea2 = (l: number[]) => {
+            let s = 0
+            for (let i = 0, n = l.length; i < n; i++) {
+                const a = l[i], b = l[(i + 1) % n]
+                s += (X(a) - ox) * (Y(b) - oy) - (X(b) - ox) * (Y(a) - oy)
+            }
+            return s
+        }
+        type Outer = { ring: number[]; area: number; holes: number[][]; x0: number; y0: number; x1: number; y1: number }
+        const outers: Outer[] = []
+        const holes: number[][] = []
+        for (const l of loops) {
+            const a = ringArea2(l)
+            if (a > 0) {
+                let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity
+                for (const v of l) {
+                    x0 = Math.min(x0, X(v)); x1 = Math.max(x1, X(v))
+                    y0 = Math.min(y0, Y(v)); y1 = Math.max(y1, Y(v))
+                }
+                outers.push({ ring: l, area: a, holes: [], x0, y0, x1, y1 })
+            } else if (a < 0) holes.push(l)
+            else failCode = 5
+        }
+        if (!failCode && outers.length === 0) failCode = 4
+        if (!failCode) {
+            const inside = (l: number[], x: number, y: number) => {
+                let inn = false
+                for (let i = 0, j = l.length - 1; i < l.length; j = i++) {
+                    const xi = X(l[i]), yi = Y(l[i]), xj = X(l[j]), yj = Y(l[j])
+                    if (yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) inn = !inn
+                }
+                return inn
+            }
+            for (const h of holes) {
+                if (outers.length === 1) {
+                    outers[0].holes.push(h)
+                    continue
+                }
+                // 구멍 첫 변 가운데에서 왼쪽(판 쪽)으로 0.1 mm 비킨 점을 담는 가장 작은 바깥
+                const a = h[0], b = h[1]
+                const dx = X(b) - X(a), dy = Y(b) - Y(a)
+                const len = Math.hypot(dx, dy) || 1
+                const qx = (X(a) + X(b)) / 2 - (dy / len) * 1e-4
+                const qy = (Y(a) + Y(b)) / 2 + (dx / len) * 1e-4
+                let host: Outer | null = null
+                for (const o of outers) {
+                    if (qx < o.x0 || qx > o.x1 || qy < o.y0 || qy > o.y1) continue
+                    if ((!host || o.area < host.area) && inside(o.ring, qx, qy)) host = o
+                }
+                if (!host) {
+                    failCode = 6
+                    break
+                }
+                host.holes.push(h)
+            }
+        }
+        if (failCode) {
+            fail(c, failCode)
+            continue
+        }
+        const from = merged.length
+        let compReinserted = 0
+        for (const o of outers) {
+            const rings = [o.ring, ...o.holes]
+            const ids: number[] = []
+            const holeIdx: number[] = []
+            for (let r = 0; r < rings.length; r++) {
+                if (r > 0) holeIdx.push(ids.length)
+                for (const v of rings[r]) ids.push(v)
+            }
+            const flat = new Float64Array(ids.length * 2)
+            for (let i = 0; i < ids.length; i++) {
+                flat[2 * i] = X(ids[i]) - ox
+                flat[2 * i + 1] = Y(ids[i]) - oy
+            }
+            const tri = earcut(flat, holeIdx, 2)
+            const base = merged.length
+            stampNo++
+            for (const k of tri) {
+                merged.push(ids[k])
+                stamp[ids[k]] = stampNo
+            }
+            // earcut 가 버린 경계 정점: 고리에서 쓰인 두 정점 p…q 사이 버려진 줄을 p→q 변을 가진 삼각형에서 부채꼴로 다시 끼운다
+            for (const ring of rings) {
+                const n = ring.length
+                let first = -1
+                for (let i = 0; i < n; i++) {
+                    if (stamp[ring[i]] === stampNo) {
+                        first = i
+                        break
+                    }
+                }
+                if (first < 0) {
+                    failCode = 7
+                    break
+                }
+                for (let s = 0; s < n && !failCode; ) {
+                    const i = (first + s) % n
+                    let len = 1
+                    while (len <= n && stamp[ring[(i + len) % n]] !== stampNo) len++
+                    if (len > 1) {
+                        const p = ring[i], q = ring[(i + len) % n]
+                        let at = -1
+                        for (let m = base; m < merged.length && at < 0; m += 3) {
+                            for (let k = 0; k < 3; k++) {
+                                if (merged[m + k] === p && merged[m + ((k + 1) % 3)] === q) {
+                                    at = m
+                                    // p, q, r 순서로 돌려 놓는다
+                                    const r = merged[m + ((k + 2) % 3)]
+                                    merged[m] = p
+                                    merged[m + 1] = q
+                                    merged[m + 2] = r
+                                    break
+                                }
+                            }
+                        }
+                        if (at < 0 || p === q) {
+                            failCode = 7
+                            break
+                        }
+                        const r = merged[at + 2]
+                        let prev = p
+                        for (let d = 1; d < len; d++) {
+                            const v = ring[(i + d) % n]
+                            if (d === 1) {
+                                merged[at + 1] = v
+                            } else merged.push(prev, v, r)
+                            prev = v
+                            compReinserted++
+                        }
+                        merged.push(prev, q, r)
+                    }
+                    s += len
+                }
+                if (failCode) break
+            }
+            if (failCode) break
+        }
+        if (!failCode) {
+            let a2 = 0
+            for (let m = from; m < merged.length; m += 3) {
+                const ar = area2(merged[m], merged[m + 1], merged[m + 2])
+                if (!(ar > 0)) {
+                    failCode = 8
+                    break
+                }
+                a2 += ar
+            }
+            if (!failCode && Math.abs(a2 - compArea2[c]) > MERGE_AREA_TOLERANCE * Math.abs(compArea2[c]) + 1e-9) failCode = 9
+        }
+        if (failCode) {
+            merged.length = from
+            fail(c, failCode)
+            continue
+        }
+        const count = (merged.length - from) / 3
+        if (count >= compTris[c]) {
+            merged.length = from
+            plateAfter += compTris[c]
+            continue
+        }
+        compFrom[c] = from
+        compTo[c] = merged.length
+        nMerged++
+        reinserted += compReinserted
+        plateAfter += count
+    }
+
+    const finish = (out: MeshChunk, vertsAfter: number) => {
+        if (stats) {
+            stats.plateBefore += plateBefore
+            stats.plateAfter += plateAfter
+            stats.merged += nMerged
+            stats.failed += nFailed
+            stats.skippedTris += skipped
+            stats.reinserted += reinserted
+            for (const [k, n] of Object.entries(reasons)) stats.reasons[k] = (stats.reasons[k] ?? 0) + n
+            stats.vertsBefore += nV
+            stats.vertsAfter += vertsAfter
+            stats.ms += performance.now() - started
+        }
+        return out
+    }
+    if (nMerged === 0) return finish(chunk, nV)
+
+    // 5) 원래 순서로: 합친 성분은 그 성분의 첫 삼각형 자리에 합친 삼각형을 넣는다. 참조되는 정점만 순서대로 남긴다
+    // 상한은 원래 인덱스 수(합친 성분은 원래보다 적을 때만 쓴다)
+    const outIdx = new Uint32Array(I.length)
+    let n = 0
+    const emitted = new Uint8Array(nComp)
+    for (let t = 0; t < nT; t++) {
+        const c = compOf[t]
+        if (c < 0 || compFrom[c] < 0) {
+            outIdx[n++] = I[3 * t]
+            outIdx[n++] = I[3 * t + 1]
+            outIdx[n++] = I[3 * t + 2]
+        } else if (!emitted[c]) {
+            emitted[c] = 1
+            for (let m = compFrom[c]; m < compTo[c]; m++) outIdx[n++] = merged[m]
+        }
+    }
+    const remap = new Int32Array(nV).fill(-1)
+    for (let i = 0; i < n; i++) remap[outIdx[i]] = 0
+    let nv = 0
+    for (let v = 0; v < nV; v++) if (remap[v] === 0) remap[v] = nv++
+    const indices = new Uint32Array(n)
+    for (let i = 0; i < n; i++) indices[i] = remap[outIdx[i]]
+    const positions = new Float32Array(3 * nv)
+    const normals = chunk.normals ? new Float32Array(3 * nv) : undefined
+    for (let v = 0; v < nV; v++) {
+        const w = remap[v]
+        if (w < 0) continue
+        positions[3 * w] = P[3 * v]
+        positions[3 * w + 1] = P[3 * v + 1]
+        positions[3 * w + 2] = P[3 * v + 2]
+        if (normals) {
+            normals[3 * w] = chunk.normals![3 * v]
+            normals[3 * w + 1] = chunk.normals![3 * v + 1]
+            normals[3 * w + 2] = chunk.normals![3 * v + 2]
+        }
+    }
+    return finish({ positions, indices, ...(normals ? { normals } : {}) }, nv)
 }

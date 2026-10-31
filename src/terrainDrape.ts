@@ -360,11 +360,38 @@ export const liftMesh = (positions: Float32Array, lift: number) => {
  * 계단형 조각의 벽을 아래층 쪽으로 lift 만큼 수평 이동하고 전체를 lift 만큼 올린다(도로 계획서 2.1절: 얹은 판은 지형 판 + lift, 벽은 지형 벽과
  * xy 가 같아 수직면끼리 겹치므로 아래층 쪽으로 밀어 lift 두께의 껍질처럼 둔다). 벽 삼각형(법선의 z ≈ 0)마다 가운데 점 양옆의 지형 높이를
  * 읽어 낮은 쪽을 고르고, 그 방향을 세 꼭짓점에 쌓아(판과 공유하는 꼭짓점도 같이 움직여 판이 그만큼 늘고 준다) 평균 방향으로 민다.
- * zAt 이 없으면(내보내기에 지형이 없을 때) 벽은 옮기지 않고 올리기만 한다. 정점 법선(매끈한 법선, terrainSteps)이 있으면 그대로 싣는다
+ * zAt 이 없으면(내보내기에 지형이 없을 때) 벽은 옮기지 않고 올리기만 한다. 정점 법선(매끈한 법선, terrainSteps)이 있으면 그대로 싣는다.
+ *
+ * 접힘 수정(options.fixFolds, 기본 켬. docs/stepped-merge-plan.md 7절 R1b): 벽 밀기는 벽에 붙은 판 정점만 옮기므로 폭이 lift 보다 좁은 판 삼각형은
+ * 위에서 본 방향이 뒤집힌다(접힘, R0 덤프 37도엽 498 m²). 판 삼각형(세 z 가 같은 것) 중 시계 방향이 된 것마다, 아직 옮기지 않은 정점(벽이 쓰지
+ * 않는 것)에 이미 옮긴 정점의 이동을 준다(여럿이면 평균. 한 회에 여러 삼각형에서 받으면 그것도 평균). 새로 옮긴 정점이 이웃을 뒤집을 수 있어
+ * FOLD_FIX_ITERATIONS 회까지 되풀이하고, 끝에 남은 시계 방향·넓이 0 판 삼각형은 버린다(폭 lift 미만의 좁은 턱). 벽 삼각형의 정점은 옮기지 않는다
+ * (벽은 벽 밀기가 옮긴 그대로). 정점은 옮기기만 하고 번호를 바꾸지 않으므로 normals 는 그대로 맞고, 버리기는 인덱스만 줄인다
  */
-export const liftSteppedChunk = (chunk: MeshChunk, lift: number, zAt: ((x: number, y: number) => number | null) | null): MeshChunk => {
+export type LiftFixStats = {
+    /** 접힘 수정을 돌린 회 수(조각별 합. 접힘이 없으면 0) */
+    iterations: number
+    /** 접힘 수정으로 옮긴 정점 수 */
+    moved: number
+    /** 버린 판 삼각형: 끝까지 시계 방향 / 넓이 0 */
+    droppedCw: number
+    droppedZero: number
+    /** 벽 밀기 직후 시계 방향이었던 판 삼각형 수(수정 전) */
+    foldedBefore: number
+    ms: number
+}
+export const emptyLiftFixStats = (): LiftFixStats => ({ iterations: 0, moved: 0, droppedCw: 0, droppedZero: 0, foldedBefore: 0, ms: 0 })
+/** 접힘 수정 반복 상한 */
+const FOLD_FIX_ITERATIONS = 8
+
+export const liftSteppedChunk = (
+    chunk: MeshChunk,
+    lift: number,
+    zAt: ((x: number, y: number) => number | null) | null,
+    options: { fixFolds?: boolean; stats?: LiftFixStats } = {},
+): MeshChunk => {
     const p = chunk.positions.slice()
-    const idx = chunk.indices
+    let idx = chunk.indices
     const nV = p.length / 3
     if (zAt) {
         const disp = new Float32Array(2 * nV)
@@ -390,17 +417,156 @@ export const liftSteppedChunk = (chunk: MeshChunk, lift: number, zAt: ((x: numbe
                 cnt[v]++
             }
         }
+        /** 정점별 실제 이동(xy). 접힘 수정이 옮긴 정점의 출처 */
+        const moved = new Float64Array(2 * nV)
+        const has = new Uint8Array(nV)
         for (let v = 0; v < nV; v++) {
             if (cnt[v] === 0) continue
             const dx = disp[2 * v] / cnt[v], dy = disp[2 * v + 1] / cnt[v]
             const len = Math.hypot(dx, dy)
             if (len < 1e-9) continue
-            p[3 * v] += (dx / len) * lift
-            p[3 * v + 1] += (dy / len) * lift
+            moved[2 * v] = (dx / len) * lift
+            moved[2 * v + 1] = (dy / len) * lift
+            has[v] = 1
+            p[3 * v] += moved[2 * v]
+            p[3 * v + 1] += moved[2 * v + 1]
         }
+        if (options.fixFolds !== false) idx = fixPlateFolds(chunk.positions, p, idx, moved, has, options.stats)
     }
     for (let i = 2; i < p.length; i += 3) p[i] += lift
     return { positions: p, indices: idx, ...(chunk.normals ? { normals: chunk.normals } : {}) }
+}
+
+/**
+ * liftSteppedChunk 의 접힘 수정(위 설명). p 를 고치고 버린 판 삼각형을 뺀 인덱스를 돌려준다(버린 것이 없으면 받은 인덱스 그대로).
+ * @param p0 벽 밀기 전 좌표(판 판정: 세 z 같음)
+ * @param p 벽 밀기 뒤 좌표(고친다)
+ * @param moved 정점별 이동(xy, 고친다)
+ * @param has 이동이 있는 정점(고친다)
+ */
+const fixPlateFolds = (p0: Float32Array, p: Float32Array, idx: Uint32Array, moved: Float64Array, has: Uint8Array, stats?: LiftFixStats): Uint32Array => {
+    const started = performance.now()
+    const nT = idx.length / 3
+    const nV = p.length / 3
+    // 판 삼각형과, 옮기지 않는 정점: 벽 삼각형이 쓰는 것(벽은 벽 밀기가 옮긴 그대로) + 판 경계(반대 방향 판 변이 없는 변) 위의 것(도로 가장자리·도엽
+    // 경계. 도엽 경계 정점을 옮기면 이웃 도엽과 따로 고쳐져 틈이 난다 — R0 덤프에서 경계도 옮기면 554개가 도엽 경계에 있었다)
+    const plate = new Uint8Array(nT)
+    const locked = new Uint8Array(nV)
+    // 판 방향 변 CSR(시작 정점별 끝 정점)
+    const outStart = new Int32Array(nV + 1)
+    for (let t = 0; t < nT; t++) {
+        const a = idx[3 * t], b = idx[3 * t + 1], c = idx[3 * t + 2]
+        const z = p0[3 * a + 2]
+        if (p0[3 * b + 2] === z && p0[3 * c + 2] === z) {
+            plate[t] = 1
+            outStart[a + 1]++
+            outStart[b + 1]++
+            outStart[c + 1]++
+        } else locked[a] = locked[b] = locked[c] = 1
+    }
+    for (let v = 0; v < nV; v++) outStart[v + 1] += outStart[v]
+    const outTo = new Int32Array(outStart[nV])
+    const cur = outStart.slice(0, nV)
+    for (let t = 0; t < nT; t++) if (plate[t]) for (let k = 0; k < 3; k++) outTo[cur[idx[3 * t + k]]++] = idx[3 * t + ((k + 1) % 3)]
+    for (let t = 0; t < nT; t++) {
+        if (!plate[t]) continue
+        for (let k = 0; k < 3; k++) {
+            const a = idx[3 * t + k], b = idx[3 * t + ((k + 1) % 3)]
+            let twin = false
+            for (let j = outStart[b]; j < outStart[b + 1] && !twin; j++) twin = outTo[j] === a
+            if (!twin) locked[a] = locked[b] = 1
+        }
+    }
+    const area2 = (t: number) => {
+        const a = 3 * idx[3 * t], b = 3 * idx[3 * t + 1], c = 3 * idx[3 * t + 2]
+        return (p[b] - p[a]) * (p[c + 1] - p[a + 1]) - (p[b + 1] - p[a + 1]) * (p[c] - p[a])
+    }
+    const acc = new Float64Array(2 * nV)
+    const accN = new Uint16Array(nV)
+    const touched: number[] = []
+    let iterations = 0, movedCount = 0, foldedBefore = 0
+    for (let it = 0; it < FOLD_FIX_ITERATIONS; it++) {
+        let folded = 0
+        touched.length = 0
+        for (let t = 0; t < nT; t++) {
+            if (!plate[t] || !(area2(t) < 0)) continue
+            folded++
+            // 이 삼각형에서 옮긴 정점들의 평균 이동을 아직 안 옮긴(벽이 안 쓰는) 정점에
+            let sx = 0, sy = 0, sn = 0
+            for (let k = 0; k < 3; k++) {
+                const v = idx[3 * t + k]
+                if (has[v]) {
+                    sx += moved[2 * v]
+                    sy += moved[2 * v + 1]
+                    sn++
+                }
+            }
+            if (sn === 0 || sn === 3) continue
+            for (let k = 0; k < 3; k++) {
+                const v = idx[3 * t + k]
+                if (has[v] || locked[v]) continue
+                if (accN[v] === 0) touched.push(v)
+                acc[2 * v] += sx / sn
+                acc[2 * v + 1] += sy / sn
+                accN[v]++
+            }
+        }
+        if (it === 0) foldedBefore = folded
+        if (touched.length === 0) break
+        iterations++
+        for (const v of touched) {
+            moved[2 * v] = acc[2 * v] / accN[v]
+            moved[2 * v + 1] = acc[2 * v + 1] / accN[v]
+            p[3 * v] = p0[3 * v] + moved[2 * v]
+            p[3 * v + 1] = p0[3 * v + 1] + moved[2 * v + 1]
+            has[v] = 1
+            acc[2 * v] = acc[2 * v + 1] = 0
+            accN[v] = 0
+        }
+        movedCount += touched.length
+    }
+    // 남은 시계 방향·넓이 0 판 삼각형은 버린다(R0 덤프에서 남은 것의 대부분은 세 정점이 다 옮겨진 것 = 폭 lift 미만의 좁은 턱이 접힌 것). 판 안쪽의
+    // 접힘은 이웃 판이 그 자리를 겹쳐 덮고 있어 빼도 틈이 생기지 않는다
+    const out = dropPlates(p, idx, stats)
+    if (stats) {
+        stats.iterations += iterations
+        stats.moved += movedCount
+        stats.foldedBefore += foldedBefore
+        stats.ms += performance.now() - started
+    }
+    return out
+}
+
+/** 판 삼각형(세 z 같음) 중 위에서 본 넓이가 0 이하인 것을 뺀 인덱스. 뺀 것이 없으면 받은 인덱스 그대로 */
+const dropPlates = (P: Float32Array, idx: Uint32Array, stats?: LiftFixStats): Uint32Array => {
+    const nT = idx.length / 3
+    const keep = new Uint8Array(nT)
+    let droppedCw = 0, droppedZero = 0
+    for (let t = 0; t < nT; t++) {
+        const a = 3 * idx[3 * t], b = 3 * idx[3 * t + 1], c = 3 * idx[3 * t + 2]
+        if (P[b + 2] !== P[a + 2] || P[c + 2] !== P[a + 2]) {
+            keep[t] = 1
+            continue
+        }
+        const a2 = (P[b] - P[a]) * (P[c + 1] - P[a + 1]) - (P[b + 1] - P[a + 1]) * (P[c] - P[a])
+        if (a2 > 0) keep[t] = 1
+        else if (a2 < 0) droppedCw++
+        else droppedZero++
+    }
+    if (stats) {
+        stats.droppedCw += droppedCw
+        stats.droppedZero += droppedZero
+    }
+    if (droppedCw + droppedZero === 0) return idx
+    const out = new Uint32Array(idx.length - 3 * (droppedCw + droppedZero))
+    let n = 0
+    for (let t = 0; t < nT; t++) {
+        if (!keep[t]) continue
+        out[n++] = idx[3 * t]
+        out[n++] = idx[3 * t + 1]
+        out[n++] = idx[3 * t + 2]
+    }
+    return out
 }
 
 /** 삼각형 범위가 참조하는 정점만 모은 작은 메쉬(내보내기 그룹용). lift 를 z 에 더하고, 정점 법선이 있으면 같이 옮긴다 */

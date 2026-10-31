@@ -10,9 +10,10 @@ import { buildRoadsMesh, ROAD_LIFT_M, roadDisplayChunks, RoadMesh } from "./road
 import { cloneRoadTable, ROAD_LINE_FLAG, RoadTable, roadTableBuffers } from "./roadTable"
 import { ClippedMesh, clipMeshToConvexPolygon } from "./terrainClip"
 import { CacheTable, cacheTableLine, dataCacheTable, fetchGunzip, heapBytes, MeshChunk, sheetsOf, sortCacheTable, TinMesh, XyBounds } from "./terrainData"
+import { emptyLiftFixStats } from "./terrainDrape"
 import { TTP_BASE } from "./terrainIndex"
 import { mergeTtpTilesForTile, parseTtp, TtpTile } from "./terrainPslg"
-import { buildSteppedMeshChunks } from "./terrainSteps"
+import { buildSteppedMeshChunks, emptyStepMergeStats } from "./terrainSteps"
 import type { QueryTile, TileData, TileStyle } from "./terrainTiles.worker"
 import { fetchWater5k, loadWaterCodes, Water5k, waterOfTile } from "./waterData"
 import { buildWaterMesh, WATER_LIFT_M, waterDisplayChunks, WaterMesh } from "./waterMesh"
@@ -196,11 +197,11 @@ type LayerSpec<R, L> = {
     clone: (r: R) => R
     /** 결과의 typed array 바이트(메모리 보고) */
     bytes: (r: R) => number
-    /** 표현 방식마다 다시 만드는 화면 조각(도로·물). 없으면 [] */
-    display?: (r: R, c: LayerCtx) => MeshChunk[]
+    /** 표현 방식마다 다시 만드는 화면 조각(도로·물). 없으면 []. 로그 메모가 있으면 { chunks, note }(도로 판 합치기) */
+    display?: (r: R, c: LayerCtx) => MeshChunk[] | { chunks: MeshChunk[]; note: string }
     output: (r: R, chunks: MeshChunk[]) => Partial<LayerFields>
-    /** 도엽 로그 한 줄의 이 레이어 조각. ms 는 받기(wait)를 뺀 시간. 형식은 하네스 parseLayerMs·perf-check cacheFlags 가 읽는다 */
-    log: (r: R, s: { cached: boolean; note: string; wait: number; ms: number }) => string
+    /** 도엽 로그 한 줄의 이 레이어 조각. ms 는 받기(wait)를 뺀 시간(화면 조각 포함). 형식은 하네스 parseLayerMs·perf-check cacheFlags 가 읽는다 */
+    log: (r: R, s: { cached: boolean; note: string; wait: number; ms: number; displayNote: string }) => string
 }
 /** 등록된 레이어(결과 캐시를 쥐고 도엽마다 run) */
 type RegisteredLayer = {
@@ -228,6 +229,7 @@ const registerLayer = <R, L>(spec: LayerSpec<R, L>): RegisteredLayer => {
             let chunks: MeshChunk[] = []
             let cached = false
             let note = ""
+            let displayNote = ""
             /** 코드표·데이터 층을 기다린 시간(ms. 처음 받는 5K 는 네트워크가 대부분) */
             let wait = 0
             if (spec.enabled?.(c.style) !== false) {
@@ -255,13 +257,17 @@ const registerLayer = <R, L>(spec: LayerSpec<R, L>): RegisteredLayer => {
                         // 선택 도엽은 고정 칸, 선택 밖(둘러보기) 도엽은 LRU(D6 (b))
                         cache.set(key, { r: copy, bytes: spec.bytes(copy) }, !c.job.extra)
                     }
-                    if (spec.display) chunks = spec.display(result, c)
+                    if (spec.display) {
+                        const d = spec.display(result, c)
+                        if (Array.isArray(d)) chunks = d
+                        else ({ chunks, note: displayNote } = d)
+                    }
                 } catch (err) {
                     console.warn(`도엽 ${c.t.name} ${spec.label} 실패:`, err)
                 }
             }
             const ms = performance.now() - start - wait
-            return { fields: spec.output(result, chunks), log: spec.log(result, { cached, note, wait, ms }) }
+            return { fields: spec.output(result, chunks), log: spec.log(result, { cached, note, wait, ms, displayNote }) }
         },
     }
 }
@@ -348,7 +354,18 @@ const LAYERS: RegisteredLayer[] = [
             if (!r.roads || !r.roadTable) return []
             const lift = c.style.roads?.lift ?? ROAD_LIFT_M
             const zAt = c.style.mode === "stepped" ? (() => { const m = c.mergedMesh(); return createTerrainSampler(m.positions, m.indices) })() : null
-            return roadDisplayChunks(r.roads, r.roadTable, c.style.mode, c.style.step, lift, c.maxBytes, zAt, c.smoothStepped)
+            // 띄우기 접힘 수정(R1b, liftfix=0 이면 끔)·판 합치기(R1, stepmerge=0 이면 끔): 화면 조각에서만 하므로 결과 캐시 키와 무관하다(화면 조각은 도엽마다 다시 만든다)
+            const merge = c.style.roads?.merge !== false
+            const liftFix = c.style.roads?.liftFix !== false
+            const stepped = c.style.mode === "stepped"
+            const stats = merge && stepped ? emptyStepMergeStats() : undefined
+            const fixStats = liftFix && stepped ? emptyLiftFixStats() : undefined
+            const chunks = roadDisplayChunks(r.roads, r.roadTable, c.style.mode, c.style.step, lift, c.maxBytes, zAt, c.smoothStepped, merge, stats, liftFix, fixStats)
+            // 로그 " 접힘 i회(정점 m 버림 k) ms"(접힘 수정 반복 회·옮긴 정점·버린 판 삼각형) + " 판 합침 합치기 전→뒤 판 삼각형(실패 성분) ms".
+            // 하네스 parseLayerMs 가 읽는다(쉼표를 넣지 않는다: 조각 구분자)
+            const fixNote = fixStats ? ` 접힘 ${fixStats.iterations}회(정점 ${fixStats.moved} 버림 ${fixStats.droppedCw + fixStats.droppedZero}) ${fixStats.ms.toFixed(1)}ms` : ""
+            const mergeNote = stats && stats.plateBefore > 0 ? ` 판 합침 ${stats.plateBefore}→${stats.plateAfter}(실패 ${stats.failed}) ${stats.ms.toFixed(1)}ms` : ""
+            return { chunks, note: fixNote + mergeNote }
         },
         // 메인 사본에는 법선을 보내지 않는다(쓰는 곳이 없다: 내보내기는 법선을 안 쓰고, 표현 방식 전환의 화면 조각은 워커 캐시에서 다시 만든다.
         // 2026-10-19 지적 by @nanangqq). 법선은 워커 캐시와 매끈한 면 화면 조각에만
@@ -358,7 +375,7 @@ const LAYERS: RegisteredLayer[] = [
             roadTable: r.roadTable,
             roadStats: r.stats,
         }),
-        log: (r, s) => `도로 ${r.stats.built}(교량 ${r.stats.bridges}, 숨김 ${r.stats.hidden})${s.note} ${fetched(s.wait)}${Math.round(s.ms)}ms`,
+        log: (r, s) => `도로 ${r.stats.built}(교량 ${r.stats.bridges}, 숨김 ${r.stats.hidden})${s.note} ${fetched(s.wait)}${Math.round(s.ms)}ms${s.displayNote}`,
     }),
     // 물: 걸치는 5K 들의 조각·선을 전부 넘기고 waterMesh 가 도엽 범위에 걸친 것만 얹어 도엽 폴리곤으로 자른다(D2. 폴리곤 안 선분 판정에는 조각 전부가
     // 필요하다). 높이는 이웃까지 합친 메쉬로(A + B, D1 경로). 얹은 메쉬는 캐시하고(키에 얹기 스위치 clip·zMode·lines·폭·분위수) 화면 조각(띄움)은 그때마다

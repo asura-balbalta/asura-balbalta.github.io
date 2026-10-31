@@ -1,5 +1,5 @@
 import { createTerrainSampler, TerrainSampler } from "./terrainSampler"
-import { compactTriangles, createDrapeBuilder, liftMesh, liftSteppedChunk, ribbonQuads, ringArea2 } from "./terrainDrape"
+import { compactTriangles, createDrapeBuilder, liftMesh, LiftFixStats, liftSteppedChunk, ribbonQuads, ringArea2 } from "./terrainDrape"
 import type { RoadCodeTable, RoadFace, RoadLine } from "./roadsData"
 import {
     createRoadTable,
@@ -14,7 +14,7 @@ import {
     RoadTable,
 } from "./roadTable"
 import { MeshChunk, TinMesh } from "./terrainData"
-import { buildSteppedMeshChunks } from "./terrainSteps"
+import { buildSteppedMeshChunks, mergeSteppedPlates, StepMergeStats } from "./terrainSteps"
 
 /**
  * 도로 조각을 지형 위에 얹어 메쉬 하나로 만든다(docs/roads-layer-plan.md 2.1절, 2026-10-19 결정 A + B by @nanangqq).
@@ -326,6 +326,10 @@ export { compactTriangles, liftMesh, liftSteppedChunk }
  * @param maxBytes 계단형 조각 버퍼 상한
  * @param zAt 지형 높이 조회(벽 방향 판정). 없으면 벽을 옮기지 않는다
  * @param smoothNormals 계단화한 조각에 매끈한 법선을 실을지(먼 거리 조명용. 설정 "먼 거리 계단 부드럽게"를 끄면 false)
+ * @param merge 계단화한 조각의 같은 층 판을 다시 삼각분할해 줄일지(mergeSteppedPlates, 띄운 뒤에. docs/stepped-merge-plan.md R1·R1b). 디버그 stepmerge=0 이면 false
+ * @param mergeStats 판 합치기 통계를 더할 곳(도엽 로그)
+ * @param liftFix 띄우기의 접힘 수정(liftSteppedChunk fixFolds, R1b). 디버그 liftfix=0 이면 false
+ * @param liftStats 접힘 수정 통계를 더할 곳(도엽 로그)
  */
 export const roadDisplayChunks = (
     mesh: TinMesh & { normals?: Float32Array },
@@ -336,6 +340,10 @@ export const roadDisplayChunks = (
     maxBytes: number,
     zAt: ((x: number, y: number) => number | null) | null,
     smoothNormals = true,
+    merge = true,
+    mergeStats?: StepMergeStats,
+    liftFix = true,
+    liftStats?: LiftFixStats,
 ): MeshChunk[] => {
     if (mode !== "stepped" || step <= 0 || mesh.indices.length === 0) {
         // 매끈한 면: 지형에서 보간한 정점 법선을 같이 실어 지형과 같은 셰이더(법선 보간)로 그린다
@@ -357,7 +365,12 @@ export const roadDisplayChunks = (
             quiet: true,
             normals: smoothNormals ? mesh.normals : undefined,
         })
-        for (const c of stepped) chunks.push(liftSteppedChunk(c, lift, zAt))
+        // 순서 "계단화 → 띄우기(접힘 수정) → 합치기"(R1b 2026-10-31). 합치기를 띄우기 전에 하면 벽 밀기가 합친 판의 길고 가는 삼각형을 뒤집어
+        // 먼 도로 가장자리에 틈이 늘었다(R1 6.5). 띄운 뒤 접힘을 없앤 경계 고리로 합치면 합치기가 접힘을 만들 수 없다. 판 z 는 층 값 + lift 로 층마다 같다
+        for (const c of stepped) {
+            const lifted = liftSteppedChunk(c, lift, zAt, { fixFolds: liftFix, stats: liftStats })
+            chunks.push(merge ? mergeSteppedPlates(lifted, mergeStats) : lifted)
+        }
     }
     if (raised.length > 0) chunks.push(compactTriangles(mesh.positions, new Uint32Array(raised), lift))
     return chunks
@@ -366,7 +379,10 @@ export const roadDisplayChunks = (
 /** 내보내기의 벽 방향 판정용 지형 조회기. 지형 레이어가 파일에 없으면 null(벽을 옮기지 않는다) */
 export const roadExportSampler = (terrain: TinMesh | null) => (terrain ? createTerrainSampler(terrain.positions, terrain.indices) : null)
 
-/** 내보내기: 도로 레이어 전체를 띄움(과 계단화)한 조각들로(STL 처럼 그룹이 없는 형식) */
+/**
+ * 내보내기: 도로 레이어 전체를 띄움(과 계단화)한 조각들로(STL 처럼 그룹이 없는 형식). 계단형은 화면과 같은 순서(띄우기·접힘 수정 → 판 합치기,
+ * R1b 2026-10-31 결정 by @nanangqq: 내보내기 파일의 삼각형 수는 사용성에 직결). 내보내기 워커는 디버그 스위치를 받지 않으므로 기본은 둘 다 켬
+ */
 export const roadExportChunks = (
     mesh: TinMesh,
     table: RoadTable,
@@ -374,13 +390,17 @@ export const roadExportChunks = (
     step: number,
     maxBytes: number,
     zAt: ((x: number, y: number) => number | null) | null,
-) => roadDisplayChunks(mesh, table, mode, step, ROAD_LIFT_M, maxBytes, zAt)
+    merge = true,
+    liftFix = true,
+) => roadDisplayChunks(mesh, table, mode, step, ROAD_LIFT_M, maxBytes, zAt, true, merge, undefined, liftFix)
 
 /**
  * 내보내기: 그룹(같은 이은 중심선의 행들) 하나의 삼각형을 띄움(과 계단화)한 조각들로. 그룹의 행은 같은 선이라 교통시설이 같으므로
  * 첫 행으로 교량·고가를 가른다(교량은 계단화하지 않는다).
  *
  * @param normals 도로 메쉬 전체의 정점 법선(GLB 가 매끈한 면 지형처럼 넣을 때. 그룹별로 잘라 싣는다). 계단화한 조각은 평면이라 싣지 않는다
+ * @param merge 계단형 조각의 판 합치기(띄운 뒤, R1b). 내보내기 워커는 스위치를 받지 않으므로 기본 켬
+ * @param liftFix 띄우기의 접힘 수정(R1b). 기본 켬
  */
 export const roadGroupExportChunks = (
     mesh: TinMesh,
@@ -391,12 +411,17 @@ export const roadGroupExportChunks = (
     maxBytes: number,
     zAt: ((x: number, y: number) => number | null) | null,
     normals?: Float32Array,
+    merge = true,
+    liftFix = true,
 ): MeshChunk[] => {
     const range = mesh.indices.subarray(3 * group.from, 3 * group.to)
     if (mode === "stepped" && step > 0 && !isElevated(table.facility[group.k0])) {
         const sub = compactTriangles(mesh.positions, range)
         const stepped = buildSteppedMeshChunks({ origin: mesh.origin, ...sub }, step, maxBytes, undefined, { quiet: true })
-        return [...stepped].map((c) => liftSteppedChunk(c, ROAD_LIFT_M, zAt))
+        return [...stepped].map((c) => {
+            const lifted = liftSteppedChunk(c, ROAD_LIFT_M, zAt, { fixFolds: liftFix })
+            return merge ? mergeSteppedPlates(lifted) : lifted
+        })
     }
     return [compactTriangles(mesh.positions, range, ROAD_LIFT_M, normals)]
 }

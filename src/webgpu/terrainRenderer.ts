@@ -148,6 +148,10 @@ export type RenderDebug = {
     roadsBridge?: boolean
     /** 도로 띄움(m). 없으면 roadsMesh ROAD_LIFT_M */
     roadsLift?: number
+    /** false 면 계단형 도로의 같은 층 판 합치기를 끈다(stepmerge=0. docs/stepped-merge-plan.md R1). 표현 방식 전환 때 반영 */
+    roadsMerge?: boolean
+    /** false 면 계단형 도로 띄우기의 접힘 수정을 끈다(liftfix=0. docs/stepped-merge-plan.md R1b). 표현 방식 전환 때 반영 */
+    roadsLiftFix?: boolean
     /** 도로 깊이 바이어스(상수·기울기 배수에 같이 씀). 0 이면 끔. 없으면 ROAD_DEPTH_BIAS */
     roadsBias?: number
     /** 도로색("#RRGGBB"). 없으면 테마 roadColor */

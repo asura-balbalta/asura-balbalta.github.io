@@ -66,12 +66,16 @@ export type WaterStyle = {
     /** 수면 높이 분위수(waterq=). 없으면 LEVEL_QUANTILE */
     levelQuantile?: number
 }
-/** 도로 얹기 옵션(디버그 페이지 roadsclip=0·roadsbridge=0·roadslift=). clip·bridge 는 메쉬 캐시 키에 들어간다 */
+/** 도로 얹기 옵션(디버그 페이지 roadsclip=0·roadsbridge=0·roadslift=·stepmerge=0·liftfix=0). clip·bridge 는 메쉬 캐시 키에 들어간다 */
 export type RoadsStyle = {
     clip?: boolean
     bridge?: boolean
     /** 띄움(m). 없으면 ROAD_LIFT_M */
     lift?: number
+    /** false 면 계단형 화면 조각의 판 합치기(mergeSteppedPlates)를 끈다(stepmerge=0). 화면 조각에서만 하므로 캐시 키와 무관 */
+    merge?: boolean
+    /** false 면 계단형 화면 조각의 띄우기 접힘 수정(liftSteppedChunk fixFolds, R1b)을 끈다(liftfix=0). 화면 조각에서만 하므로 캐시 키와 무관 */
+    liftFix?: boolean
 }
 export type TerrainTilesRequest =
     | {
