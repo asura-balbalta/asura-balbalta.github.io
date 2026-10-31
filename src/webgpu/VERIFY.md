@@ -155,19 +155,46 @@ npm run render-check -- --params "bbox=14135700,4513980,14136500,4514780&yaw=90&
 
 기능 하나를 더하거나 고칠 때마다 디버그 페이지와 자동 캡처로 **새 기능이 동작하는지**와 **이전 기능이 망가지지 않았는지**를 한 번에 본다. 같은 주소·크기면 같은 자리·각도가 보장되므로 전후 PNG·지표를 그대로 견줄 수 있다.
 
-### 기준 장면 세트
+### 두 겹 검증과 자동 선택(2026-10-31 결정 by @nanangqq, 계획서 21절)
 
-범위·자리·각도를 고정한 조합. 효과별로 하나씩 끈 것을 포함해 회귀가 어느 pass 에서 났는지 바로 가를 수 있게 한다. 한 번에 8장, 약 1 ~ 2분.
+바꿀 때마다 54장을 다시 찍지 않는다. `npm run verify`(`scripts/verify-select.mjs`)가 git diff 의 바뀐 파일을 분류표(`scripts/verify-map.json`)로 나눠 필요한 것만 고르고, **미리 찍어 둔 기준**(HEAD)과 비교한다.
+
+| 겹 | 무엇 | 언제 |
+| --- | --- | --- |
+| 1 도엽 골든 | `tile-golden`(2026-10-31 기준 148기록, 약 40초)을 골든 기준과 바이트 비교. 모든 레이어·지형 두 모드 | 워커·데이터·메쉬·공유 코드가 바뀌면 |
+| 2a smoke | 녹사평 기준 4조합 × 두 크기 = 8장(재검증 쌍 기본 ↔ `ao=0` 포함) | 캡처가 필요한 변경이면 언제나 |
+| 2b 레이어 | 고친 레이어의 장면 + 그 레이어를 끈 조합(둘러보기·궤도) | 레이어 파일만 바뀌면(smoke 에 더함) |
+| 2c 전체 | 27조합 × 두 크기 = 54장(`2026-10-23-cache-before/run.sh` 와 같은 장면·이름) | 공유 모듈·분류표에 없는 파일이 바뀌면, 또는 `--full`(커밋 전) |
+
+분류(처음 맞는 규칙. 근거는 보조 워커 번들 입력과 import 관계, 각 규칙의 `why`):
+
+- **shared → 골든 + 전체**: `src/webgpu/**`, `src/components/**`, `src/debug/**`, `index.tsx`, `app.tsx`(TileStyle 을 만든다), `layers.ts`, `usePalettes.ts`, 색상표·테마, 지형 파이프라인(`terrain*` — `terrainIndex.ts` 포함, 두 워커 번들 모두에 들어감), `meshNormals`·`lruCache`·`layerSheets`·`player`, `package-lock.json`·`patches/**`·`tsconfig.json`
+- **layer → 골든 + smoke + 그 레이어 장면**: buildings(`buildingsData/Mesh/Table/Pick`), roads(`roadsData/Mesh/roadTable`), water(`waterData/Mesh/Table`), forest(`forestData/Mask/Table`). 건물은 끄는 스위치가 없어 건물이 많은 장면(터널·한강 둘러보기, 녹사평·터널 궤도)으로 본다
+- **ui·export → smoke**: `src/ui/**`, 지도·검색·출처·외부 서비스, `src/llm/**`(평가 도구 `src/llm/eval/**` 는 없음), `src/export/**`(**내보낸 파일은 이 검증이 보지 않는다** — 따로 확인)
+- **script → smoke**(스크립트가 여전히 도는지): `scripts/**`, `package.json`. 골든 하네스 자체(`tile-golden*`, `tileGolden.ts`)는 골든 + smoke
+- **none**: `docs/**`, `*.md`, `.firebase/**`, `.claude/**`, `firebase.json`
+- **unknown(새 파일 포함) → 골든 + 전체**
 
 ```bash
-npm run render-check -- --sizes 878x946,1024x768 --out docs/render-checks/$(date +%F)-before \
-  --params "bbox=14135700,4513980,14136500,4514780&yaw=90&pitch=-15" \
-  --params "bbox=14135700,4513980,14136500,4514780&yaw=90&pitch=-15&ao=0" \
-  --params "bbox=14135700,4513980,14136500,4514780&yaw=90&pitch=-15&shadow=0&sky=0&edge=0" \
-  --params "bbox=14135700,4513980,14136500,4514780&yaw=0&pitch=5"
-# 작업 뒤 같은 명령을 --out …-after 로 찍고
-npm run render-check -- --compare docs/render-checks/$(date +%F)-before docs/render-checks/$(date +%F)-after
+npm run verify -- --dry-run                 # 계획만(분류·장면·예상 시간)
+npm run verify                              # 작업 트리 ↔ HEAD(추적 안 된 파일 포함)
+npm run verify -- --base <ref>              # <ref>..HEAD 커밋들
+npm run verify -- --full                    # 커밋 전: 분류와 무관하게 골든 + 54장
+npm run verify -- --files src/roadsMesh.ts --dry-run   # 가정한 diff 로 계획 보기
+npm run verify -- --refresh-baseline        # 기준 다시 찍기(아래 정책)
 ```
+
+- 판정(장면별 `judge`, `scripts/verify-scenes.json`): 비교는 언제나 `--mask 0,0,400,200`, 다른 픽셀 비율 ≤ 0.1 %. 둘러보기는 0.1·0.01 모두 같음이어야 하고(기대값 0 px), 궤도 보기(`walk=0`)는 0.1 로만 판정한다(같은 코드에서도 겹친 면 그리기 순서로 0.08 % 까지, 0.01 은 참고). 산림 장면은 궤도도 0.01 까지. 재검증 쌍(기본 ↔ `ao=0`)이 모든 임계값에서 "다름" 이 아니면 실패. 골든은 같은 코드·같은 순서로 만든 HEAD 기준이라 허용 차이(`--allow`·`--fresh`)를 쓰지 않는다(그 관례는 옛 92a8954 기준용).
+- 결과: `docs/render-checks/<날짜>-verify[-n]/`(`golden/`, PNG·`index.json`, `compare-t0.1.json`·`compare-t0.01.json`, `diff/` 는 t0.1, `verify.json`). 끝에 장면 × 크기 표. 예상 밖 차이가 하나라도 있으면 종료 코드 1, 환경 문제(서버 없음·기준 없음·Chrome 버전 다름)는 2.
+- 실행 전 확인: 미리보기 서버(3000), src 가 dist 보다 새로우면 경고(빌드 잊음), 기준 manifest 의 Chrome 버전 ≠ 설치된 Chrome 이면 **비교하지 않고 멈춘다**(7절 4). 골든 기준의 Node 버전이 다르면 경고.
+
+**기준 정책**
+
+- 기준 두 폴더: `docs/render-checks/golden-baseline/`(골든 + `manifest.json`: 커밋·Node·기록 수), `docs/render-checks/capture-baseline/`(54장 + `index.json` + `manifest.json`: 커밋·Chrome·장면 해시·완전 여부). **git 제외, 기계마다 따로**다(다른 Mac·Chrome 의 캡처와 섞지 않는다).
+- **커밋 뒤에는 HEAD 에서 `--refresh-baseline`** 으로 "후" 를 새 기준으로 만든다. **Chrome 이 올라가면**(실행이 버전 차이로 멈추면) 변경 전 커밋에서 다시 찍는다. 장면 목록(`verify-scenes.json`)·골든 도엽 세트를 바꿨을 때도.
+- 갱신은 출력에 닿는 커밋 안 된 변경(문서·검증 스크립트 밖)이 있으면 거부한다(`--allow-dirty` 로 일부러). 이전 기준은 지우지 않고 `<폴더>-<그 커밋>` 으로 옮긴다(필요 없으면 지워도 됨). 전체 갱신은 약 11분.
+
+### 장면 내력과 레이어별 메모
 
 - 증상을 본 자리 by @nanangqq 가 있으면 그 bbox·spawn·yaw·pitch 를 세트에 더한다(계획서 해당 절에 주소를 적어 둔다).
 - 새 효과를 더하면 그 효과를 **끈 조합**을 세트에 더한다(끄는 파라미터는 4절 표·`RenderDebug`·`walk.tsx` 에 같이).
@@ -181,16 +208,19 @@ npm run render-check -- --compare docs/render-checks/$(date +%F)-before docs/ren
 
 ### 순서
 
-1. **작업 전 기준 캡처.** 위 명령으로 `-before/` 를 찍는다(서버는 `npm run build` → `npx serve dist`, 또는 돌고 있는 watch + 서버).
-2. **구현.** 새 효과·동작에는 끄는 파라미터를 같이 둔다. 감각이 갈리는 값은 파라미터로 두 경로를 둔다(4절).
-3. **작업 후 캡처.** 같은 명령을 `--out …-after` 로. 새 기능을 켠/끈 조합을 세트에 더해 찍는다.
-4. **비교.** `--compare before after`(7절의 규칙으로)
+1. **작업 전 기준 확인.** `capture-baseline/manifest.json` 의 커밋이 작업 시작 커밋(HEAD)이고 Chrome 이 지금 것과 같은지 본다(`npm run verify -- --dry-run` 뒤 실행하면 다르면 멈춘다). 아니면 시작 커밋에서 `npm run build` → `npm run verify -- --refresh-baseline`.
+2. **구현.** 새 효과·동작에는 끄는 파라미터를 같이 둔다. 감각이 갈리는 값은 파라미터로 두 경로를 둔다(4절). 새 장면·끈 조합은 `scripts/verify-scenes.json` 에 더하고(레이어 태그·`judge`), 기준에 없으니 실행에서 "기준 없음" 으로 나온다 → 시작 커밋 빌드로 `--refresh-baseline` 하거나, 그 장면은 켠/끈 쌍을 눈으로 본다.
+3. **작업 중·후 확인.** `npm run build` → `npm run verify`(바뀐 파일이 고른 만큼). 커밋 전에는 `npm run verify -- --full` 한 번.
+4. **판정.** 요약 표와 `verify.json`(7절의 규칙으로)
    - 회귀: 새 기능을 **끈** 조합(과 기존 조합)은 before 와 "같음" 이어야 한다(다른 픽셀 비율 ≤ 0.1 %, `index.json` 지표도 같음). 차이가 나면 `diff/` PNG 로 어디가 다른지 본다(도엽 스트리밍 수가 달라 멀리 있는 건물이 다를 수 있다 → 준비 신호·마스크로 막는다).
    - 새 기능: 켠 조합의 PNG 를 눈으로(Chrome by @nanangqq 또는 원본 PNG) 보고, 효과가 있어야 할 자리에만 차이가 있는지 끈 조합과 견준다.
    - **재검증**: 허용치를 바꿨거나 비교 코드를 고쳤으면, 달라야 하는 쌍(기본 ↔ `ao=0`)이 "다르다" 로 나오는지 먼저 확인한다. 안 나오면 비교가 무뎌진 것이다.
    - 다르면 안 되는 곳이 다르면 3절(재현 → 좁히기 → 수치 → 수정)로.
 5. **동작 확인.** 내장 브라우저에서 디버그 주소로 들어가 콘솔 오류·조작(2절)을 본다. 운영 주소(해시 없음)도 한 번 열어 디버그 분기가 운영을 건드리지 않는지 본다.
 6. **기록.** 계획서 해당 절에 before/after 지표 요약 한 줄과 쓴 주소. 보고서에 넣을 PNG 만 `docs/report-assets/` 로 복사(`docs/render-checks/` 는 git 제외). 커밋은 Chrome 확인 by @nanangqq 뒤.
+7. **커밋 뒤 기준 갱신.** HEAD 에서 `npm run build` → `npm run verify -- --refresh-baseline`(새 기준 = 이번 "후").
+
+손으로 찍을 때(특정 자리·높이 훑기 등)는 전처럼 `npm run render-check -- --params … --out …` 과 `--compare` 를 직접 쓴다(3.5절).
 
 ## 7. 캡처 비교의 규칙(2026-10-14 채택. 배경은 `docs/testing-landscape-2026-10-14.md`)
 

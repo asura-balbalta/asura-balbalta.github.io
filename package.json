@@ -20,6 +20,7 @@
         "render-check": "node scripts/render-check.mjs",
         "perf-check": "node scripts/perf-check.mjs",
         "tile-golden": "node scripts/tile-golden.mjs",
+        "verify": "node scripts/verify-select.mjs",
         "band-check": "esbuild scripts/tileBandCheck.ts --bundle --platform=node --format=esm --log-level=warning --outfile=node_modules/.cache/fb_web/tileBandCheck.mjs && node node_modules/.cache/fb_web/tileBandCheck.mjs",
         "postinstall": "patch-package"
     },

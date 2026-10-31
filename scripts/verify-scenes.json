@@ -1,0 +1,45 @@
+{
+    "about": "scripts/verify-select.mjs 의 캡처 장면(2026-10-31). docs/render-checks/2026-10-23-cache-before/run.sh 의 27조합 × 두 크기 = 54장을 옮긴 것. smoke = 언제나 찍는 기본 4조합, layers = 그 레이어를 고쳤을 때 찍는 장면(끈 조합 포함), 어느 쪽도 아니면 full 에서만. judge = 판정에 쓰는 pixelmatch 임계값(모두 같음이어야 통과): 둘러보기는 0.1·0.01 모두 0 이 기대값, 궤도 보기(walk=0)는 같은 코드에서도 겹친 면 순서로 0.08 % 까지 달라 0.1 로만, 산림 장면은 0.01 도(기본 0.1 은 옅은 산림 색을 같은 색으로 본다). 근거는 docs/cache-refactor-plan.md C6·V2, VERIFY.md 6절. 장면을 바꾸면 기준을 새로 찍는다(npm run verify -- --refresh-baseline)",
+    "sizes": ["878x946", "1024x768"],
+    "mask": ["0,0,400,200"],
+    "maxDiffRatio": 0.001,
+    "bboxes": {
+        "BASE": "bbox=14135700,4513980,14136500,4514780",
+        "TUNNEL": "bbox=14136849,4515567,14137649,4516367",
+        "HANGANG": "bbox=14127729,4511702,14130234,4514248",
+        "SOYANG": "bbox=14232497,4567899,14235040,4570432",
+        "NAMHAE": "bbox=14124252,4052302,14126196,4054256",
+        "NAMSAN": "bbox=14135255,4516175,14136775,4517702"
+    },
+    "scenes": [
+        { "id": "base-walk", "params": "$BASE&yaw=90&pitch=-15", "smoke": true, "layers": [], "judge": [0.1, 0.01], "note": "녹사평 기준(5K 하나, 도엽 6)" },
+        { "id": "base-walk-ao0", "params": "$BASE&yaw=90&pitch=-15&ao=0", "smoke": true, "layers": [], "judge": [0.1, 0.01], "note": "재검증 쌍(기본 ↔ ao=0 은 달라야 한다)" },
+        { "id": "base-walk-noeffects", "params": "$BASE&yaw=90&pitch=-15&shadow=0&sky=0&edge=0", "smoke": true, "layers": [], "judge": [0.1, 0.01] },
+        { "id": "base-walk-north", "params": "$BASE&yaw=0&pitch=5", "smoke": true, "layers": [], "judge": [0.1, 0.01] },
+
+        { "id": "tunnel-walk", "params": "$TUNNEL&yaw=90&pitch=-10", "layers": ["roads", "buildings"], "judge": [0.1, 0.01], "note": "남산 터널(도심)" },
+        { "id": "tunnel-walk-roads0", "params": "$TUNNEL&yaw=90&pitch=-10&roads=0", "layers": ["roads"], "off": "roads", "judge": [0.1, 0.01] },
+        { "id": "hangang-walk", "params": "$HANGANG&yaw=90&pitch=-15", "layers": ["water", "buildings"], "judge": [0.1, 0.01], "note": "한강 여의도(5K 4)" },
+        { "id": "hangang-walk-water0", "params": "$HANGANG&yaw=90&pitch=-15&water=0", "layers": ["water"], "off": "water", "judge": [0.1, 0.01] },
+        { "id": "soyang-walk", "params": "$SOYANG&yaw=90&pitch=-15", "layers": ["water"], "judge": [0.1, 0.01], "note": "소양호(호소)" },
+        { "id": "soyang-walk-water0", "params": "$SOYANG&yaw=90&pitch=-15&water=0", "layers": ["water"], "off": "water", "judge": [0.1, 0.01] },
+        { "id": "namhae-walk", "params": "$NAMHAE&spawn=1110,460&yaw=110&pitch=-10", "layers": ["forest"], "judge": [0.1, 0.01], "note": "남해안 숲·농경지" },
+        { "id": "namhae-walk-forest0", "params": "$NAMHAE&spawn=1110,460&yaw=110&pitch=-10&forest=0", "layers": ["forest"], "off": "forest", "judge": [0.1, 0.01] },
+        { "id": "namsan-walk", "params": "$NAMSAN&yaw=90&pitch=-15", "layers": ["forest"], "judge": [0.1, 0.01], "note": "남산 북사면" },
+        { "id": "namsan-walk-forest0", "params": "$NAMSAN&yaw=90&pitch=-15&forest=0", "layers": ["forest"], "off": "forest", "judge": [0.1, 0.01] },
+
+        { "id": "base-orbit", "params": "$BASE&walk=0", "layers": [], "judge": [0.1], "note": "카나리아: orbitz 없음(5K 하나라 결정론). full 에서만" },
+        { "id": "base-orbit40", "params": "$BASE&walk=0&orbitz=40", "layers": ["roads", "buildings"], "judge": [0.1] },
+        { "id": "base-orbit40-roads0", "params": "$BASE&walk=0&orbitz=40&roads=0", "layers": ["roads"], "off": "roads", "judge": [0.1] },
+        { "id": "tunnel-orbit", "params": "$TUNNEL&walk=0&orbitz=120", "layers": ["roads", "buildings"], "judge": [0.1] },
+        { "id": "tunnel-orbit-roads0", "params": "$TUNNEL&walk=0&orbitz=120&roads=0", "layers": ["roads"], "off": "roads", "judge": [0.1] },
+        { "id": "hangang-orbit", "params": "$HANGANG&walk=0&orbitz=15", "layers": ["water"], "judge": [0.1] },
+        { "id": "hangang-orbit-water0", "params": "$HANGANG&walk=0&orbitz=15&water=0", "layers": ["water"], "off": "water", "judge": [0.1] },
+        { "id": "soyang-orbit", "params": "$SOYANG&walk=0&orbitz=250", "layers": ["water"], "judge": [0.1] },
+        { "id": "soyang-orbit-water0", "params": "$SOYANG&walk=0&orbitz=250&water=0", "layers": ["water"], "off": "water", "judge": [0.1] },
+        { "id": "namhae-orbit", "params": "$NAMHAE&walk=0&orbitz=50", "layers": ["forest"], "judge": [0.1, 0.01] },
+        { "id": "namhae-orbit-forest0", "params": "$NAMHAE&walk=0&orbitz=50&forest=0", "layers": ["forest"], "off": "forest", "judge": [0.1, 0.01] },
+        { "id": "namsan-orbit", "params": "$NAMSAN&walk=0&orbitz=150", "layers": ["forest"], "judge": [0.1, 0.01] },
+        { "id": "namsan-orbit-forest0", "params": "$NAMSAN&walk=0&orbitz=150&forest=0", "layers": ["forest"], "off": "forest", "judge": [0.1, 0.01] }
+    ]
+}
