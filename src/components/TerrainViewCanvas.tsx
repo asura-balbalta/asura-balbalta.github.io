@@ -335,10 +335,12 @@ export const TerrainViewCanvas = ({
      *
      * @param center 플레이어 위치(메쉬 로컬 m)
      */
-    /** 상주 반경(m). 둘러보기 중이 아니거나 반경이 무한이면 Infinity */
+    /** 둘러보기 보이는 거리(m): 디버그 walkradius= > 품질 설정(보이는 거리) > WALK_CULL_RADIUS. 그리는 반경이자 상주 반경의 기본값 */
+    const walkRadiusNow = () => renderDebugRef.current?.walkRadius ?? qualityRef.current.walkRadius ?? WALK_CULL_RADIUS
+    /** 상주 반경(m). 디버그 resident= 가 없으면 보이는 거리와 같다. 둘러보기 중이 아니거나 반경이 무한이면 Infinity */
     const residentRadius = () => {
         if (!walkRef.current) return Infinity
-        return renderDebugRef.current?.residentRadius ?? renderDebugRef.current?.walkRadius ?? WALK_CULL_RADIUS
+        return renderDebugRef.current?.residentRadius ?? walkRadiusNow()
     }
     /** 점(로컬 m)에서 도엽 xy 범위까지의 거리(안이면 0) */
     const distanceToTile = (center: [number, number], tile: TileData) => {
@@ -355,7 +357,7 @@ export const TerrainViewCanvas = ({
     const updateResidency = (center: [number, number]) => {
         const r = renderer
         if (!r) return
-        const radius = renderDebugRef.current?.residentRadius ?? renderDebugRef.current?.walkRadius ?? WALK_CULL_RADIUS
+        const radius = renderDebugRef.current?.residentRadius ?? walkRadiusNow()
         if (!Number.isFinite(radius)) return
         const resident = residentRef.current
         const wanted: string[] = []
@@ -556,7 +558,7 @@ export const TerrainViewCanvas = ({
         pointersRef.current.clear()
         renderer.updaters.lightingUpdater(currentWalkLighting())
         // 거리 거르기(L4): 반경 밖 도엽은 그리지 않는다. 궤도 보기로 돌아가면 끈다
-        renderer.updaters.cullRadiusUpdater(renderDebugRef.current?.walkRadius ?? WALK_CULL_RADIUS)
+        renderer.updaters.cullRadiusUpdater(walkRadiusNow())
         player.attach(canvas)
         // 조준점 건물 찾기(10 Hz, 사거리 PICK_RANGE_M): 바뀌면 렌더러 강조와 부모(onBuildingLook)에 알린다. pick=0 이면 끈다
         const picker = createBuildingPicker()
@@ -610,11 +612,21 @@ export const TerrainViewCanvas = ({
     useEffect(() => {
         if (!renderer) return
         renderer.updaters.debugUpdater(effectiveDebug(renderDebug, quality))
-        if (walkRef.current) {
-            renderer.updaters.lightingUpdater(currentWalkLighting())
-            renderer.updaters.cullRadiusUpdater(renderDebug?.walkRadius ?? WALK_CULL_RADIUS)
-        }
+        if (walkRef.current) renderer.updaters.lightingUpdater(currentWalkLighting())
     }, [renderer, renderDebug, quality])
+    // 보이는 거리(품질 설정 또는 디버그 walkradius=)가 둘러보기 중에 바뀌면 바로 반영: 그리는 반경을 바꾸고, 지금 자리에서 상주를 다시 맞춘다
+    // (줄이면 먼 도엽을 GPU 에서 내리고, 늘리면 다시 요청한다). 둘러보기를 시작할 때는 시작 효과가 같은 값을 쓰므로, 값이 바뀌었을 때만
+    // 움직인다(시작과 같은 커밋에서 한 번 더 돌아 아직 오는 중인 도엽을 다시 요청하지 않도록)
+    const walkRadius = renderDebug?.walkRadius ?? quality.walkRadius ?? WALK_CULL_RADIUS
+    const appliedWalkRadiusRef = useRef(walkRadius)
+    useEffect(() => {
+        if (appliedWalkRadiusRef.current === walkRadius) return
+        appliedWalkRadiusRef.current = walkRadius
+        if (!renderer || !walkRef.current) return
+        renderer.updaters.cullRadiusUpdater(walkRadius)
+        const cam = walkCameraRef.current
+        if (cam) updateResidency([cam.eye[0], cam.eye[1]])
+    }, [renderer, walkRadius])
     /** 계단형이면 층 간격, 아니면 null. 플레이어 발 높이를 계단 바닥에 맞추는 데 쓴다 */
     const groundStep = mode === "stepped" ? stepInterval : null
     const groundStepRef = useRef(groundStep)

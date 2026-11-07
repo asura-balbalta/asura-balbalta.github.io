@@ -124,7 +124,7 @@ export type RenderDebug = {
     sun?: number
     /** SSAO 합성 pass 의 디버그 출력 모드(ao.ts AoDebugMode). 없으면 0 */
     aodebug?: AoDebugMode
-    /** 둘러보기 중 장면에 그릴 반경(m, 카메라에서 도엽 범위까지). 없으면 WALK_CULL_RADIUS */
+    /** 둘러보기 중 장면에 그릴 반경(m, 카메라에서 도엽 범위까지). 품질 설정 "보이는 거리"(QualitySettings.walkRadius)보다 우선한다 */
     walkRadius?: number
     /** 둘러보기 중 GPU 에 올려 둘 반경(m). 밖의 선택 도엽은 GPU 에서 내리고 들어오면 다시 만든다(M-B). Infinity 면 내리지 않음. 없으면 walkRadius 와 같음 */
     residentRadius?: number
@@ -196,7 +196,8 @@ export type RenderDebug = {
 }
 /**
  * 둘러보기 중 장면에 그릴 반경(m). 이보다 먼 도엽은 그리지 않는다(L4, 2026-10-14). 안개 1/1200 에서 5 km 의 가시도는 약 1.5 % 라
- * 사라지는 것이 보이지 않는다. 디버그 페이지 walkradius= 로 바꿔 비교한다
+ * 사라지는 것이 보이지 않는다. 2026-11-07 부터 기본값은 품질 설정 "보이는 거리"(QualitySettings.walkRadius, 기본 3000)에서 오고,
+ * 이 상수는 설정이 없을 때의 마지막 대체값이다. 디버그 페이지 walkradius= 가 설정보다 우선한다
  */
 export const WALK_CULL_RADIUS = 5000
 /**

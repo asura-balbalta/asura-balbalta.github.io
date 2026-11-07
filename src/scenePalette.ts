@@ -60,8 +60,15 @@ export type QualitySettings = {
      * 끄면 화면은 바로 바뀌고, 도엽을 다시 만들 때부터 계단형 매끈한 법선을 만들지 않아 생성 시간·메모리가 준다(TileStyle.smoothNormals)
      */
     smoothFar: boolean
+    /**
+     * 둘러보기 보이는 거리(m, 2026-11-07): 그리는 반경(거리 거르기)이자 GPU 에 올려 두는 반경(상주). WALK_RADIUS_CHOICES 중 하나.
+     * 짧을수록 프레임·GPU 메모리가 줄고 먼 지형이 늦게 나타난다(안개는 그대로라 가장자리에서 튀어나온다). 디버그 walkradius= 가 우선
+     */
+    walkRadius: number
 }
-export const DEFAULT_QUALITY: QualitySettings = { shadows: true, ao: true, sky: true, edge: true, smoothFar: true }
+/** 둘러보기 보이는 거리 선택지(m) */
+export const WALK_RADIUS_CHOICES = [2000, 3000, 5000] as const
+export const DEFAULT_QUALITY: QualitySettings = { shadows: true, ao: true, sky: true, edge: true, smoothFar: true, walkRadius: 3000 }
 
 /** 둘러보기 조명 세기 기본값(전 walkLighting 상수) */
 export const DEFAULT_WALK_LIGHTING: WalkLightingStrength = { ambient: 0.5, diffuse: 0.5, hemisphere: 0.35, fogDensity: 1 / 1200 }
@@ -203,5 +210,6 @@ export const sanitizeQuality = (raw: unknown): QualitySettings => {
         sky: b(r.sky, DEFAULT_QUALITY.sky),
         edge: b(r.edge, DEFAULT_QUALITY.edge),
         smoothFar: b(r.smoothFar, DEFAULT_QUALITY.smoothFar),
+        walkRadius: (WALK_RADIUS_CHOICES as readonly unknown[]).includes(r.walkRadius) ? (r.walkRadius as number) : DEFAULT_QUALITY.walkRadius,
     }
 }

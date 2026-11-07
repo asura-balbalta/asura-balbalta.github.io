@@ -3,6 +3,7 @@ import React, { useEffect, useState } from "react"
 
 import { BASEMAP_PROVIDERS, BasemapProvider } from "../basemap"
 import { Theme } from "../terrainTheme"
+import { WALK_RADIUS_CHOICES } from "../scenePalette"
 import type { PaletteStore } from "../usePalettes"
 import type { TerrainMode } from "../webgpu/terrainRenderer"
 import { PaletteSection } from "./PaletteEditor"
@@ -14,12 +15,15 @@ const Segment = <T extends string>({
     onChange,
     disabled,
     label,
+    minWidth,
 }: {
     value: T
     options: { value: T; label: string }[]
     onChange: (value: T) => void
     disabled?: boolean
     label: string
+    /** 버튼 최소 폭(px). 없으면 Fluent 기본(64). 선택지가 셋이라 한 줄에 안 들어갈 때 줄인다 */
+    minWidth?: number
 }) => (
     <div className="ui-segment" role="group" aria-label={label}>
         {options.map((o) => (
@@ -30,6 +34,7 @@ const Segment = <T extends string>({
                 aria-pressed={o.value === value}
                 disabled={disabled}
                 onClick={() => onChange(o.value)}
+                style={minWidth === undefined ? undefined : { minWidth }}
             >
                 {o.label}
             </Button>
@@ -180,10 +185,21 @@ export const SettingsPanel = ({
                     />
                 ))}
             </div>
+            <div className="ui-settings-row">
+                <span style={{ whiteSpace: "nowrap" }}>보이는 거리</span>
+                <Segment
+                    label="둘러보기 보이는 거리"
+                    minWidth={52}
+                    value={String(paletteStore.quality.walkRadius)}
+                    options={WALK_RADIUS_CHOICES.map((m) => ({ value: String(m), label: `${m / 1000} km` }))}
+                    onChange={(v) => paletteStore.setQuality({ walkRadius: Number(v) })}
+                />
+            </div>
             <div className="ui-panel-footer">
                 계단 간격은 {STEP_MIN} ~ {STEP_MAX} m 입니다. 바꾼 뒤 "다시 만들기" 를 누르면 계단형 지형을 다시 만듭니다. 내장 그래픽처럼 느린
                 기기에서 둘러보기 프레임이 낮으면 품질의 그림자·주변광 차폐부터 끄세요. 도엽 만들기가 느리면 "먼 거리 계단 부드럽게" 를 끄고 "다시
-                만들기" 를 누르세요(화면은 바로 바뀌고, 생성 시간·메모리는 다시 만든 뒤부터 줄어듭니다).
+                만들기" 를 누르세요(화면은 바로 바뀌고, 생성 시간·메모리는 다시 만든 뒤부터 줄어듭니다). 보이는 거리를 줄이면 프레임이 빨라지고 GPU
+                메모리가 줄지만, 먼 지형이 더 가까이 와서야 나타납니다.
                 <div className="ui-panel-footer-line">
                     지형·건물은 공공데이터를 가공한 것입니다.{" "}
                     <button type="button" className="ui-link" onClick={onAttribution}>
