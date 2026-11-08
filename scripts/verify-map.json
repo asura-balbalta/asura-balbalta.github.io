@@ -1,5 +1,5 @@
 {
-    "about": "scripts/verify-select.mjs(npm run verify)의 분류표(2026-10-31, src/webgpu/VERIFY.md 6절). 바뀐 파일(fb_web 기준 경로)을 rules 의 위에서부터 처음 맞는 pattern 으로 분류하고, 분류마다 classes 의 검증을 고른다. 아무 pattern 에도 맞지 않으면 unknown(= 전체, 안전한 기본값). pattern 은 glob: ** 는 / 를 포함한 아무 글자, * 는 / 밖 아무 글자. 근거: 보조 워커 번들 입력(esbuild metafile, 2026-10-31 확인)과 import 관계",
+    "about": "scripts/verify-select.mjs(npm run verify)의 분류표(2026-10-31, src/webgpu/VERIFY.md 6절). 바뀐 파일(fb_web 기준 경로)을 rules 의 위에서부터 처음 맞는 pattern 으로 분류하고, 분류마다 classes 의 검증을 고른다. captures 의 범위(smoke·layer·full)는 2겹 헤드리스(render-headless)와 3겹 브라우저 캡처(render-check, --browser·--full 때)에 같이 쓴다(2026-11-08 H1). 아무 pattern 에도 맞지 않으면 unknown(= 전체, 안전한 기본값). pattern 은 glob: ** 는 / 를 포함한 아무 글자, * 는 / 밖 아무 글자. 근거: 보조 워커 번들 입력(esbuild metafile, 2026-10-31 확인)과 import 관계",
     "classes": {
         "none": { "golden": false, "captures": "none", "why": "문서·설정·배포 캐시. 화면·도엽 출력과 무관" },
         "script": { "golden": false, "captures": "smoke", "why": "검증 스크립트·package.json 스크립트 줄. 스크립트가 여전히 도는지 기본 장면으로 확인" },
@@ -31,9 +31,12 @@
         { "pattern": "scripts/tile-golden.mjs", "class": "golden-tool" },
         { "pattern": "scripts/tileGolden.ts", "class": "golden-tool" },
         { "pattern": "scripts/tile-golden.tiles.json", "class": "golden-tool" },
+        { "pattern": "scripts/render-headless.mjs", "class": "script", "why": "헤드리스 2겹 하네스(H1). 하네스가 여전히 도는지 기본 장면으로" },
+        { "pattern": "scripts/headless/**", "class": "script", "why": "헤드리스 장면 준비(sceneRun.ts)·선택 설치(package.json). 앱 번들에 들어가지 않는다" },
         { "pattern": "scripts/**", "class": "script" },
 
-        { "pattern": "src/webgpu/**", "class": "shared" },
+        { "pattern": "src/webgpu/**", "class": "shared", "why": "렌더러·셰이더. device.ts 의 RenderTarget(헤드리스 target 옵션) 포함" },
+        { "pattern": "src/sceneSetup.ts", "class": "shared", "why": "장면 설정 공용 모듈(H1): 도엽 스타일·카메라·조명·도엽 이벤트 처리. 앱과 헤드리스가 같이 쓴다" },
         { "pattern": "src/components/**", "class": "shared" },
         { "pattern": "src/debug/**", "class": "shared", "why": "디버그 페이지가 캡처의 입구(파라미터 해석·준비 신호)" },
         { "pattern": "src/index.tsx", "class": "shared", "why": "진입점(디버그 페이지 경로)" },

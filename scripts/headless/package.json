@@ -1,0 +1,8 @@
+{
+    "name": "fb_web-headless",
+    "private": true,
+    "description": "헤드리스 WebGPU 검사(scripts/render-headless.mjs) 전용 선택 설치(docs/headless-check-plan.md D1). 루트 package.json 에 넣지 않는다. 설치: npm --prefix scripts/headless install",
+    "dependencies": {
+        "webgpu": "0.6.2"
+    }
+}

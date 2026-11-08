@@ -1,4 +1,16 @@
 /**
+ * 그릴 곳(장치·포맷·프레임마다 그릴 색 텍스처). 브라우저에서는 initWebGPU 가 canvas 로 만들고, 헤드리스 검사(scripts/render-headless.mjs)는
+ * 자기 device 와 오프스크린 텍스처(COPY_SRC 포함)를 넘긴다(docs/headless-check-plan.md H1-a)
+ */
+export type RenderTarget = {
+    device: GPUDevice
+    /** 색 텍스처 포맷. 파이프라인 fragment target 에 같은 값을 써야 한다 */
+    format: GPUTextureFormat
+    /** 이번 프레임에 그릴 색 텍스처(캔버스면 getCurrentTexture) */
+    getTexture: () => GPUTexture
+}
+
+/**
  * canvas 에 WebGPU 를 연결하고 렌더링에 필요한 객체를 준비한다.
  *
  * 1. 브라우저의 WebGPU 지원 여부 확인
@@ -7,7 +19,7 @@
  * 4. 브라우저가 권장하는 텍스처 포맷으로 context 설정
  *
  * @param canvasId 대상 canvas 요소의 id
- * @returns canvas, context, device, format(캔버스 텍스처 포맷. 파이프라인 fragment target 에 같은 값을 써야 한다)
+ * @returns canvas, context, device, format(캔버스 텍스처 포맷. 파이프라인 fragment target 에 같은 값을 써야 한다), getTexture(context.getCurrentTexture)
  * @throws WebGPU 미지원, canvas 없음, context·adapter·device 생성 실패 시
  */
 export const initWebGPU = async (canvasId: string) => {
@@ -29,5 +41,5 @@ export const initWebGPU = async (canvasId: string) => {
     const format = navigator.gpu.getPreferredCanvasFormat()
     context.configure({ device, format })
 
-    return { canvas, context, device, format }
+    return { canvas, context, device, format, getTexture: () => context.getCurrentTexture() }
 }

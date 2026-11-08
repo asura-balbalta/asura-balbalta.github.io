@@ -166,6 +166,21 @@ npm run render-check -- --params "bbox=14135700,4513980,14136500,4514780&yaw=90&
 | 2b 레이어 | 고친 레이어의 장면 + 그 레이어를 끈 조합(둘러보기·궤도) | 레이어 파일만 바뀌면(smoke 에 더함) |
 | 2c 전체 | 27조합 × 두 크기 = 54장(`2026-10-23-cache-before/run.sh` 와 같은 장면·이름) | 공유 모듈·분류표에 없는 파일이 바뀌면, 또는 `--full`(커밋 전) |
 
+**2026-11-08 부터(H1, `docs/headless-check-plan.md`) 2겹은 헤드리스로 그린다.** 장면 범위(2a·2b·2c)와 판정은 위와 같고, 그리는 쪽만 바뀌었다.
+
+| 겹 | 도구 | 언제 |
+| --- | --- | --- |
+| 1 골든 | `tile-golden` | 위와 같음 |
+| 2 헤드리스 | `scripts/render-headless.mjs`: 브라우저 없이 Dawn(npm `webgpu` 0.6.2)으로 실제 렌더러를 돌림. 앱의 조정자·보조 워커·도엽 집합·장면 설정 함수(`src/sceneSetup.ts`)를 Node 에서 그대로 써서 같은 장면을 준비 | `npm run verify` 기본 |
+| 3 브라우저 | `scripts/render-check.mjs`(Playwright + 설치된 Chrome) | `--full`(커밋 전)·`--browser`·기준 갱신·배포 전·Chrome 업데이트 뒤 |
+
+- 설치(선택, 루트 `package.json` 에 없음): `npm --prefix scripts/headless install`(약 130 MB, 0.6.2 고정). 없으면 `npm run verify` 는 설치 명령을 알리고 2겹만 건너뛴다(그동안은 `--browser`).
+- 단독 실행: `node scripts/render-headless.mjs [--smoke | --layers roads | --scenes base-walk,…] [--no-cache] [--out <dir>]`, 기준만 다시 `node scripts/render-headless.mjs --refresh-baseline`.
+- 그리는 크기·이름은 브라우저 캡처와 같다(dpr 2 픽셀, 같은 PNG 이름). 마스크는 `verify-scenes.json` 의 `mask` 만(UI 가 없어 조준점 자리까지 비교된다). 재검증 쌍(기본 ↔ `ao=0`)은 같은 실행 안에서 달라야 한다(2026-11-08: t0.1 4.1 ~ 4.3 %).
+- 덤프: 장면 준비 결과(렌더러 updater 호출 기록)를 `docs/render-checks/headless-dumps/<데이터 해시>/` 에 둔다. 해시는 워커·장면 준비 묶음의 내용이라 **셰이더·렌더러만 고치면 덤프를 다시 써서 54장 약 35초**, 워커·장면 설정을 고치면 장면 준비부터 약 2.5분(M1 Max). 해시당 약 1 GB, 최근 2개만 남긴다.
+- 결정론: 같은 덤프를 다시 그리면 0 px. 장면 준비부터 다시 하면 도엽 도착 순서(= 그리는 순서) 탓에 궤도·일부 둘러보기가 0.01 % 안쪽으로 다를 수 있다(앱과 같은 성질, 허용 오차 안).
+- **헤드리스 기준은 브라우저 기준과 섞지 않는다.** 같은 장면의 Chrome ↔ 헤드리스는 바이트가 같지 않다(먼 가장자리 1 px 선, 둘러보기 t0.1 0.02 % 이하 · 궤도 0.08 %. 계획서 6절).
+
 분류(처음 맞는 규칙. 근거는 보조 워커 번들 입력과 import 관계, 각 규칙의 `why`):
 
 - **shared → 골든 + 전체**: `src/webgpu/**`, `src/components/**`, `src/debug/**`, `index.tsx`, `app.tsx`(TileStyle 을 만든다), `layers.ts`, `usePalettes.ts`, 색상표·테마, 지형 파이프라인(`terrain*` — `terrainIndex.ts` 포함, 두 워커 번들 모두에 들어감), `meshNormals`·`lruCache`·`layerSheets`·`player`, `package-lock.json`·`patches/**`·`tsconfig.json`
@@ -190,7 +205,8 @@ npm run verify -- --refresh-baseline        # 기준 다시 찍기(아래 정책
 
 **기준 정책**
 
-- 기준 두 폴더: `docs/render-checks/golden-baseline/`(골든 + `manifest.json`: 커밋·Node·기록 수), `docs/render-checks/capture-baseline/`(54장 + `index.json` + `manifest.json`: 커밋·Chrome·장면 해시·완전 여부). **git 제외, 기계마다 따로**다(다른 Mac·Chrome 의 캡처와 섞지 않는다).
+- 기준 세 폴더: `docs/render-checks/golden-baseline/`(골든 + `manifest.json`: 커밋·Node·기록 수), `docs/render-checks/headless-baseline/`(54장 + `index.json` + `manifest.json`: 커밋·webgpu 버전·GPU·Node·장면 해시), `docs/render-checks/capture-baseline/`(54장 + `index.json` + `manifest.json`: 커밋·Chrome·장면 해시·완전 여부). **git 제외, 기계마다 따로**다(다른 Mac·Chrome 의 캡처와 섞지 않는다).
+- 헤드리스 기준은 화면·워커 출력이 바뀐 커밋 뒤와 **webgpu 버전·기계가 바뀌면** 다시 찍는다. Chrome 업데이트와는 무관하다(브라우저 기준만 다시). `--refresh-baseline` 은 골든·헤드리스·브라우저를 모두 찍고, 헤드리스만 다시 찍을 때는 `node scripts/render-headless.mjs --refresh-baseline`(이전 기준은 `headless-baseline-<커밋>` 으로 옮김).
 - **화면·워커 출력이 바뀐 커밋 뒤에는 HEAD 에서 `--refresh-baseline`** 으로 "후" 를 새 기준으로 만든다(기준 = 마지막으로 받아들인 상태). 배포 커밋(호스팅 캐시만)·문서·검증 스크립트만의 커밋 뒤에는 기준이 그대로 유효하므로 갱신하지 않는다. 기준 커밋과 HEAD 사이에 출력에 닿는 파일이 바뀐 커밋이 있으면 실행이 "갱신 권장" 을 알린다. **Chrome 이 올라가면**(실행이 버전 차이로 멈추면) 변경 전 커밋에서 다시 찍는다. 장면 목록(`verify-scenes.json`)·골든 도엽 세트를 바꿨을 때도.
 - 갱신은 출력에 닿는 커밋 안 된 변경(문서·검증 스크립트 밖)이 있으면 거부한다(`--allow-dirty` 로 일부러). 이전 기준은 지우지 않고 `<폴더>-<그 커밋>` 으로 옮긴다(필요 없으면 지워도 됨). 전체 갱신은 약 11분.
 
@@ -210,7 +226,7 @@ npm run verify -- --refresh-baseline        # 기준 다시 찍기(아래 정책
 
 1. **작업 전 기준 확인.** `capture-baseline/manifest.json` 의 커밋이 작업 시작 커밋(HEAD)이고 Chrome 이 지금 것과 같은지 본다(`npm run verify -- --dry-run` 뒤 실행하면 다르면 멈춘다). 아니면 시작 커밋에서 `npm run build` → `npm run verify -- --refresh-baseline`.
 2. **구현.** 새 효과·동작에는 끄는 파라미터를 같이 둔다. 감각이 갈리는 값은 파라미터로 두 경로를 둔다(4절). 새 장면·끈 조합은 `scripts/verify-scenes.json` 에 더하고(레이어 태그·`judge`), 기준에 없으니 실행에서 "기준 없음" 으로 나온다 → 시작 커밋 빌드로 `--refresh-baseline` 하거나, 그 장면은 켠/끈 쌍을 눈으로 본다.
-3. **작업 중·후 확인.** `npm run build` → `npm run verify`(바뀐 파일이 고른 만큼). 커밋 전에는 `npm run verify -- --full` 한 번.
+3. **작업 중·후 확인.** `npm run verify`(골든 + 헤드리스, 바뀐 파일이 고른 만큼. 빌드·서버 없이 된다). 커밋 전에는 `npm run build` 뒤 `npm run verify -- --full` 한 번(브라우저 캡처 포함).
 4. **판정.** 요약 표와 `verify.json`(7절의 규칙으로)
    - 회귀: 새 기능을 **끈** 조합(과 기존 조합)은 before 와 "같음" 이어야 한다(다른 픽셀 비율 ≤ 0.1 %, `index.json` 지표도 같음). 차이가 나면 `diff/` PNG 로 어디가 다른지 본다(도엽 스트리밍 수가 달라 멀리 있는 건물이 다를 수 있다 → 준비 신호·마스크로 막는다).
    - 새 기능: 켠 조합의 PNG 를 눈으로(Chrome by @nanangqq 또는 원본 PNG) 보고, 효과가 있어야 할 자리에만 차이가 있는지 끈 조합과 견준다.

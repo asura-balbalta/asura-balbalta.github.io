@@ -15,7 +15,8 @@ import { exportableLayers, runExport } from "./export/runExport"
 import { INITIAL_LAYER_STATES, LAYER_DEFS, LayerId, LayerStates } from "./layers"
 import { applyMapTheme, initOlMap } from "./olmap"
 import { SquarePhase, SquareTool } from "./squareTool"
-import type { ForestStyle, RoadsStyle, TileStyle, WaterStyle } from "./terrainTiles.worker"
+import type { TileStyle } from "./terrainTiles.worker"
+import { APP_INITIAL_STEP_INTERVAL, APP_INITIAL_TERRAIN_MODE, APP_INITIAL_THEME, smoothFarOf, tileStyleOf } from "./sceneSetup"
 import { createTerrainTiles, TerrainTilesClient, TerrainTilesEvent } from "./terrainTilesClient"
 import { TERRAIN_THEMES, Theme } from "./terrainTheme"
 import { PaletteStore, usePalettes } from "./usePalettes"
@@ -110,14 +111,13 @@ const writeStored = (key: string, value: unknown) => {
 }
 
 
-/** 처음 보여 줄 지형 표현 방식. "tin": 삼각형 메쉬 그대로, "stepped": 등고선 모형처럼 계단형. 설정 패널·상태 표시줄에서 바꾼다 */
-const INITIAL_TERRAIN_MODE: TerrainMode = "tin"
-/** 처음 색 테마(지도 타일 + 3D + UI). 설정 패널·상태 표시줄에서 바꾼다 */
-const INITIAL_THEME: Theme = "light"
+/** 처음 보여 줄 지형 표현 방식·처음 색 테마. 값은 장면 설정 공용 모듈(sceneSetup.ts. 헤드리스 검사도 같은 값을 쓴다) */
+const INITIAL_TERRAIN_MODE: TerrainMode = APP_INITIAL_TERRAIN_MODE
+const INITIAL_THEME: Theme = APP_INITIAL_THEME
 /** 처음 바탕 지도 출처(basemap.ts). 설정에서 바꿀 수 있고, 타일이 안 나오면 자동으로 다음 출처로 넘어간다 */
 const INITIAL_BASEMAP: BasemapProvider = "stadia"
-/** 계단형일 때 처음 층 간격(m). 설정 패널에서 0.1 ~ 5 로 바꾼다 */
-const INITIAL_STEP_INTERVAL = 1
+/** 계단형일 때 처음 층 간격(m). 설정 패널에서 0.1 ~ 5 로 바꾼다(값은 sceneSetup.ts) */
+const INITIAL_STEP_INTERVAL = APP_INITIAL_STEP_INTERVAL
 /** 올라온 지형(도엽 집합)의 요약. 도엽이 하나씩 올라올 때마다 갱신된다. 원본 도엽은 TerrainTilesClient 가 든다 */
 type TerrainInfo = {
     origin: [number, number]
@@ -136,14 +136,7 @@ type TerrainInfo = {
     forest: { types: number[]; skipped: number }
 }
 
-/** 렌더 디버그 설정 중 도로 얹기 스위치(디버그 페이지 roadsclip=0·roadsbridge=0·roadslift=·stepmerge=0·liftfix=0)를 도엽 스타일로 */
-const roadsStyleOf = (debug?: RenderDebug): RoadsStyle | undefined =>
-    debug && { clip: debug.roadsClip, bridge: debug.roadsBridge, lift: debug.roadsLift, merge: debug.roadsMerge, liftFix: debug.roadsLiftFix }
-/** 렌더 디버그 설정 중 물 얹기 스위치(waterclip=0·waterz=·waterlines=0·waterlift=·waterwidth=)를 도엽 스타일로 */
-const waterStyleOf = (debug?: RenderDebug): WaterStyle | undefined =>
-    debug && { clip: debug.waterClip, zMode: debug.waterZ, lines: debug.waterLines, lift: debug.waterLift, ribbonWidth: debug.waterWidth, levelQuantile: debug.waterQ }
-/** 렌더 디버그 설정 중 산림 스위치(forest=0·forestres=)를 도엽 스타일로 */
-const forestStyleOf = (debug?: RenderDebug): ForestStyle | undefined => debug && { enabled: debug.forest, res: debug.forestRes }
+/** 렌더 디버그 설정 → 도엽 스타일(roadsStyleOf·waterStyleOf·forestStyleOf·tileStyleOf)은 sceneSetup.ts 로 옮겼다(헤드리스 검사와 같은 함수) */
 
 /**
  * 마우스·트랙패드처럼 정밀한 포인터가 있는 기기인지. 처음 들어오면 범위 그리기 모드를 바로 켜고, 안내 문구를 클릭 방식으로
@@ -594,22 +587,14 @@ function App({
      * 이전 선택의 작업은 워커가 버린다(generation)
      */
     /** 먼 거리 계단 부드럽게(품질 설정. 디버그 smoothfar= 가 우선). 화면 표시는 캔버스가 바로 바꾸고, 생성(계단형 매끈한 법선)은 도엽을 만들 때 */
-    const smoothFar = renderDebug?.smoothFar ?? paletteStore.quality.smoothFar
+    const smoothFar = smoothFarOf(renderDebug, paletteStore.quality)
     /** 지금 올라온 도엽을 만들 때 쓴 smoothFar. 설정과 다르면(계단형일 때) 설정 패널의 "다시 만들기" 를 켠다 */
     const [builtSmoothFar, setBuiltSmoothFar] = useState(smoothFar)
     const smoothFarStale = !!terrain && mode === "stepped" && builtSmoothFar !== smoothFar
     /** 도엽 스타일(범위 선택·표현 방식·층 간격 변경이 같이 쓴다). 부르면 이번 smoothFar 를 "만든 값" 으로 기억한다 */
     const nextTileStyle = (m: TerrainMode, step: number): TileStyle => {
         setBuiltSmoothFar(smoothFar)
-        return {
-            mode: m,
-            step,
-            band: renderDebug?.band,
-            roads: roadsStyleOf(renderDebug),
-            water: waterStyleOf(renderDebug),
-            forest: forestStyleOf(renderDebug),
-            smoothNormals: smoothFar,
-        }
+        return tileStyleOf(m, step, renderDebug, smoothFar)
     }
     const startTerrainLoad = (bbox: Extent) => {
         setBusy(true)

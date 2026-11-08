@@ -1,34 +1,40 @@
 import React, { useEffect, useId, useRef, useState } from "react"
 
-import { INITIAL_LAYER_STATES, LAYER_DEFS, LayerStates } from "../layers"
+import { INITIAL_LAYER_STATES, LayerStates } from "../layers"
 import { createPlayer, Player, PlayerMove, WalkPhysics } from "../player"
-import { createHeightSampler, HeightSampler, nearestTriangleCentroid } from "../terrainHeight"
 import type { TerrainTilesClient } from "../terrainTilesClient"
 import type { TileData } from "../terrainTiles.worker"
 import { builtinPalette, DEFAULT_QUALITY, QualitySettings, ScenePalette } from "../scenePalette"
-import { hexToRgb, TERRAIN_THEMES, Theme } from "../terrainTheme"
+import { Theme } from "../terrainTheme"
 import { FpsCamera, fpsForward, OrbitCamera } from "../webgpu/camera"
 import { BuildingHit, createBuildingPicker } from "../buildingPick"
-
-/** 둘러보기 조준점의 건물 찾기 사거리(m). 처음 300 은 멀리 있는 건물에 조준경이 반응하지 않아 1 km 로(2026-10-15, by @nanangqq) */
-const PICK_RANGE_M = 1000
+import {
+    applyLayerVisibility,
+    applyPalette,
+    createTilesEventHandler,
+    createWalkSampler,
+    highlightListOf,
+    isOutsideResident,
+    PICK_RANGE_M,
+    rendererOptionsOf,
+    residencyPlan,
+    residentRadiusOf,
+    WALK_TILE_MAX,
+    WALK_TILE_RADIUS,
+    WALK_TILE_UPDATE_M,
+    walkGroundAt,
+    walkLightingOf,
+    walkRadiusOf,
+    WalkStart,
+    walkSpawnPoint,
+} from "../sceneSetup"
 import {
     createTerrainRenderFunctionAndUpdateFunctions,
     DEFAULT_LIGHTING,
     effectiveDebug,
-    MeshBounds,
     RenderDebug,
     TerrainMode,
-    WALK_CULL_RADIUS,
-    walkLighting,
 } from "../webgpu/terrainRenderer"
-
-/** 걸어 보기 도엽 스트리밍(선택 범위 밖): 로드 반경(m), 도엽 상한, 다시 조회하는 이동 거리(m) */
-const WALK_TILE_RADIUS = 1000
-const WALK_TILE_MAX = 60
-const WALK_TILE_UPDATE_M = 100
-/** 상주 반경의 히스테리시스: 이 배수 밖으로 나가야 GPU 에서 내린다(경계에서 들락날락 방지) */
-const RESIDENT_HYSTERESIS = 1.2
 
 /** 창 크기와 devicePixelRatio. canvas 속성은 width·height × dpr, style 은 width·height */
 const readViewportSize = () => ({
@@ -41,35 +47,11 @@ type TRenderer = Awaited<
     ReturnType<typeof createTerrainRenderFunctionAndUpdateFunctions>
 >
 
-/** 걸어 보기 시작 상태(디버그 페이지 프리셋). 없는 항목은 기본 규칙(범위 가운데, 북쪽, 수평) */
-export type WalkStart = {
-    /** 시작 xy(메쉬 로컬, m). 거기에 메쉬가 없으면 가장 가까운 삼각형 위로 */
-    spawn?: [number, number]
-    /** 시작 방향(라디안. 0 = 동쪽, 반시계) */
-    yaw?: number
-    /** 시작 위아래 시점(라디안, 수평선 위로 +) */
-    pitch?: number
-    /** 지표 위 이 높이(m)에서 공중 정지한 채 시작(player.ts hoverHeight) */
-    hover?: number
-}
+/** 걸어 보기 시작 상태(디버그 페이지 프리셋). 정의는 장면 설정 공용 모듈(sceneSetup.ts) */
+export type { WalkStart }
 
 /** 디버그 페이지 훅(src/debug/hooks.ts, 계획서 19절)이 쓰는 캔버스 손잡이. teleport 는 둘러보기 중이 아니면 false */
 export type CanvasDebug = { teleport: (x: number, y: number) => boolean; gpu: () => { tiles: number; bytes: number } | null }
-
-/**
- * 메쉬 범위에 맞춘 초기 카메라를 만든다.
- * 메쉬 중심을 바라보고, 남쪽에서 약 34° 높이로 내려다보며, 메쉬 가로·세로 중 긴 쪽의 1.2배 거리에 둔다.
- *
- * @param bounds 정점 범위(선택 xy + 첫 도엽 z)
- * @returns 궤도 카메라 초기 상태
- */
-const initialCamera = ({ min, max }: MeshBounds): OrbitCamera => ({
-    target: [(min[0] + max[0]) / 2, (min[1] + max[1]) / 2, (min[2] + max[2]) / 2],
-    distance: Math.max(max[0] - min[0], max[1] - min[1]) * 1.2,
-    azimuth: -Math.PI / 2,
-    elevation: 0.6,
-    fovY: Math.PI / 4,
-})
 
 /**
  * 3D 지형을 전체화면 canvas 에 그리는 컴포넌트.
@@ -176,7 +158,7 @@ export const TerrainViewCanvas = ({
     const qualityRef = useRef(quality)
     qualityRef.current = quality
     /** 둘러보기 조명: 디버그 설정 + 품질 설정 + 색상표의 세기 */
-    const currentWalkLighting = () => walkLighting(effectiveDebug(renderDebugRef.current, qualityRef.current), paletteRef.current.walkLighting)
+    const currentWalkLighting = () => walkLightingOf(renderDebugRef.current, qualityRef.current, paletteRef.current)
     const onErrorRef = useRef(onError)
     onErrorRef.current = onError
     const onBuildingLookRef = useRef(onBuildingLook)
@@ -204,13 +186,7 @@ export const TerrainViewCanvas = ({
     lockedRef.current = lockedBuilding
     /** 렌더러 강조 목록을 다시 쓴다: 고정한 건물 + 조준점 건물(같은 건물이면 하나) */
     const pushHighlight = () => {
-        const list: { tileId: string; faceStart: number; faceEnd: number }[] = []
-        const locked = lockedRef.current
-        const looked = lookedRef.current
-        if (locked) list.push({ tileId: locked.tileId, faceStart: locked.faceStart, faceEnd: locked.faceEnd })
-        if (looked && !(locked && looked.tileId === locked.tileId && looked.index === locked.index))
-            list.push({ tileId: looked.tileId, faceStart: looked.faceStart, faceEnd: looked.faceEnd })
-        renderer?.updaters.highlightUpdater(list)
+        renderer?.updaters.highlightUpdater(highlightListOf(lockedRef.current, lookedRef.current))
     }
     const pushHighlightRef = useRef(pushHighlight)
     pushHighlightRef.current = pushHighlight
@@ -246,8 +222,7 @@ export const TerrainViewCanvas = ({
             canvasId,
             width: Math.round(size.width * size.dpr),
             height: Math.round(size.height * size.dpr),
-            backgroundColor: hexToRgb(paletteRef.current.background),
-            debug: effectiveDebug(renderDebugRef.current, qualityRef.current),
+            ...rendererOptionsOf(paletteRef.current, renderDebugRef.current, qualityRef.current),
         })
             .then((r) => {
                 if (cancelled) return r.destroy()
@@ -312,8 +287,7 @@ export const TerrainViewCanvas = ({
 
     useEffect(() => {
         if (!renderer) return
-        renderer.updaters.paletteUpdater(palette, TERRAIN_THEMES[theme].ui.accent)
-        renderer.updaters.backgroundUpdater(hexToRgb(palette.background))
+        applyPalette(renderer.updaters, palette, theme)
         // 둘러보기 중이면 색상표의 조명 세기도 바로
         if (walkRef.current) renderer.updaters.lightingUpdater(currentWalkLighting())
     }, [renderer, theme, palette])
@@ -325,7 +299,7 @@ export const TerrainViewCanvas = ({
 
     useEffect(() => {
         if (!renderer) return
-        for (const { id } of LAYER_DEFS) renderer.updaters.layerVisibilityUpdater(id, layers[id].visible)
+        applyLayerVisibility(renderer.updaters, layers)
     }, [renderer, layers])
     /** GPU 에 올라가 있는 도엽 id(메모리 M-B: 둘러보기 중 상주 반경 밖은 내린다) */
     const residentRef = useRef(new Set<string>())
@@ -336,45 +310,29 @@ export const TerrainViewCanvas = ({
      * @param center 플레이어 위치(메쉬 로컬 m)
      */
     /** 둘러보기 보이는 거리(m): 디버그 walkradius= > 품질 설정(보이는 거리) > WALK_CULL_RADIUS. 그리는 반경이자 상주 반경의 기본값 */
-    const walkRadiusNow = () => renderDebugRef.current?.walkRadius ?? qualityRef.current.walkRadius ?? WALK_CULL_RADIUS
+    const walkRadiusNow = () => walkRadiusOf(renderDebugRef.current, qualityRef.current)
     /** 상주 반경(m). 디버그 resident= 가 없으면 보이는 거리와 같다. 둘러보기 중이 아니거나 반경이 무한이면 Infinity */
     const residentRadius = () => {
         if (!walkRef.current) return Infinity
-        return renderDebugRef.current?.residentRadius ?? walkRadiusNow()
+        return residentRadiusOf(renderDebugRef.current, qualityRef.current)
     }
-    /** 점(로컬 m)에서 도엽 xy 범위까지의 거리(안이면 0) */
-    const distanceToTile = (center: [number, number], tile: TileData) => {
-        const b = tile.bounds
-        return Math.hypot(Math.max(b.min[0] - center[0], 0, center[0] - b.max[0]), Math.max(b.min[1] - center[1], 0, center[1] - b.max[1]))
-    }
-    /** 둘러보기 중 선택 도엽이 상주 반경(× 히스테리시스) 밖인지. 밖 도엽(extra)은 조정자가 관리하므로 false */
+    /** 둘러보기 중 선택 도엽이 상주 반경(× 히스테리시스) 밖인지. 밖 도엽(extra)은 조정자가 관리하므로 false(sceneSetup.ts isOutsideResident) */
     const outsideResident = (tile: TileData) => {
         const cam = walkCameraRef.current
-        const radius = residentRadius()
-        if (tile.extra || !cam || !Number.isFinite(radius)) return false
-        return distanceToTile([cam.eye[0], cam.eye[1]], tile) > radius * RESIDENT_HYSTERESIS
+        return isOutsideResident(tile, cam ? [cam.eye[0], cam.eye[1]] : null, residentRadius())
     }
     const updateResidency = (center: [number, number]) => {
         const r = renderer
         if (!r) return
-        const radius = renderDebugRef.current?.residentRadius ?? walkRadiusNow()
+        const radius = residentRadiusOf(renderDebugRef.current, qualityRef.current)
         if (!Number.isFinite(radius)) return
-        const resident = residentRef.current
-        const wanted: string[] = []
-        let dropped = 0
-        for (const tile of tiles.tiles.values()) {
-            if (tile.extra) continue
-            const d = distanceToTile(center, tile)
-            if (resident.has(tile.id)) {
-                if (d > radius * RESIDENT_HYSTERESIS) {
-                    r.updaters.streamTileUpdater(tile.id, null)
-                    resident.delete(tile.id)
-                    dropped++
-                }
-            } else if (d <= radius) {
-                wanted.push(tile.id)
-            }
+        // 내릴 것·다시 요청할 것은 sceneSetup.ts residencyPlan(헤드리스 검사와 같은 함수)
+        const { drop, wanted } = residencyPlan(tiles.tiles.values(), residentRef.current, center, radius)
+        for (const id of drop) {
+            r.updaters.streamTileUpdater(id, null)
+            residentRef.current.delete(id)
         }
+        const dropped = drop.length
         tiles.rebuild(wanted)
         const stats = r.updaters.residentStats()
         console.log(`GPU 상주: 도엽 ${stats.tiles}, ${(stats.bytes / 1048576).toFixed(1)} MB (내림 ${dropped}, 다시 요청 ${wanted.length}, 반경 ${radius} m)`)
@@ -382,64 +340,20 @@ export const TerrainViewCanvas = ({
     // 도엽 집합 구독: 도엽을 GPU 에 올리고 내린다. 새 선택의 첫 도엽에서 이전 도엽을 모두 내리고 카메라를 맞춘다(걸어 보기 중이 아닐 때)
     useEffect(() => {
         if (!renderer) return
-        let pendingClear = false
-        const unsubscribe = tiles.subscribe((event) => {
-            try {
-                if (event.type === "selection") {
-                    pendingClear = true
-                } else if (event.type === "tile") {
-                    // 메모리 측정(2026-10-15): 50개마다 GPU 상주 바이트
-                    if (tiles.stats().count % 50 === 0 || event.first) {
-                        const r = renderer.updaters.residentStats()
-                        console.log(`메모리(GPU 상주): 도엽 ${r.tiles}, ${(r.bytes / 1048576).toFixed(1)} MB`)
-                    }
-                    if (pendingClear) {
-                        pendingClear = false
-                        renderer.updaters.streamClearUpdater()
-                        residentRef.current.clear()
-                        if (!walkRef.current && tiles.bounds) {
-                            // 카메라는 선택 도엽의 xy 범위와 **첫 도엽**의 z 범위로. 누적 z 범위를 쓰면 캔버스가 붙는 순간까지 도착한 도엽 수에
-                            // 따라 높이가 달라져 같은 주소라도 캡처가 미세하게 달랐다(2026-10-14 L2 비교에서 발견)
-                            // 디버그 orbitz= 가 있으면 그 높이로 고정한다(5K 가 여럿이면 첫 도엽이 보조 워커 경쟁으로 실행마다 달라서. 2026-10-23)
-                            const xy = tiles.bounds
-                            const zMin = renderDebugRef.current?.orbitZ ?? event.tile.bounds.min[2]
-                            const zMax = renderDebugRef.current?.orbitZ ?? event.tile.bounds.max[2]
-                            cameraRef.current = initialCamera({ min: [xy.min[0], xy.min[1], zMin], max: [xy.max[0], xy.max[1], zMax] })
-                            renderer.updaters.cameraUpdater(cameraRef.current)
-                        }
-                    }
-                    if (event.tile.terrain.length > 0 && outsideResident(event.tile)) {
-                        // 둘러보기 중 상주 반경 밖 선택 도엽(표현 방식 전환으로 다시 온 것)은 올리지 않는다. 반경에 들어오면 rebuild 로 다시 온다
-                        tiles.releaseTerrain(event.tile.id)
-                    } else if (event.tile.terrain.length > 0) {
-                        renderer.updaters.streamTileUpdater(event.tile.id, {
-                            terrain: event.tile.terrain,
-                            buildings: event.tile.buildings,
-                            roads: event.tile.roadChunks,
-                            water: event.tile.waterChunks,
-                            forest: event.tile.forestMask,
-                            mode: event.tile.mode,
-                            bounds: { min: [event.tile.bounds.min[0], event.tile.bounds.min[1]], max: [event.tile.bounds.max[0], event.tile.bounds.max[1]] },
-                        })
-                        residentRef.current.add(event.tile.id)
-                        // GPU 에 올렸으면 메인 사본의 조각은 버린다(메모리 M-A). 조각이 없는 도엽(되풀이)은 워커가 다시 만들어 보낸다
-                        tiles.releaseTerrain(event.tile.id)
-                    }
-                } else if (event.type === "water") {
-                    // 수면 맞추기로 물 메쉬가 바뀐 도엽: GPU 에 있는 것만 물 조각을 다시 올린다
-                    for (const id of event.ids) {
-                        if (residentRef.current.has(id)) renderer.updaters.waterTileUpdater(id, tiles.waterChunks(id, renderDebugRef.current?.waterLift))
-                    }
-                } else if (event.type === "remove") {
-                    renderer.updaters.streamTileUpdater(event.id, null)
-                    residentRef.current.delete(event.id)
-                } else if (event.type === "bounds") {
-                    renderer.updaters.elevationRangeUpdater(event.bounds.min[2], event.bounds.max[2])
-                }
-            } catch (err) {
-                console.error(err)
-            }
-        })
+        // 처리 본문은 장면 설정 공용 모듈(sceneSetup.ts createTilesEventHandler). 헤드리스 검사도 같은 함수를 쓴다
+        const unsubscribe = tiles.subscribe(
+            createTilesEventHandler({
+                updaters: renderer.updaters,
+                tiles,
+                resident: residentRef.current,
+                getDebug: () => renderDebugRef.current,
+                isWalking: () => !!walkRef.current,
+                outsideResident,
+                onOrbitCamera: (camera) => {
+                    cameraRef.current = camera
+                },
+            }),
+        )
         return unsubscribe
     }, [renderer, tiles])
 
@@ -450,85 +364,17 @@ export const TerrainViewCanvas = ({
         const origin = tiles.origin
         const selectionBounds = tiles.bounds
         if (!walking || !renderer || !canvas || !origin || !selectionBounds) return
-        // 높이 조회: 모든 도엽(선택 + 스트리밍)의 TIN 과 건물 지붕. 도엽마다 조회기를 한 번 만들어 둔다(도엽 객체가 바뀌면 다시)
-        const samplerCache = new WeakMap<TileData, { ground: HeightSampler; roof: HeightSampler | null }>()
-        const samplersOf = (tile: TileData) => {
-            let s = samplerCache.get(tile)
-            if (!s) {
-                s = {
-                    ground: createHeightSampler(tile.tin),
-                    roof: tile.buildings ? createHeightSampler(tile.buildings, { highest: true }) : null,
-                }
-                samplerCache.set(tile, s)
-            }
-            return s
-        }
-        const inTile = (tile: TileData, x: number, y: number) =>
-            x >= tile.bounds.min[0] && x <= tile.bounds.max[0] && y >= tile.bounds.min[1] && y <= tile.bounds.max[1]
-        const combined: HeightSampler = {
-            heightAt: (x, y) => {
-                for (const tile of tiles.tiles.values()) {
-                    if (!inTile(tile, x, y)) continue
-                    const h = samplersOf(tile).ground.heightAt(x, y)
-                    if (h !== null) return h
-                }
-                return null
-            },
-            roofAt: (x, y) => {
-                let best: number | null = null
-                for (const tile of tiles.tiles.values()) {
-                    if (!inTile(tile, x, y)) continue
-                    const roof = samplersOf(tile).roof
-                    if (!roof) continue
-                    const h = roof.heightAt(x, y)
-                    if (h !== null && (best === null || h > best)) best = h
-                }
-                return best
-            },
-            min: [...selectionBounds.min],
-            max: [...selectionBounds.max],
-        }
-        /** 도엽이 오갈 때 범위를 다시 잰다(플레이어가 매 프레임 읽어 범위 밖으로 못 나가게) */
-        const refit = () => {
-            const mn: [number, number, number] = [Infinity, Infinity, Infinity]
-            const mx: [number, number, number] = [-Infinity, -Infinity, -Infinity]
-            for (const tile of tiles.tiles.values()) {
-                for (let k = 0; k < 3; k++) {
-                    mn[k] = Math.min(mn[k], tile.bounds.min[k])
-                    mx[k] = Math.max(mx[k], tile.bounds.max[k])
-                }
-            }
-            if (mn[0] !== Infinity) {
-                combined.min = mn
-                combined.max = mx
-            }
-        }
+        // 높이 조회: 모든 도엽(선택 + 스트리밍)의 TIN 과 건물 지붕. 도엽이 오갈 때 범위를 다시 잰다(sceneSetup.ts createWalkSampler)
+        const { combined, refit } = createWalkSampler(tiles, selectionBounds)
         refit()
         const unsubscribe = tiles.subscribe((event) => {
             if (event.type !== "tile" && event.type !== "remove") return
             refit()
             onWalkTileCountRef.current?.(tiles.extraCount)
         })
-        // 시작점: 프리셋(디버그 페이지)이 있으면 그 자리, 아니면 선택 사각형 가운데. 거기에 메쉬가 없으면(도엽 없는 바다 등) 가장 가까운 삼각형 위로
+        // 시작점: 프리셋(디버그 페이지)이 있으면 그 자리, 아니면 선택 사각형 가운데. 메쉬가 없으면 가장 가까운 삼각형 위로(sceneSetup.ts walkSpawnPoint)
         const start = walkStartRef.current
-        const center: [number, number] = start?.spawn ??
-            tiles.selectionCenter ?? [
-                (selectionBounds.min[0] + selectionBounds.max[0]) / 2,
-                (selectionBounds.min[1] + selectionBounds.max[1]) / 2,
-            ]
-        let spawn = center
-        if (combined.heightAt(center[0], center[1]) === null) {
-            let bestDist = Infinity
-            for (const tile of tiles.tiles.values()) {
-                const c = nearestTriangleCentroid(tile.tin, center[0], center[1])
-                if (!c) continue
-                const d = Math.hypot(c[0] - center[0], c[1] - center[1])
-                if (d < bestDist) {
-                    bestDist = d
-                    spawn = c
-                }
-            }
-        }
+        const spawn = walkSpawnPoint(tiles, start, selectionBounds, combined)
         // 주변 도엽 스트리밍(선택 범위 밖). 100 m 움직일 때마다 새 중심을 알린다
         let lastCenter: [number, number] = [spawn[0] + origin[0], spawn[1] + origin[1]]
         tiles.updateWalk(lastCenter, WALK_TILE_RADIUS, WALK_TILE_MAX)
@@ -568,13 +414,8 @@ export const TerrainViewCanvas = ({
                 : window.setInterval(() => {
                       const cam = walkCameraRef.current
                       if (!cam) return
-                      // 지형이 가로막은 건물은 고르지 않도록 지표 높이를 넘긴다. 계단형이면 그려진 면은 층 바닥(floor(z / step) · step)이라
-                      // 매끈한 TIN 보다 낮다. TIN 그대로 쓰면 계단 윗면을 스치는 시선이 "지형에 막힘" 으로 잘못 걸린다(플레이어 발 높이와 같은 규칙)
-                      const groundAt = (x: number, y: number) => {
-                          const g = combined.heightAt(x, y)
-                          const step = groundStepRef.current
-                          return g === null || step === null ? g : Math.floor(g / step) * step
-                      }
+                      // 지형이 가로막은 건물은 고르지 않도록 지표 높이를 넘긴다(계단형이면 층 바닥. sceneSetup.ts walkGroundAt)
+                      const groundAt = walkGroundAt(combined, groundStepRef.current)
                       const hit = picker.pick(tiles.tiles.values(), cam.eye, fpsForward(cam), PICK_RANGE_M, groundAt)
                       const prev = lookedRef.current
                       if (hit?.tileId === prev?.tileId && hit?.index === prev?.index) return
@@ -617,7 +458,7 @@ export const TerrainViewCanvas = ({
     // 보이는 거리(품질 설정 또는 디버그 walkradius=)가 둘러보기 중에 바뀌면 바로 반영: 그리는 반경을 바꾸고, 지금 자리에서 상주를 다시 맞춘다
     // (줄이면 먼 도엽을 GPU 에서 내리고, 늘리면 다시 요청한다). 둘러보기를 시작할 때는 시작 효과가 같은 값을 쓰므로, 값이 바뀌었을 때만
     // 움직인다(시작과 같은 커밋에서 한 번 더 돌아 아직 오는 중인 도엽을 다시 요청하지 않도록)
-    const walkRadius = renderDebug?.walkRadius ?? quality.walkRadius ?? WALK_CULL_RADIUS
+    const walkRadius = walkRadiusOf(renderDebug, quality)
     const appliedWalkRadiusRef = useRef(walkRadius)
     useEffect(() => {
         if (appliedWalkRadiusRef.current === walkRadius) return

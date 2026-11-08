@@ -19,7 +19,7 @@ import {
     ortho,
     Vec3,
 } from "./camera"
-import { initWebGPU } from "./device"
+import { initWebGPU, RenderTarget } from "./device"
 import { createWaterShader, createWaterSmoothShader } from "./shaders"
 import {
     createBuildingHighlightShader,
@@ -1088,7 +1088,8 @@ const createTerrainDrawingPassAndUpdaters = (
  * 캔버스 크기가 바뀌면 resizeUpdater 로 알린다. 색 텍스처는 WebGPU 가 canvas 속성 크기를 따라 다시 잡지만, 깊이 텍스처와
  * 투영 비율은 여기서 직접 다시 만들어야 한다.
  *
- * @param options.canvasId 대상 canvas 요소의 id
+ * @param options.canvasId 대상 canvas 요소의 id(브라우저). target 이 있으면 쓰지 않는다
+ * @param options.target 그릴 곳(헤드리스 검사, device.ts RenderTarget). 있으면 initWebGPU 를 건너뛰고 target.getTexture() 에 그린다. 운영은 생략
  * @param options.width 캔버스 실제 픽셀 너비(canvas width 속성과 같아야 한다)
  * @param options.height 캔버스 실제 픽셀 높이
  * @param options.backgroundColor 처음 배경색(0 ~ 1). backgroundUpdater 로 바꿀 수 있다
@@ -1098,18 +1099,21 @@ const createTerrainDrawingPassAndUpdaters = (
  */
 export const createTerrainRenderFunctionAndUpdateFunctions = async ({
     canvasId,
+    target,
     width,
     height,
     backgroundColor,
     debug: initialDebug = {},
 }: {
-    canvasId: string
+    canvasId?: string
+    target?: RenderTarget
     width: number
     height: number
     backgroundColor: { r: number; g: number; b: number }
     debug?: RenderDebug
 }) => {
-    const { context, device, format } = await initWebGPU(canvasId)
+    if (!target && canvasId === undefined) throw new Error("canvasId 나 target 중 하나가 필요함")
+    const { device, format, getTexture } = target ?? (await initWebGPU(canvasId!))
     let debug = initialDebug
 
     /** 캔버스 픽셀 크기의 깊이 텍스처를 만든다(SSAO 가 읽으므로 TEXTURE_BINDING 도) */
@@ -1194,7 +1198,7 @@ export const createTerrainRenderFunctionAndUpdateFunctions = async ({
      */
     const render = () => {
         const encoder = device.createCommandEncoder()
-        const canvasView = context.getCurrentTexture().createView()
+        const canvasView = getTexture().createView()
         const lighting = currentLighting()
         const aoDebug = debug.aodebug ?? 0
         const offscreen = lighting.ao || lighting.edge > 0 || aoDebug !== 0 ? ao.sceneView() : null

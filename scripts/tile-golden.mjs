@@ -717,12 +717,13 @@ async function runGolden(lib, bundles, args) {
         timing.push({ key, wall: Math.round(r.wall * 10) / 10, cpu: Math.round(r.cpu * 10) / 10, layers: r.layers })
         // --logs(C3 2026-10-23): 도엽 로그 줄을 남겨 층별 "(캐시)" 적중을 전후로 견준다(perf-check cacheFlags 와 같은 표시)
         if (args.logs) tileLogs.push({ key, line: r.logs.find((l) => l.startsWith("도엽 ")) ?? "" })
-        // --dump <dir>(stepmerge R0 2026-10-25, 읽기 전용): 기록마다 그릴 지형·도로 조각과 단계 ms 를 v8 직렬화로 남긴다(해시·비교에는 영향 없음)
+        // --dump <dir>(stepmerge R0 2026-10-25 · 헤드리스 H1-b 2026-11-08, 읽기 전용): 기록마다 TileData 전체(지형·도로·건물·물 조각과 메쉬·표,
+        // 산림 마스크, bounds·tin·통계)와 원점·스타일·단계 ms 를 v8 직렬화로 남긴다(해시·비교에는 영향 없음). TileData 필드를 맨 위에 펼쳐
+        // 10-25 형식(terrain·roadChunks·roads·roadTable·tin)의 소비자도 그대로 읽는다. 폴더는 docs/render-checks/ 아래(git 제외)를 쓴다
         if (args.dump) {
             await mkdir(path.resolve(ROOT, args.dump), { recursive: true })
-            const d = r.msg.data
-            const pick = (cs) => cs.map((c) => ({ positions: c.positions, indices: c.indices, normals: c.normals ?? null }))
-            await writeFile(path.resolve(ROOT, args.dump, `${key.replace(/\|/g, "__")}.v8`), serialize({ key, layers: r.layers, wall: r.wall, line: r.logs.find((l) => l.startsWith("도엽 ")) ?? "", terrain: pick(d.terrain), roadChunks: pick(d.roadChunks), roads: d.roads && pick([d.roads])[0], roadTable: d.roadTable && { count: d.roadTable.count, faceBase: d.roadTable.faceBase, faceCount: d.roadTable.faceCount, facility: d.roadTable.facility }, tin: pick([d.tin])[0] }))
+            const meta = { key, origin: scene.origin, style: r.job.style, layers: r.layers, wall: r.wall, line: r.logs.find((l) => l.startsWith("도엽 ")) ?? "" }
+            await writeFile(path.resolve(ROOT, args.dump, `${key.replace(/\|/g, "__")}.v8`), serialize({ ...r.msg.data, ...meta }))
         }
         process.stdout.write(`\r${Object.keys(records).length} 도엽 ${key}                    `)
     }

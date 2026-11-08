@@ -4,8 +4,11 @@
  *
  * 바꿀 때마다 모든 캡처를 다시 찍지 않도록, git diff 로 바뀐 파일을 분류(scripts/verify-map.json)해 필요한 검증만 고른다.
  * - 1겹(도엽 골든): 워커·데이터·메쉬 코드가 바뀌면 scripts/tile-golden.mjs 로 기준 골든과 바이트 비교(빠름, 모든 레이어)
- * - 2겹(캡처): smoke = 기본 4조합(언제나), 레이어 = 고친 레이어의 장면과 끈 조합, full = 공유 모듈이 바뀌었거나 --full(커밋 전)
- *   장면은 scripts/verify-scenes.json. 캡처·비교는 scripts/render-check.mjs 가 하고(Playwright 는 거기서만), 판정·요약은 이 스크립트가 한다.
+ * - 2겹(헤드리스, 2026-11-08 H1): 브라우저 없이 Dawn 으로 같은 장면을 그려 기준과 비교(scripts/render-headless.mjs). 장면 범위는 분류로
+ *   smoke = 기본 4조합(언제나), 레이어 = 고친 레이어의 장면과 끈 조합, full = 공유 모듈이 바뀌었거나 --full. webgpu 가 설치되지 않았으면
+ *   설치 명령을 알리고 건너뛴다(npm --prefix scripts/headless install, docs/headless-check-plan.md D1)
+ * - 3겹(브라우저 캡처): Playwright + 설치된 Chrome(scripts/render-check.mjs). --full(커밋 전)·--browser·기준 갱신 때만. 장면 범위는 2겹과 같다
+ *   장면은 scripts/verify-scenes.json(두 겹 공용). 판정·요약은 이 스크립트가 한다.
  * 테스트 프레임워크는 쓰지 않는다(fb_web/CLAUDE.md 검증 시스템의 원칙).
  *
  * 흐름(함수):
@@ -16,20 +19,23 @@
  * - printPlan: 계획 출력(예상 시간 포함)
  * - checkEnv: 서버·dist 빌드 시각·기준 폴더·Chrome/Node 버전
  * - runGolden: 골든 만들기 + 기준과 비교(tile-golden --compare, 실패면 종료 코드 1)
+ * - runHeadless: render-headless 로 그리고 기준과 비교(그 index.json 의 판정·재검증을 읽는다)
  * - runCaptures: render-check 캡처 → 기준과 비교(임계값마다 compare-t<값>.json)
  * - judge: 장면별 judge 임계값으로 같음/다름, 재검증 쌍 확인 → 요약 표, verify.json
- * - refreshBaseline: 전체 캡처 + 골든을 기준 폴더로, manifest.json 에 커밋·Chrome·Node
+ * - refreshBaseline: 골든 + 헤드리스 전체 + 브라우저 전체 캡처를 기준 폴더로, manifest.json 에 커밋·Chrome·webgpu·Node
  *
  * 사용:
- *   npm run verify                         # 작업 트리 ↔ HEAD(추적 안 된 파일 포함)
+ *   npm run verify                         # 작업 트리 ↔ HEAD(추적 안 된 파일 포함). 골든 + 헤드리스
  *   npm run verify -- --base <ref>         # <ref>..HEAD 의 커밋들
- *   npm run verify -- --full               # 분류와 무관하게 골든 + 전체 캡처(커밋 전)
+ *   npm run verify -- --browser            # 분류대로 + 3겹 브라우저 캡처(서버 필요)
+ *   npm run verify -- --full               # 분류와 무관하게 골든 + 헤드리스 전체 + 브라우저 전체(커밋 전)
  *   npm run verify -- --dry-run            # 계획만
  *   npm run verify -- --files src/roadsMesh.ts,src/ui/Dock.tsx --dry-run   # 가정한 diff 로 계획 보기
- *   npm run verify -- --refresh-baseline   # HEAD 에서 기준 다시 찍기(커밋 뒤, Chrome 업그레이드 뒤)
+ *   npm run verify -- --refresh-baseline   # HEAD 에서 기준 다시 찍기(커밋 뒤, Chrome·webgpu 업그레이드 뒤). 골든·헤드리스·브라우저 모두
  *   옵션: --golden <dir>(기본 docs/render-checks/golden-baseline) --baseline <dir>(기본 docs/render-checks/capture-baseline)
+ *         --headless-baseline <dir>(기본 docs/render-checks/headless-baseline) --no-headless(2겹 건너뜀)
  *         --out <dir>(기본 docs/render-checks/<오늘>-verify[-n]) --server http://localhost:3000 --allow-dirty(기준 갱신 때 src 변경 허용)
- * 서버는 사용자가 띄운다(npm run build 뒤 dist-static 3000). 종료 코드: 0 통과, 1 예상 밖 차이·실패, 2 실행 못 함(환경)
+ * 서버는 사용자가 띄운다(npm run build 뒤 dist-static 3000. 3겹 브라우저 캡처 때만 필요). 종료 코드: 0 통과, 1 예상 밖 차이·실패, 2 실행 못 함(환경)
  */
 import { spawnSync, execFileSync } from "node:child_process"
 import { createHash } from "node:crypto"
@@ -44,13 +50,18 @@ const CHROME_MAC = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome
 /** 한 장 평균(준비 신호 포함, VERIFY.md 3.5 의 8 ~ 12초)과 골든(148기록, 약 40초) — 예상 시간 표시용 */
 const SEC_PER_SHOT = 11
 const SEC_GOLDEN = 50
+/** 헤드리스 한 조합(장면 준비 + 두 크기 그리기, 2026-11-08 측정). 데이터 해시가 같은 덤프를 다시 쓰면 1초 안쪽 */
+const SEC_PER_HEADLESS_SCENE = 10
+/** 헤드리스(Dawn) 설치 확인: scripts/headless 의 선택 설치(D1) */
+const WEBGPU_INSTALLED = existsSync(path.join(path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."), "scripts/headless/node_modules/webgpu/package.json"))
+const HEADLESS_INSTALL_NOTE = "헤드리스 2겹을 건너뜁니다: webgpu(Dawn) 가 설치되어 있지 않습니다. 설치: npm --prefix scripts/headless install (약 130 MB, 0.6.2 고정). 그동안 화면 확인은 npm run verify -- --browser"
 
 class EnvError extends Error {}
 
 // ---- 옵션 ----
 
 const parseArgs = (argv) => {
-    const a = { base: "working", full: false, dryRun: false, files: null, refresh: false, allowDirty: false, server: "http://localhost:3000", golden: "docs/render-checks/golden-baseline", baseline: "docs/render-checks/capture-baseline", out: null }
+    const a = { base: "working", full: false, browser: false, headless: true, dryRun: false, files: null, refresh: false, allowDirty: false, server: "http://localhost:3000", golden: "docs/render-checks/golden-baseline", baseline: "docs/render-checks/capture-baseline", headlessBaseline: "docs/render-checks/headless-baseline", out: null }
     for (let i = 0; i < argv.length; i++) {
         const k = argv[i]
         const take = () => {
@@ -60,7 +71,10 @@ const parseArgs = (argv) => {
         }
         switch (k) {
             case "--base": a.base = take(); break
-            case "--full": a.full = true; break
+            case "--full": a.full = true; a.browser = true; break
+            case "--browser": a.browser = true; break
+            case "--no-headless": a.headless = false; break
+            case "--headless-baseline": a.headlessBaseline = take(); break
             case "--dry-run": a.dryRun = true; break
             case "--files": a.files = take().split(",").map((s) => s.trim()).filter(Boolean); break
             case "--refresh-baseline": a.refresh = true; break
@@ -142,7 +156,7 @@ const makePlan = (classified, forceFull) => {
 
 const fmtTime = (sec) => (sec >= 90 ? `약 ${Math.round(sec / 60)}분` : `약 ${Math.round(sec)}초`)
 
-const printPlan = (source, classified, plan, sizes, forceFull) => {
+const printPlan = (source, classified, plan, sizes, forceFull, layers = { headless: true, browser: false }) => {
     console.log(`\n== 검증 계획 (${source}) ==`)
     if (classified.length === 0) console.log("바뀐 파일 없음")
     for (const c of classified) console.log(`  ${c.cls.padEnd(16)} ${c.file}${c.rule ? "" : "   ← 분류표에 없음(전체)"}`)
@@ -150,9 +164,11 @@ const printPlan = (source, classified, plan, sizes, forceFull) => {
     const shots = plan.scenes.length * sizes.length
     console.log(`1겹 도엽 골든: ${plan.golden ? "예(기준과 바이트 비교)" : "아니오"}`)
     const modeText = { none: "없음", smoke: "smoke(기본 4조합)", layers: `smoke + 레이어(${plan.layers.join(", ")})`, full: "전체" }[plan.mode]
-    console.log(`2겹 캡처: ${modeText} — ${plan.scenes.length}조합 × ${sizes.length}크기 = ${shots}장`)
+    const headlessText = !layers.headless ? "건너뜀(--no-headless)" : WEBGPU_INSTALLED ? `${modeText} — ${plan.scenes.length}조합 × ${sizes.length}크기 = ${shots}장` : "건너뜀(webgpu 미설치)"
+    console.log(`2겹 헤드리스(Dawn): ${headlessText}`)
+    console.log(`3겹 브라우저 캡처: ${layers.browser ? `${modeText} — ${shots}장` : "없음(--browser·--full·기준 갱신 때)"}`)
     for (const s of plan.scenes) console.log(`  ${s.id.padEnd(22)} 판정 ${s.judge.join("·")}${s.off ? `  (끈 조합 ${s.off}=0)` : ""}`)
-    const sec = (plan.golden ? SEC_GOLDEN : 0) + shots * SEC_PER_SHOT + (shots ? 15 : 0)
+    const sec = (plan.golden ? SEC_GOLDEN : 0) + (layers.headless && WEBGPU_INSTALLED ? plan.scenes.length * SEC_PER_HEADLESS_SCENE + (plan.scenes.length ? 5 : 0) : 0) + (layers.browser ? shots * SEC_PER_SHOT + (shots ? 15 : 0) : 0)
     console.log(`예상 시간: ${sec ? fmtTime(sec) : "0"}`)
 }
 
@@ -226,6 +242,12 @@ const checkEnv = async (args, needs) => {
         if (m.complete === false) throw new EnvError(`캡처 기준이 불완전합니다(${args.baseline}/manifest.json errors). --refresh-baseline 다시`)
         notes.push(`캡처 기준: ${m.commit} ${m.browser?.name} ${m.browser?.version}, ${m.shots}장 (${m.createdAt})`)
     }
+    if (needs.headless && needs.compare) {
+        const m = readJson(path.resolve(ROOT, args.headlessBaseline, "manifest.json"))
+        if (!m) throw new EnvError(`헤드리스 기준이 없습니다(${args.headlessBaseline}/manifest.json). HEAD 에서 npm run verify -- --refresh-baseline(전체) 또는 node scripts/render-headless.mjs --refresh-baseline(헤드리스만)으로 먼저 찍으세요`)
+        staleNote(m, "헤드리스")
+        notes.push(`헤드리스 기준: ${m.commit} webgpu ${m.webgpu} ${m.adapter?.description ?? ""}, ${m.shots}장 (${m.createdAt})`)
+    }
     if (needs.golden && needs.compare) {
         const m = readJson(path.resolve(ROOT, args.golden, "manifest.json"))
         if (!m || !existsSync(path.resolve(ROOT, args.golden, "golden.json"))) throw new EnvError(`골든 기준이 없습니다(${args.golden}). npm run verify -- --refresh-baseline 먼저`)
@@ -263,6 +285,18 @@ const shotName = (size, params) => {
         else parts.push(`${key}-${value.replace(/[^0-9a-zA-Z.-]+/g, "_")}`)
     }
     return `${size}_${parts.join("_") || "default"}`
+}
+
+/**
+ * 2겹 헤드리스: render-headless 로 그리고 기준과 비교한다. 판정·재검증은 render-headless 가 하고 여기서는 그 index.json 을 읽는다.
+ * @returns { code, index, failures[] }
+ */
+const runHeadless = (args, scenes, outDir) => {
+    const hOut = path.join(outDir, "headless")
+    const code = runNode("scripts/render-headless.mjs", ["--scenes", scenes.map((s) => s.id).join(","), "--baseline", args.headlessBaseline, "--out", hOut, "--quiet"])
+    const index = readJson(path.join(hOut, "index.json"))
+    const failures = code === 2 || !index ? [`헤드리스를 실행하지 못함(종료 코드 ${code}). 위 출력 확인`] : index.failures.map((f) => `헤드리스 ${f}`)
+    return { code, index, failures }
 }
 
 /** 캡처만. @returns 종료 코드 */
@@ -329,12 +363,20 @@ const judge = (scenes, outDir, compares) => {
 
 const pct = (r) => (r === undefined ? "-" : `${r.px} px ${(r.ratio * 100).toFixed(4)}%${r.judged ? "" : "(참고)"}`)
 
-const printSummary = (golden, judged, outDir) => {
+const printSummary = (golden, judged, outDir, headless = null) => {
     console.log("\n== 요약 ==")
     if (golden) console.log(`1겹 도엽 골든: ${golden.ok ? "같음" : golden.built ? "다름(위 tile-golden 비교 출력)" : `만들기 실패(종료 코드 ${golden.code})`}`)
+    if (headless?.skipped) console.log(`2겹 헤드리스: ${headless.skipped}`)
+    else if (headless?.index) {
+        const rows = headless.index.results
+        const same = rows.filter((r) => r.verdict === "같음").length
+        console.log(`2겹 헤드리스 ${rows.length}장: 같음 ${same}, 다름·실패 ${rows.length - same} (${outDir}/headless, ${headless.index.seconds} s)`)
+        for (const r of rows.filter((x) => x.verdict !== "같음")) console.log(`  ${r.scene.padEnd(22)} ${r.size.padEnd(9)} ${r.error ? "실패" : Object.entries(r.compare ?? {}).map(([t, c]) => `t${t} ${c.px} px ${(c.ratio * 100).toFixed(4)}%`).join(" ")} ${r.verdict ?? ""}`)
+        for (const s of headless.index.sanity) console.log(`  재검증 ${s.on} ↔ ${s.off} ${s.size}: ${Object.entries(s.ratios).map(([t, v]) => `t${t} ${(v * 100).toFixed(3)} %`).join(" ")} ${s.different ? "다름(정상)" : "같음(무뎌짐?)"}`)
+    } else if (headless) console.log(`2겹 헤드리스: 실행 못 함(종료 코드 ${headless.code})`)
     if (judged) {
         const ts = Object.keys(judged.compares).sort((a, b) => b - a)
-        console.log(`2겹 캡처 ${judged.rows.length}장 (${outDir})`)
+        console.log(`3겹 브라우저 캡처 ${judged.rows.length}장 (${outDir})`)
         console.log(`  ${"장면".padEnd(22)} ${"크기".padEnd(9)} ${ts.map((t) => `t${t}`.padEnd(26)).join(" ")} 판정`)
         for (const r of judged.rows) console.log(`  ${r.scene.padEnd(22)} ${r.size.padEnd(9)} ${ts.map((t) => (r.ratios[t]?.missing ? "짝 없음" : pct(r.ratios[t])).padEnd(26)).join(" ")} ${r.verdict}`)
         for (const s of judged.sanity) console.log(`  재검증 t${s.t} ${s.on} ↔ ao=0: ${(s.ratio * 100).toFixed(3)} % ${s.different ? "다름(정상)" : "같음(무뎌짐?)"}`)
@@ -363,7 +405,9 @@ const refreshBaseline = async (args) => {
     const commit = git("rev-parse", "--short", "HEAD") + (dirty.length ? "+dirty" : "")
     const subject = git("log", "-1", "--format=%s")
     const shots = SCENES.scenes.length * SCENES.sizes.length
-    console.log(`\n== 기준 갱신 (HEAD ${commit} ${subject.slice(0, 60)}) ==\n골든 + 전체 캡처 ${shots}장, 예상 ${fmtTime(SEC_GOLDEN + shots * SEC_PER_SHOT + 15)}. Chrome ${chrome ?? "(버전 못 읽음)"}`)
+    const headless = args.headless && WEBGPU_INSTALLED
+    console.log(`\n== 기준 갱신 (HEAD ${commit} ${subject.slice(0, 60)}) ==\n골든 + ${headless ? `헤드리스 ${shots}장 + ` : ""}브라우저 캡처 ${shots}장, 예상 ${fmtTime(SEC_GOLDEN + (headless ? SCENES.scenes.length * SEC_PER_HEADLESS_SCENE : 0) + shots * SEC_PER_SHOT + 15)}. Chrome ${chrome ?? "(버전 못 읽음)"}`)
+    if (args.headless && !WEBGPU_INSTALLED) console.log(HEADLESS_INSTALL_NOTE)
     const moved = [moveAside(args.golden), moveAside(args.baseline)].filter(Boolean)
     for (const m of moved) console.log(`이전 기준을 ${m} 로 옮겼습니다(필요 없으면 지워도 됨)`)
 
@@ -374,7 +418,13 @@ const refreshBaseline = async (args) => {
     const gMeta = g.meta
     writeFileSync(path.resolve(ROOT, args.golden, "manifest.json"), JSON.stringify({ kind: "golden-baseline", commit, subject, createdAt: new Date().toISOString(), node: process.version, records: Object.keys(g.records).length, goldenCommit: gMeta.commit, workerDirty: gMeta.workerDirty, policy: "화면·워커 출력이 바뀐 커밋 뒤, 또는 Chrome 이 올라가면 HEAD 에서 다시 찍는다(VERIFY.md 6절). 배포·문서·스크립트만의 커밋 뒤에는 그대로. 기계마다 따로(git 제외)" }, null, 2))
 
-    // 2) 전체 캡처
+    // 2) 헤드리스 전체(기준 폴더를 옮기고 manifest 를 쓰는 것은 render-headless 가 한다)
+    if (headless) {
+        const hCode = runNode("scripts/render-headless.mjs", ["--refresh-baseline", "--baseline", args.headlessBaseline, "--quiet"])
+        if (hCode !== 0) console.log(`헤드리스 기준이 불완전합니다(종료 코드 ${hCode}). ${args.headlessBaseline}/manifest.json 의 failures 확인`)
+    }
+
+    // 3) 브라우저 전체 캡처
     const cCode = capture(SCENES.scenes, path.resolve(ROOT, args.baseline))
     const index = readJson(path.resolve(ROOT, args.baseline, "index.json"))
     const errors = (index?.results ?? []).filter((r) => r.error || r.ready?.timedOut).map((r) => `${r.name}: ${r.error ?? "준비 시간 초과"}`)
@@ -415,11 +465,14 @@ const main = async () => {
     const { files, source } = changedFiles(args)
     const classified = files.map(classify)
     const plan = makePlan(classified, args.full)
-    printPlan(source, classified, plan, SCENES.sizes, args.full)
+    printPlan(source, classified, plan, SCENES.sizes, args.full, { headless: args.headless, browser: args.browser })
+    const doHeadless = args.headless && WEBGPU_INSTALLED && plan.scenes.length > 0
+    const doBrowser = args.browser && plan.scenes.length > 0
+    if (args.headless && !WEBGPU_INSTALLED && plan.scenes.length > 0) console.log(HEADLESS_INSTALL_NOTE)
     if (args.dryRun) {
         // 계획만 볼 때도 기준 정보·갱신 권장은 보여 준다(서버 없음 같은 환경 오류는 참고로만)
         try {
-            const { notes } = await checkEnv(args, { captures: plan.scenes.length > 0, golden: plan.golden, compare: true, dryRun: true })
+            const { notes } = await checkEnv(args, { captures: doBrowser, headless: doHeadless, golden: plan.golden, compare: true, dryRun: true })
             for (const n of notes) console.log(n)
         } catch (e) {
             console.log(`(참고) ${e.message}`)
@@ -430,15 +483,16 @@ const main = async () => {
         console.log("검증할 것이 없습니다.")
         return 0
     }
-    const { notes } = await checkEnv(args, { captures: plan.scenes.length > 0, golden: plan.golden, compare: true })
+    const { notes } = await checkEnv(args, { captures: doBrowser, headless: doHeadless, golden: plan.golden, compare: true })
     for (const n of notes) console.log(n)
     const outRel = args.out ?? defaultOut()
     const outDir = path.resolve(ROOT, outRel)
     mkdirSync(outDir, { recursive: true })
 
     const golden = plan.golden ? runGolden(args, outDir) : null
+    const headless = doHeadless ? runHeadless(args, plan.scenes, outDir) : plan.scenes.length > 0 ? { skipped: args.headless ? "건너뜀(webgpu 미설치)" : "건너뜀(--no-headless)" } : null
     let judged = null
-    if (plan.scenes.length) {
+    if (doBrowser) {
         const cCode = capture(plan.scenes, outDir)
         if (cCode !== 0) console.log(`render-check 캡처 종료 코드 ${cCode}(장별 실패는 아래 판정에 나온다)`)
         const thresholds = [...new Set(plan.scenes.flatMap((s) => s.judge))]
@@ -446,11 +500,11 @@ const main = async () => {
         const compares = compareAll(path.resolve(ROOT, args.baseline), outDir, thresholds)
         judged = { ...judge(plan.scenes, outDir, compares), compares }
     }
-    printSummary(golden, judged, outRel)
-    const failures = [...(golden && !golden.ok ? ["도엽 골든이 기준과 다름"] : []), ...(judged?.failures ?? [])]
+    printSummary(golden, judged, outRel, headless)
+    const failures = [...(golden && !golden.ok ? ["도엽 골든이 기준과 다름"] : []), ...(headless?.failures ?? []), ...(judged?.failures ?? [])]
     writeFileSync(
         path.join(outDir, "verify.json"),
-        JSON.stringify({ createdAt: new Date().toISOString(), head: git("rev-parse", "--short", "HEAD"), source, files: classified, plan: { golden: plan.golden, mode: plan.mode, layers: plan.layers, scenes: plan.scenes.map((s) => s.id) }, golden, rows: judged?.rows ?? [], sanity: judged?.sanity ?? [], failures }, null, 2),
+        JSON.stringify({ createdAt: new Date().toISOString(), head: git("rev-parse", "--short", "HEAD"), source, files: classified, plan: { golden: plan.golden, mode: plan.mode, layers: plan.layers, scenes: plan.scenes.map((s) => s.id) }, golden, headless: headless?.index ? { dir: "headless", seconds: headless.index.seconds, results: headless.index.results.map(({ info, ...r }) => r), sanity: headless.index.sanity } : (headless ?? null), rows: judged?.rows ?? [], sanity: judged?.sanity ?? [], failures }, null, 2),
     )
     if (failures.length) {
         console.log(`\n예상 밖 차이 ${failures.length}건:\n  ${failures.join("\n  ")}\n→ diff PNG 를 보고, 다르면 안 되는 곳이면 VERIFY.md 3절(재현 → 좁히기 → 수치)`)
