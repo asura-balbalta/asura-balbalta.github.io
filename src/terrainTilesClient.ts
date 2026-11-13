@@ -5,6 +5,8 @@ import { mergeRoadTables, RoadTable, roadTableBuffers } from "./roadTable"
 import { WATER_LIFT_M, waterDisplayChunks } from "./waterMesh"
 import { mergeWaterTables, NOT_BUILT, WATER_KIND, WaterTable, waterTableBuffers } from "./waterTable"
 import { ForestTable, forestTableBuffers, forestTypeCounts } from "./forestTable"
+import { GREEN_CLASS_COUNT } from "./osmGreenData"
+import type { GreenRange } from "./osmGreenMesh"
 import type { MeshChunk } from "./terrainData"
 import type { TinMesh } from "./terrainData"
 import type { TerrainTilesRequest, TerrainTilesResponse, TileData, TileStyle, TileSummary, WorkerMemory } from "./terrainTiles.worker"
@@ -53,8 +55,14 @@ const tileBytes = (t: TileData) => {
     if (t.waterTable) for (const b of waterTableBuffers(t.waterTable)) water += b.byteLength
     let forest = t.forestMask ? t.forestMask.data.byteLength : 0
     if (t.forestTable) for (const b of forestTableBuffers(t.forestTable)) forest += b.byteLength
-    return { chunks, tin, buildings, table, roads, water, forest }
+    // 녹지: 분류 범위(객체 배열)만이라 범위 하나를 숫자 셋(24 B)으로 어림한다. 나눈 TIN 의 늘어난 정점은 tin·chunks 에 들어 있다
+    let green = (t.tin.greenRanges?.length ?? 0) * 24
+    for (const c of t.terrain) green += (c.greenRanges?.length ?? 0) * 24
+    return { chunks, tin, buildings, table, roads, water, forest, green }
 }
+
+/** 녹지 분류별 배열 0(비녹지) ~ GREEN_CLASS_COUNT */
+const greenZeros = () => new Array<number>(GREEN_CLASS_COUNT + 1).fill(0)
 
 export const createTerrainTiles = () => {
     const worker = new Worker(TERRAIN_TILES_WORKER_URL)
@@ -79,7 +87,7 @@ export const createTerrainTiles = () => {
     let currentStyle: TileStyle | null = null
     /** 들고 있는 도엽 사본의 바이트 합(선택 도엽·밖 도엽 수 포함) */
     const memoryStats = () => {
-        const sum = { tiles: 0, extra: 0, chunks: 0, tin: 0, buildings: 0, table: 0, roads: 0, water: 0, forest: 0 }
+        const sum = { tiles: 0, extra: 0, chunks: 0, tin: 0, buildings: 0, table: 0, roads: 0, water: 0, forest: 0, green: 0 }
         for (const t of tiles.values()) {
             const b = tileBytes(t)
             sum.tiles++
@@ -91,13 +99,14 @@ export const createTerrainTiles = () => {
             sum.roads += b.roads
             sum.water += b.water
             sum.forest += b.forest
+            sum.green += b.green
         }
-        return { ...sum, total: sum.chunks + sum.tin + sum.buildings + sum.table + sum.roads + sum.water + sum.forest }
+        return { ...sum, total: sum.chunks + sum.tin + sum.buildings + sum.table + sum.roads + sum.water + sum.forest + sum.green }
     }
     const mb = (n: number) => (n / 1048576).toFixed(1)
     const logMemory = () => {
         const m = memoryStats()
-        console.log(`메모리(메인 도엽 사본): 도엽 ${m.tiles}(밖 ${m.extra}), ${mb(m.total)} MB = 조각 ${mb(m.chunks)} + TIN ${mb(m.tin)} + 건물 ${mb(m.buildings)} + 표 ${mb(m.table)} + 도로 ${mb(m.roads)} + 물 ${mb(m.water)} + 산림 ${mb(m.forest)}`)
+        console.log(`메모리(메인 도엽 사본): 도엽 ${m.tiles}(밖 ${m.extra}), ${mb(m.total)} MB = 조각 ${mb(m.chunks)} + TIN ${mb(m.tin)} + 건물 ${mb(m.buildings)} + 표 ${mb(m.table)} + 도로 ${mb(m.roads)} + 물 ${mb(m.water)} + 산림 ${mb(m.forest)} + 녹지 범위 ${mb(m.green)}`)
     }
 
     /**
@@ -313,7 +322,8 @@ export const createTerrainTiles = () => {
         },
         /**
          * 도엽의 지형 조각 사본을 버린다(메모리 M-A, 2026-10-15). 캔버스가 GPU 에 올린 뒤 부른다. 높이 조회·내보내기는 원본 TIN 만 쓰므로
-         * 조각은 메인 스레드에 둘 이유가 없다(계단형 조각은 TIN 의 약 13배라 1364개 둘러보기에서 2.3 GB 였다). 다시 필요하면 워커가 캐시로 만든다
+         * 조각은 메인 스레드에 둘 이유가 없다(계단형 조각은 TIN 의 약 13배라 1364개 둘러보기에서 2.3 GB 였다). 다시 필요하면 워커가 캐시로 만든다.
+         * 녹지 분류 범위는 TIN 쪽(tin.greenRanges)을 남긴다(내보내기 G5 가 나눈 TIN 과 함께 쓴다. 조각의 greenRanges 는 렌더러가 올릴 때만 쓰므로 조각과 같이 버린다)
          */
         releaseTerrain: (id: string) => {
             const t = tiles.get(id)
@@ -347,6 +357,9 @@ export const createTerrainTiles = () => {
             const water = { built: 0, rivers: 0, lakes: 0, ribbons: 0 }
             const forestTables: ForestTable[] = []
             let forestSkipped = 0
+            // 녹지: 나눈 도엽 수, 분류별 표시 면적 합(m², 도엽마다 자기 TIN 몫이라 겹치지 않음), 분류별 걸친 원본 조각 수(도엽마다 센 합. 여러 도엽에 걸친
+            // 조각은 여러 번 셈), 나눈 지형 삼각형·부채꼴 대체·버림 합
+            const osmGreen = { tiles: 0, areaM2: greenZeros(), pieces: greenZeros(), splitTriangles: 0, fallback: 0, dropped: 0 }
             for (const t of tiles.values()) {
                 if (t.extra) continue
                 count++
@@ -361,10 +374,19 @@ export const createTerrainTiles = () => {
                 water.ribbons += t.waterStats.ribbons
                 if (t.forestTable) forestTables.push(t.forestTable)
                 forestSkipped += t.forestSkipped
+                const g = t.greenStats
+                if (g) {
+                    osmGreen.tiles++
+                    g.areaM2.forEach((v, c) => (osmGreen.areaM2[c] += v))
+                    g.pieces.forEach((v, c) => (osmGreen.pieces[c] += v))
+                    osmGreen.splitTriangles += g.splitTriangles
+                    osmGreen.fallback += g.fallback
+                    osmGreen.dropped += g.dropped
+                }
             }
             // 산림: 폴리곤은 걸친 도엽마다 칠해지므로 id 로 한 번만 센다(임상별, 길이 5). 건너뜀은 도엽마다 센 합
             const forest = { types: forestTypeCounts(forestTables), skipped: forestSkipped }
-            return { count, triangles, buildings, roads, water, forest }
+            return { count, triangles, buildings, roads, water, forest, osmGreen }
         },
         memory: memoryStats,
         /** 워커 쪽 캐시 메모리 보고(디버그 페이지 memory(), 계획서 19절). 운영에서는 부르지 않는다 */
@@ -379,14 +401,20 @@ export const createTerrainTiles = () => {
          * 건물 메쉬에는 도엽별 건물 표를 정점·삼각형 오프셋에 맞춰 합친 표(table)를 붙여 SKP·3DM 이 건물마다 그룹·속성을 만들 수 있게 한다(L3)
          */
         mergedMeshes: (): {
-            terrain: TinMesh | null
+            /**
+             * 지형(선택 도엽 TIN 을 이은 것). 녹지로 나눈 도엽이 하나라도 있으면 greenRanges: 이은 메쉬의 삼각형 단위 분류 범위(도엽 순서대로, 도엽 안은
+             * 분류 오름차순. 나누지 않은 도엽은 분류 0 범위 하나). 없으면 greenRanges 가 없다(전과 같은 모양)
+             */
+            terrain: (TinMesh & { greenRanges?: GreenRange[] }) | null
             buildings: (TinMesh & { table?: BuildingTable }) | null
             roads: (TinMesh & { roadTable?: RoadTable }) | null
             water: (TinMesh & { waterTable?: WaterTable }) | null
             /** 산림은 내보내지 않는다(계획 F5). LayerMeshes 모양을 맞추려고 항상 null */
             forest: null
+            /** 녹지는 따로 메쉬가 없고 지형의 분류 범위(terrain.greenRanges)로 간다(b-2. 내보내기 G5). LayerMeshes 모양을 맞추려고 항상 null */
+            osmGreen: null
         } => {
-            if (!origin) return { terrain: null, buildings: null, roads: null, water: null, forest: null }
+            if (!origin) return { terrain: null, buildings: null, roads: null, water: null, forest: null, osmGreen: null }
             /** 메쉬들을 잇고 각 조각이 시작하는 정점·삼각형 번호를 돌려준다 */
             const concat = (parts: TinMesh[]): { mesh: TinMesh; offsets: { vertex: number; face: number }[] } | null => {
                 if (parts.length === 0) return null
@@ -414,6 +442,16 @@ export const createTerrainTiles = () => {
             const selected = [...tiles.values()].filter((t) => !t.extra)
             const withBuildings = selected.filter((t): t is TileData & { buildings: TinMesh } => !!t.buildings)
             const terrain = concat(selected.map((t) => t.tin))
+            // 녹지 분류 범위를 이은 메쉬의 삼각형 번호로 옮겨 잇는다(나누지 않은 도엽은 분류 0 하나)
+            let greenRanges: GreenRange[] | null = null
+            if (terrain && selected.some((t) => t.tin.greenRanges)) {
+                greenRanges = []
+                selected.forEach((t, i) => {
+                    const face = terrain.offsets[i].face
+                    const rs = t.tin.greenRanges ?? [{ cls: 0, first: 0, count: t.tin.indices.length / 3 }]
+                    for (const r of rs) if (r.count > 0) greenRanges!.push({ cls: r.cls, first: r.first + face, count: r.count })
+                })
+            }
             const buildings = concat(withBuildings.map((t) => t.buildings))
             let table: BuildingTable | null = null
             if (buildings && withBuildings.every((t) => t.buildingTable)) {
@@ -436,11 +474,12 @@ export const createTerrainTiles = () => {
                 waterTable = mergeWaterTables(withWater.map((t, i) => ({ table: t.waterTable!, faceOffset: water.offsets[i].face })))
             }
             return {
-                terrain: terrain?.mesh ?? null,
+                terrain: terrain ? (greenRanges ? { ...terrain.mesh, greenRanges } : terrain.mesh) : null,
                 buildings: buildings ? (table ? { ...buildings.mesh, table } : buildings.mesh) : null,
                 roads: roads ? (roadTable ? { ...roads.mesh, roadTable } : roads.mesh) : null,
                 water: water ? (waterTable ? { ...water.mesh, waterTable } : water.mesh) : null,
                 forest: null,
+                osmGreen: null,
             }
         },
         terminate: () => {

@@ -33,7 +33,7 @@ export const exportGlbInWorker = (layers: LayerMeshes, options: ExportOptions) =
             reject(new Error(`GLB 생성 Worker 오류: ${e.message}`))
         }
         const transfer: ArrayBuffer[] = []
-        const request: GlbExportRequest = { layers: copyLayerMeshes(layers, transfer), mode: options.mode, step: options.step }
+        const request: GlbExportRequest = { layers: copyLayerMeshes(layers, transfer), mode: options.mode, step: options.step, green: options.green }
         worker.postMessage(request, transfer)
     })
     return { promise, cancel: stop }

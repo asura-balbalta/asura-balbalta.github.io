@@ -159,6 +159,22 @@ const smoothNormalOf = (tri: P[], vi: number[], N: Float32Array) => {
 }
 
 /**
+ * 계단형 조각. tags 옵션을 줬을 때만 tagRanges 가 붙는다: (태그, 첫 삼각형, 삼각형 수) 3개씩, 조각 안 삼각형 번호(인덱스 ÷ 3).
+ * 원본 삼각형을 태그 순으로 정렬해 주면 태그마다 한 범위다. 벽은 중복 제거 때문에 그 벽을 먼저 만든 원본 삼각형의 태그를 따른다
+ */
+export type SteppedChunk = MeshChunk & { tagRanges?: Uint32Array }
+
+/** (태그, 시작) 쌍을 (태그, 시작, 수) 로. 삼각형을 하나도 못 낸 구간(수 0)은 뺀다 */
+const tagRangesOf = (runs: number[], total: number) => {
+    const out: number[] = []
+    for (let i = 0; i < runs.length; i += 2) {
+        const end = i + 2 < runs.length ? runs[i + 3] : total
+        if (end > runs[i + 1]) out.push(runs[i], runs[i + 1], end - runs[i + 1])
+    }
+    return Uint32Array.from(out)
+}
+
+/**
  * TIN 메쉬를 등고선 모형(콘타)처럼 계단형 메쉬로 바꾼다.
  *
  * 각 삼각형을 높이 k·step 평면들로 잘라, 조각마다 z 를 그 구간의 바닥 높이로 눌러 평평한 판을 만들고,
@@ -198,9 +214,12 @@ export function* buildSteppedMeshChunks(
     step: number,
     maxBytes: number,
     onProgress?: (done: number, total: number) => void,
-    /** quiet: 끝에 요약 로그를 찍지 않는다(도로 내보내기가 그룹마다 부를 때). normals: 원본 정점 법선(있으면 매끈한 법선을 같이 낸다) */
-    options: { quiet?: boolean; normals?: Float32Array } = {},
-): Generator<MeshChunk> {
+    /**
+     * quiet: 끝에 요약 로그를 찍지 않는다(도로 내보내기가 그룹마다 부를 때). normals: 원본 정점 법선(있으면 매끈한 법선을 같이 낸다).
+     * tags: 원본 삼각형마다 태그(녹지 분류 등, 길이 = 삼각형 수). 주면 조각에 tagRanges 를 붙인다(SteppedChunk). 안 주면 출력은 이 옵션 전과 같다
+     */
+    options: { quiet?: boolean; normals?: Float32Array; tags?: Uint8Array } = {},
+): Generator<SteppedChunk> {
     const started = performance.now()
     let lastProgress = started
     const { positions: P0, indices: I0 } = mesh
@@ -230,6 +249,9 @@ export function* buildSteppedMeshChunks(
     const vertexMaps = new Map<number, Map<number, number>>()
     /** 벽 윗면 층 번호 → (작은 끝점 키 → 큰 끝점 키 집합). 조각마다 비운다 */
     const wallSets = new Map<number, Map<number, Set<number>>>()
+    /** tags 를 줬을 때 이 조각의 (태그, 시작 삼각형) 쌍. 원본 삼각형의 판·벽은 그 삼각형을 처리할 때 이어서 쌓이므로 태그가 바뀌는 자리만 적는다 */
+    const tags = options.tags
+    let tagRuns: number[] = []
 
     /** 좌표가 같은(mm 단위) 정점은 한 번만 넣고 그 인덱스를 돌려준다 */
     const vertexOf = (x: number, y: number, z: number) => {
@@ -315,7 +337,11 @@ export function* buildSteppedMeshChunks(
 
     /** 쌓인 것을 조각으로 만들고 새 조각을 시작한다 */
     const flush = (): MeshChunk => {
-        const chunk: MeshChunk = { positions: positions.result(), indices: indices.result(), ...(normals ? { normals: normals.result() } : {}) }
+        const chunk: SteppedChunk = { positions: positions.result(), indices: indices.result(), ...(normals ? { normals: normals.result() } : {}) }
+        if (tags) {
+            chunk.tagRanges = tagRangesOf(tagRuns, chunk.indices.length / 3)
+            tagRuns = []
+        }
         chunkCount++
         totalTriangles += chunk.indices.length / 3
         totalVertices += chunk.positions.length / 3
@@ -355,6 +381,10 @@ export function* buildSteppedMeshChunks(
                 positions.length() + worstTriangles * 9 > maxVerts * 3)
         ) {
             yield flush()
+        }
+        if (tags) {
+            const g = tags[t / 3]
+            if (tagRuns.length === 0 || tagRuns[tagRuns.length - 2] !== g) tagRuns.push(g, indices.length() / 3)
         }
 
         // 정점이 정확히 층 높이에 놓인 변(등고선 위 정점끼리 이은 변)은 자르기로 생기지 않으므로 여기서 벽을 세운다.

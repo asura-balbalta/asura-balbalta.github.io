@@ -33,7 +33,7 @@ export const export3dmInWorker = (layers: LayerMeshes, options: ExportOptions) =
             reject(new Error(`3DM 생성 Worker 오류: ${e.message}`))
         }
         const transfer: ArrayBuffer[] = []
-        const request: Rhino3dmExportRequest = { layers: copyLayerMeshes(layers, transfer), mode: options.mode, step: options.step }
+        const request: Rhino3dmExportRequest = { layers: copyLayerMeshes(layers, transfer), mode: options.mode, step: options.step, green: options.green }
         worker.postMessage(request, transfer)
     })
     return { promise, cancel: stop }

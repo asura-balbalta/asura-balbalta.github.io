@@ -5,7 +5,7 @@
  *
  * 흐름(앱이 쓰는 순서):
  * - APP_INITIAL_*: App 의 처음 표현 방식·톤·층 간격
- * - tileStyleOf: 범위 선택·표현 방식 전환이 워커에 보내는 TileStyle(디버그 스위치 roads·water·forest·band·smoothfar 포함)
+ * - tileStyleOf: 범위 선택·표현 방식 전환이 워커에 보내는 TileStyle(디버그 스위치 roads·water·forest·green·band·smoothfar 포함)
  * - rendererOptionsOf: 렌더러를 만들 때의 배경색·디버그 설정 / applyPalette·applyLayerVisibility: 색상표·레이어 보기를 렌더러에
  * - createTilesEventHandler: 도엽 집합 이벤트 → GPU 올리기·내리기·첫 도엽 궤도 카메라(initialCamera)·표고 범위·수면 맞추기
  * - 둘러보기: createWalkSampler(높이 조회) → walkSpawnPoint(시작점) → createPlayer(player.ts) / walkLightingOf·walkRadiusOf / residencyPlan·isOutsideResident(상주) /
@@ -17,7 +17,7 @@ import { LAYER_DEFS } from "./layers"
 import type { QualitySettings, ScenePalette } from "./scenePalette"
 import { createHeightSampler, HeightSampler, nearestTriangleCentroid } from "./terrainHeight"
 import type { TerrainTilesClient, TerrainTilesEvent } from "./terrainTilesClient"
-import type { ForestStyle, RoadsStyle, TileData, TileStyle, WaterStyle } from "./terrainTiles.worker"
+import type { ForestStyle, GreenStyle, RoadsStyle, TileData, TileStyle, WaterStyle } from "./terrainTiles.worker"
 import { hexToRgb, TERRAIN_THEMES, Theme } from "./terrainTheme"
 import type { OrbitCamera } from "./webgpu/camera"
 import type { createTerrainRenderFunctionAndUpdateFunctions, MeshBounds, RenderDebug, TerrainMode } from "./webgpu/terrainRenderer"
@@ -51,6 +51,8 @@ export const waterStyleOf = (debug?: RenderDebug): WaterStyle | undefined =>
     debug && { clip: debug.waterClip, zMode: debug.waterZ, lines: debug.waterLines, lift: debug.waterLift, ribbonWidth: debug.waterWidth, levelQuantile: debug.waterQ }
 /** 렌더 디버그 설정 중 산림 스위치(forest=0·forestres=)를 도엽 스타일로 */
 export const forestStyleOf = (debug?: RenderDebug): ForestStyle | undefined => debug && { enabled: debug.forest, res: debug.forestRes }
+/** 렌더 디버그 설정 중 녹지 스위치(green=0)를 도엽 스타일로. green=0 이면 녹지를 받지도 나누지도 않는다 */
+export const greenStyleOf = (debug?: RenderDebug): GreenStyle | undefined => (debug?.green === false ? { enabled: false } : undefined)
 /** 먼 거리 계단 부드럽게(품질 설정. 디버그 smoothfar= 가 우선) */
 export const smoothFarOf = (debug: RenderDebug | undefined, quality: QualitySettings) => debug?.smoothFar ?? quality.smoothFar
 /**
@@ -68,6 +70,7 @@ export const tileStyleOf = (mode: TerrainMode, step: number, debug: RenderDebug 
     roads: roadsStyleOf(debug),
     water: waterStyleOf(debug),
     forest: forestStyleOf(debug),
+    osmGreen: greenStyleOf(debug),
     smoothNormals: smoothFar,
 })
 
@@ -114,6 +117,7 @@ export const initialCamera = ({ min, max }: MeshBounds): OrbitCamera => ({
 
 /** 도엽을 GPU 에 올릴 때의 인자(streamTileUpdater) */
 export const tileUploadOf = (tile: TileData) => ({
+    // 녹지로 나눈 도엽의 조각에는 greenRanges(분류 범위)가 붙어 있고, 렌더러가 그 범위를 분류별 파이프라인으로 나눠 그린다(정점 데이터는 그대로)
     terrain: tile.terrain,
     buildings: tile.buildings,
     roads: tile.roadChunks,

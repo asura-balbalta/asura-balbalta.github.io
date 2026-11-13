@@ -47,9 +47,9 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
 const MAP = JSON.parse(readFileSync(path.join(ROOT, "scripts/verify-map.json"), "utf8"))
 const SCENES = JSON.parse(readFileSync(path.join(ROOT, "scripts/verify-scenes.json"), "utf8"))
 const CHROME_MAC = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-/** 한 장 평균(준비 신호 포함, VERIFY.md 3.5 의 8 ~ 12초)과 골든(148기록, 약 40초) — 예상 시간 표시용 */
+/** 한 장 평균(준비 신호 포함, VERIFY.md 3.5 의 8 ~ 12초)과 골든(210기록, 약 60초. 2026-11-08 녹지 G7) — 예상 시간 표시용 */
 const SEC_PER_SHOT = 11
-const SEC_GOLDEN = 50
+const SEC_GOLDEN = 65
 /** 헤드리스 한 조합(장면 준비 + 두 크기 그리기, 2026-11-08 측정). 데이터 해시가 같은 덤프를 다시 쓰면 1초 안쪽 */
 const SEC_PER_HEADLESS_SCENE = 10
 /** 헤드리스(Dawn) 설치 확인: scripts/headless 의 선택 설치(D1) */

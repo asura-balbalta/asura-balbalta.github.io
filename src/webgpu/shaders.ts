@@ -152,18 +152,39 @@ const forestWgsl = /* wgsl */ `
 `
 
 /**
+ * 녹지(OSM, docs/osm-green-layer-plan.md G1 b-2) 조각. 지형 셰이더의 green 변형에만 붙는다. 녹지로 나눈 도엽의 지형 조각 중 분류 1 ~ 6
+ * 삼각형 범위만 이 변형으로 그리고(분류마다 drawIndexed 를 나눔), 분류 0·녹지 없는 도엽은 이것이 없는 원래(또는 forest) 셰이더로 그린다.
+ * - group 1 binding 0: 그 분류의 녹지 색(rgb + a = 섞는 비율). 분류마다 바인드그룹이 하나(같은 버퍼의 분류별 오프셋)
+ * greenTint(): 바탕색(표고 색표)을 녹지 색으로 섞는다(forestTint 와 같은 방식. 계단형 벽도 같은 색). 조명·그림자·AO·안개는 지형 것 그대로
+ */
+const greenWgsl = /* wgsl */ `
+    struct GreenStyle {
+        color: vec4f, // 분류 하나의 rgb + 섞는 비율
+    };
+    @group(1) @binding(0) var<uniform> greenStyle: GreenStyle;
+
+    fn greenTint(base: vec3f) -> vec3f {
+        return mix(base, greenStyle.color.rgb, greenStyle.color.a);
+    }
+`
+
+/** 지형 셰이더 변형: 바탕색을 산림 마스크(forestWgsl) 또는 녹지 분류 색(greenWgsl)으로 섞는다. 없으면 표고 색 그대로(원래 셰이더) */
+export type TerrainTint = "forest" | "green"
+
+/**
  * 부드러운 지형(TIN) 셰이더 descriptor. `device.createShaderModule()` 에 그대로 넘긴다.
  *
  * - 정점 입력: 위치(@location(0)) + 정점 법선(@location(1))
  * - vertexMain: 위치를 viewProj 로 변환하고 월드 좌표와 법선을 fragment 로 넘긴다.
  * - fragmentMain: 보간된 법선으로 픽셀마다 조명. 바탕색은 절대 표고 색표(terrainColor)
  *
+ * @param tint 바탕색 변형(산림 마스크·녹지 분류 색). 없으면 원래 셰이더
  * @returns `{ label, code }` 형태의 GPUShaderModuleDescriptor
  */
-export const createSmoothTerrainShader = (forest = false) => ({
-    label: forest ? "smooth terrain shader (forest)" : "smooth terrain shader",
+export const createSmoothTerrainShader = (tint?: TerrainTint) => ({
+    label: tint === "forest" ? "smooth terrain shader (forest)" : tint === "green" ? "smooth terrain shader (green)" : "smooth terrain shader",
     code: /* wgsl */ `
-    ${commonWgsl}${forest ? forestWgsl : ""}
+    ${commonWgsl}${tint === "forest" ? forestWgsl : tint === "green" ? greenWgsl : ""}
 
     struct VertexOutput {
         @builtin(position) p: vec4f,
@@ -184,7 +205,7 @@ export const createSmoothTerrainShader = (forest = false) => ({
     fn fragmentMain(input: VertexOutput) -> @location(0) vec4f {
         // 보간된 법선은 길이가 1이 아니므로 다시 정규화한다
         let n = normalize(input.normal);
-        let base = ${forest ? "forestTint(terrainColor(input.world.z), input.world, false)" : "terrainColor(input.world.z)"};
+        let base = ${tint === "forest" ? "forestTint(terrainColor(input.world.z), input.world, false)" : tint === "green" ? "greenTint(terrainColor(input.world.z))" : "terrainColor(input.world.z)"};
         return vec4f(shade(base, n, input.world), 1);
     }
     `,
@@ -205,10 +226,11 @@ export const createSmoothTerrainShader = (forest = false) => ({
  *   MSAA 4× 는 무늬를 잘게 바꿀 뿐이라 되돌렸다)
  *
  * @param withNormals 정점 법선 버퍼를 받는 변형인지
+ * @param tint 바탕색 변형(산림 마스크·녹지 분류 색). 없으면 원래 셰이더
  * @returns `{ label, code }` 형태의 GPUShaderModuleDescriptor
  */
-export const createSteppedTerrainShader = (withNormals = false, forest = false) =>
-    forest
+export const createSteppedTerrainShader = (withNormals = false, tint?: TerrainTint) =>
+    tint === "forest"
         ? steppedShader(
               withNormals ? "stepped terrain shader (smooth normals, forest)" : "stepped terrain shader (forest)",
               withNormals,
@@ -216,9 +238,17 @@ export const createSteppedTerrainShader = (withNormals = false, forest = false) 
               "forestTint(terrainColor(input.world.z), input.world, abs(n.z) < 0.5)",
               forestWgsl,
           )
-        : steppedShader(withNormals ? "stepped terrain shader (smooth normals)" : "stepped terrain shader", withNormals, "terrainColor(input.world.z)")
+        : tint === "green"
+          ? steppedShader(
+                withNormals ? "stepped terrain shader (smooth normals, green)" : "stepped terrain shader (green)",
+                withNormals,
+                // 판·벽 모두 녹지 색(벽은 분류 범위 안 삼각형이라 따로 가르지 않는다. 벽 음영 25% 는 섞은 뒤에 곱해진다)
+                "greenTint(terrainColor(input.world.z))",
+                greenWgsl,
+            )
+          : steppedShader(withNormals ? "stepped terrain shader (smooth normals)" : "stepped terrain shader", withNormals, "terrainColor(input.world.z)")
 
-/** 계단형 지형·도로가 같이 쓰는 셰이더 본체. baseColor 는 바탕색 WGSL 식(지형 = 표고 색표, 도로 = roadColor), extra 는 공통 조각 뒤에 붙일 WGSL(산림) */
+/** 계단형 지형·도로가 같이 쓰는 셰이더 본체. baseColor 는 바탕색 WGSL 식(지형 = 표고 색표, 도로 = roadColor), extra 는 공통 조각 뒤에 붙일 WGSL(산림·녹지) */
 const steppedShader = (label: string, withNormals: boolean, baseColor: string, extra = "") => ({
     label,
     code: /* wgsl */ `

@@ -200,6 +200,9 @@ const cacheFlags = (text) => ({
     roads: /도로 \d+\([^)]*\)\(캐시\)/.test(text),
     water: /물 \d+\([^)]*\)\(캐시\)/.test(text),
     forest: /산림 \d+(\(건너뜀 \d+\))? \(캐시\)/.test(text),
+    // 녹지(osm_green G7 2026-11-08)는 도엽 나누기를 캐시하지 않는다(계획서 2.3절: tinCache 는 나누기 전 TIN, 나누기는 매번). 5K 전처리 캐시는
+    // 로그에 표시가 없어 memory() 캐시 표 result.osm_green 의 hits 로 본다. 그래서 여기서는 "녹지로 나눈 도엽" 만 센다(캐시 적중이 아님)
+    osmGreen: /, 녹지 5K \d+\(전처리 합 [\d.]+ms\) 받기 \d+ms 분할 \d+→\d+/.test(text),
 })
 
 /** lock=0·look=0 을 붙인다(render-check 와 같은 이유: 자동화에서는 포인터 잠금을 못 쓰고, 보이는 창 위의 실제 마우스가 시점을 돌리면 안 된다) */
@@ -495,7 +498,7 @@ const SCENARIOS = {
                 timedOut: w.timedOut,
                 tilesBuilt: logs.length,
                 extraBuilt: logs.filter((l) => l.extra).length,
-                cacheHits: Object.fromEntries(["terrain", "buildings", "roads", "water", "forest"].map((k) => [k, logs.filter((l) => l.cached[k]).length])),
+                cacheHits: Object.fromEntries(["terrain", "buildings", "roads", "water", "forest", "osmGreen"].map((k) => [k, logs.filter((l) => l.cached[k]).length])),
             }
             await checkpoint(s, "walk", { mode: "walk", forest: true })
         },
@@ -612,7 +615,8 @@ const summarizeMem = (m) => {
     const evictionsByKey = {}
     for (const h of helpers) for (const [k, v] of Object.entries(h.caches ?? {})) if (v.evictions) evictionsByKey[k] = (evictionsByKey[k] ?? 0) + v.evictions
     for (const [k, v] of Object.entries(c.caches ?? {})) if (v.evictions) evictionsByKey[`coordinator.${k}`] = v.evictions
-    const layers = ["buildings", "roads", "water", "forest"]
+    // 캐시 표 이름공간(서버 경로). 녹지는 file.osm_green(데이터 층)·result.osm_green(5K 전처리)·index.osm_green(50K 인덱스, 조정자)
+    const layers = ["buildings", "roads", "water", "forest", "osm_green"]
     return {
         loaded: c.loaded,
         extra: c.extra,

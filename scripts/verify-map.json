@@ -10,6 +10,7 @@
         "layer:roads": { "golden": true, "captures": "layer", "layer": "roads", "why": "도로 레이어 받기·메쉬·표" },
         "layer:water": { "golden": true, "captures": "layer", "layer": "water", "why": "물 레이어 받기·메쉬·표" },
         "layer:forest": { "golden": true, "captures": "layer", "layer": "forest", "why": "산림 레이어 받기·마스크·표" },
+        "layer:osmGreen": { "golden": true, "captures": "layer", "layer": "osmGreen", "why": "녹지(OSM) 받기·5K 전처리·지형 면 나누기·내보내기 분류. 지형 메쉬 자체를 나누므로 골든의 terrain·tin 도 함께 바뀐다(green=0 이면 같아야 한다)" },
         "shared": { "golden": true, "captures": "full", "why": "렌더러·셰이더·지형 파이프라인·워커·캐시·화면 배관. 모든 장면과 레이어에 닿는다" },
         "unknown": { "golden": true, "captures": "full", "why": "분류표에 없는 파일(새 파일 포함). 안전하게 전체" }
     },
@@ -75,6 +76,9 @@
         { "pattern": "src/forestData.ts", "class": "layer:forest" },
         { "pattern": "src/forestMask.ts", "class": "layer:forest" },
         { "pattern": "src/forestTable.ts", "class": "layer:forest" },
+        { "pattern": "src/osmGreenData.ts", "class": "layer:osmGreen" },
+        { "pattern": "src/osmGreenMesh.ts", "class": "layer:osmGreen" },
+        { "pattern": "src/export/greenExport.ts", "class": "layer:osmGreen", "why": "녹지 내보내기 공통(분류 이름·색·출처). 내보낸 파일은 이 검증이 보지 않는다 — node scripts/export-check.mjs 로 따로(VERIFY.md 6절)" },
 
         { "pattern": "src/export/**", "class": "export" },
         { "pattern": "src/ui/**", "class": "ui" },

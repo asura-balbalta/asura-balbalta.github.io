@@ -44,6 +44,13 @@ export type ScenePalette = {
     forestColors: string[]
     /** 산림 색을 지형 바탕색에 섞는 비율(0 ~ 1, 1 = 산림 색 그대로) */
     forestAlpha: number
+    /**
+     * 녹지(OSM) 분류별 색(정확히 GREEN_COLOR_COUNT 개, 분류 코드 1 ~ 6 순: 숲 · 관목 · 황야 · 초지 · 공원 · 과수원. docs/osm-green-layer-plan.md G5).
+     * 녹지로 나눈 지형 삼각형의 바탕색(표고 색표)을 이 색으로 섞는다(산림 마스크 색 위에 그린다)
+     */
+    greenColors: string[]
+    /** 녹지 색을 지형 바탕색에 섞는 비율(0 ~ 1, 1 = 녹지 색 그대로) */
+    greenAlpha: number
     /** 하늘·그림자 빛의 태양 고도(°). 음수면 지평선 아래(저녁) */
     sunAltitude: number
     walkLighting: WalkLightingStrength
@@ -99,6 +106,11 @@ export const BUILTIN_PALETTES: ScenePalette[] = [
         // 밝기 72 ~ 80%·색상 ±10° 만 달리했다. 섞는 비율 0.6 은 표고 색표의 밝기를 남겨(산지 #A8ADAE → 침엽 #AABBAD) 칠이 아니라 물든 것처럼 보이게
         forestColors: ["#DCE0DC", "#ABC4AD", "#C5D5C3", "#B8CCB7", "#CAD5C3"],
         forestAlpha: 0.6,
+        // 녹지(G5 후보, 2026-11-08. 최종값은 greencolor= Chrome 비교 뒤): 숲 · 관목 · 황야 · 초지 · 공원 · 과수원. 숲·관목·황야는 산림 혼효·활엽·죽림과
+        // 같은 색(이웃해도 얼룩 없음), 초지는 황야보다 밝고 채도 조금 위, 공원은 Stadia landcover_park rgb(210,224,210), 과수원은 색상 76°(노란 쪽).
+        // 섞는 비율은 산림과 같은 0.6
+        greenColors: ["#B8CCB7", "#C5D5C3", "#CAD5C3", "#D2DEC9", "#D2E0D2", "#CBD3B5"],
+        greenAlpha: 0.6,
         walkLighting: DEFAULT_WALK_LIGHTING,
     },
     {
@@ -123,12 +135,19 @@ export const BUILTIN_PALETTES: ScenePalette[] = [
         // 나머지는 색상 120° 안팎·채도 14 ~ 16%·밝기 26 ~ 32%. 섞는 비율은 라이트와 같은 0.6)
         forestColors: ["#3A413A", "#384D39", "#485F45", "#405440", "#4F5F45"],
         forestAlpha: 0.6,
+        // 녹지(G5 후보): 산림 다크와 같은 규칙(라이트 색의 색상은 두고 채도 14 ~ 16%·밝기 26 ~ 32%). 숲·관목·황야는 라이트에서 같은 색인 산림 혼효·활엽·죽림
+        // 다크 그대로(H120 S14 L29 · H113 S16 L32 · H97 S16 L32). 초지 H94 S16 L30 · 공원 H120 S15 L32 · 과수원 H76 S16 L29: 라이트에서 황야보다 밝은
+        // 초지·공원은 밝기 상한 32% 에 걸려 더 밝게 두지 못해, 황야와 겹치지 않게 초지는 한 단계 어둡게, 공원은 색상(120°)으로 가른다
+        greenColors: ["#405440", "#485F45", "#4F5F45", "#4B5940", "#455E45", "#4F563E"],
+        greenAlpha: 0.6,
         walkLighting: DEFAULT_WALK_LIGHTING,
     },
 ]
 
 /** 산림 색 개수(임상 코드 0 ~ 4) */
 export const FOREST_COLOR_COUNT = 5
+/** 녹지 색 개수(분류 코드 1 ~ 6. osmGreenData GREEN_CLASS_COUNT 와 같다) */
+export const GREEN_COLOR_COUNT = 6
 
 /** 톤의 내장 색상표 */
 export const builtinPalette = (tone: Theme): ScenePalette => BUILTIN_PALETTES.find((p) => p.id === tone) ?? BUILTIN_PALETTES[0]
@@ -149,6 +168,7 @@ export const clonePalette = (p: ScenePalette): ScenePalette => ({
     ...p,
     stops: p.stops.map((s) => ({ ...s })),
     forestColors: [...p.forestColors],
+    greenColors: [...p.greenColors],
     walkLighting: { ...p.walkLighting },
 })
 
@@ -190,6 +210,9 @@ export const sanitizePalette = (raw: unknown): ScenePalette | null => {
         waterAlpha: num(r.waterAlpha, base.waterAlpha, 0, 1),
         forestColors: base.forestColors.map((hex, i) => (Array.isArray(r.forestColors) && isHex(r.forestColors[i]) ? r.forestColors[i] : hex)),
         forestAlpha: num(r.forestAlpha, base.forestAlpha, 0, 1),
+        // 녹지 이전에 저장한 색상표(필드 없음)는 톤의 내장 값으로 메운다
+        greenColors: base.greenColors.map((hex, i) => (Array.isArray(r.greenColors) && isHex(r.greenColors[i]) ? r.greenColors[i] : hex)),
+        greenAlpha: num(r.greenAlpha, base.greenAlpha, 0, 1),
         sunAltitude: num(r.sunAltitude, base.sunAltitude, -30, 90),
         walkLighting: {
             ambient: num(wl.ambient, base.walkLighting.ambient, 0, 1),

@@ -4,7 +4,7 @@
  * 레이어마다 "보기"(화면에 그릴지)와 "내보내기"(STL·SKP 에 넣을지)를 따로 켜고 끈다. 새 레이어를 추가할 때는
  * 여기에 항목을 더하고, 렌더러(layerMeshUpdater)와 STL·SKP worker 에 그 레이어의 메쉬를 넘기는 코드를 잇는다.
  */
-export type LayerId = "terrain" | "buildings" | "roads" | "water" | "forest"
+export type LayerId = "terrain" | "buildings" | "roads" | "water" | "forest" | "osmGreen"
 
 export type LayerState = {
     /** 화면에 그린다 */
@@ -30,6 +30,8 @@ export const LAYER_DEFS: LayerDef[] = [
     { id: "roads", label: "도로" },
     { id: "water", label: "물" },
     { id: "forest", label: "산림", exportable: false },
+    // 녹지(OSM, docs/osm-green-layer-plan.md): 지형 면을 분류별로 나눈 것이라 내보내기 대상(G5). 기본 켬(G6)
+    { id: "osmGreen", label: "녹지 (OSM)" },
 ]
 
 export const INITIAL_LAYER_STATES: LayerStates = {
@@ -38,4 +40,5 @@ export const INITIAL_LAYER_STATES: LayerStates = {
     roads: { visible: true, export: true },
     water: { visible: true, export: true },
     forest: { visible: true, export: false },
+    osmGreen: { visible: true, export: true },
 }

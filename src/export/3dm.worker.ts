@@ -1,3 +1,5 @@
+import earcut from "earcut"
+
 import { ATTRIBUTION_LINE, attributionFileText, attributionPageUrl } from "../attribution"
 import { WALL_SINK_M } from "../buildingsMesh"
 import { buildingAttributes, buildingLabel, buildingRings, NOT_BUILT } from "../buildingTable"
@@ -9,7 +11,8 @@ import { waterAttributes, waterGroups, waterLabel } from "../waterTable"
 import type { TinMesh } from "../terrainData"
 import type { TerrainMode } from "../webgpu/terrainRenderer"
 import type { ExportMesh, LayerMeshes } from "./stlClient"
-import { buildTerrainSlabs, P2 } from "./terrainSlabs"
+import { compactMesh, GreenExport, indicesOfRanges, rangesByClass, tagsOfRanges } from "./greenExport"
+import { buildTerrainSlabs, P2, SlabPolygon } from "./terrainSlabs"
 
 /**
  * 메인 → Worker: 3DM 생성 요청. 레이어마다 넣을지 말지를 메인이 정해 메쉬를 주거나(null 이면 뺌) 만다.
@@ -21,6 +24,8 @@ export type Rhino3dmExportRequest = {
     mode: TerrainMode
     /** stepped 일 때 층 간격(m) */
     step: number
+    /** 녹지를 담을 때(지형 greenRanges 와 함께). 지형(매끈한 면) 또는 판 윗면(계단형)을 분류별 레이어·재질 메쉬로 나누고 문서 문자열에 출처 줄을 더한다 */
+    green?: GreenExport
 }
 
 /** Worker → 메인: 진행률(0 ~ 1), 완료(.3dm 파일 바이트, transfer) */
@@ -113,6 +118,61 @@ const addExtrusion = (
     return true
 }
 
+/**
+ * 판 하나를 정점 공유 삼각형 메쉬로 만든다(녹지로 윗면을 나눈 판, G12). Extrusion 은 윗면 cap 을 나눌 수 없고 rhino3dm 에는 구멍 있는
+ * 평면 Brep 을 만들거나 Brep 을 잇는 기능이 없어서다. 위에서 볼 때 윗면은 반시계(법선 위), 아랫면은 시계(법선 아래), 옆면은
+ * addExtrusion 과 같은 자리(영역을 왼쪽에 두고 걷는 변마다 사각형 둘). 같은 좌표의 점은 정점 하나라 판 메쉬 안의 윗면·옆면이 이어진다.
+ *
+ * @param tops 이 메쉬에 넣을 윗면 다각형들(z = zTop)
+ * @param walls 아랫면·옆면을 넣을 판 윤곽(없으면 윗면만)
+ */
+const slabMesh = (tops: SlabPolygon[], zTop: number, zBottom: number, walls?: SlabPolygon[]) => {
+    const positions: number[] = []
+    const indices: number[] = []
+    const index = new Map<string, number>()
+    const vertex = (x: number, y: number, z: number) => {
+        const key = `${x},${y},${z}`
+        let i = index.get(key)
+        if (i === undefined) {
+            i = positions.length / 3
+            positions.push(x, y, z)
+            index.set(key, i)
+        }
+        return i
+    }
+    /** 다각형을 earcut 으로 나눠 z 높이에 넣는다. up 이면 반시계(위를 봄), 아니면 시계 */
+    const cap = ({ outer, holes }: SlabPolygon, z: number, up: boolean) => {
+        const rings = [outer, ...holes]
+        const flat: number[] = []
+        const holeStarts: number[] = []
+        for (const ring of rings) {
+            if (ring !== outer) holeStarts.push(flat.length / 2)
+            for (const [x, y] of ring) flat.push(x, y)
+        }
+        const ids = rings.flatMap((ring) => ring.map(([x, y]) => vertex(x, y, z)))
+        const tri = earcut(flat, holeStarts, 2)
+        for (let t = 0; t < tri.length; t += 3) {
+            const [a, b, c] = [tri[t], tri[t + 1], tri[t + 2]]
+            const area2 = (flat[b * 2] - flat[a * 2]) * (flat[c * 2 + 1] - flat[a * 2 + 1]) - (flat[b * 2 + 1] - flat[a * 2 + 1]) * (flat[c * 2] - flat[a * 2])
+            if (area2 > 0 === up) indices.push(ids[a], ids[b], ids[c])
+            else indices.push(ids[a], ids[c], ids[b])
+        }
+    }
+    for (const polygon of tops) cap(polygon, zTop, true)
+    for (const polygon of walls ?? []) {
+        cap(polygon, zBottom, false)
+        for (const ring of [polygon.outer, ...polygon.holes]) {
+            for (let j = 0; j < ring.length; j++) {
+                const p = ring[j], q = ring[(j + 1) % ring.length]
+                const pb = vertex(p[0], p[1], zBottom), qb = vertex(q[0], q[1], zBottom)
+                const qt = vertex(q[0], q[1], zTop), pt = vertex(p[0], p[1], zTop)
+                indices.push(pb, qb, qt, pb, qt, pt)
+            }
+        }
+    }
+    return { positions: new Float32Array(positions), indices: new Uint32Array(indices) }
+}
+
 /** 이름이 name 인 Rhino 그룹을 만들고 그 인덱스를 돌려준다 */
 const addGroup = (rhino: RhinoModule, doc: Doc, name: string) => {
     const group = new rhino.Group()
@@ -126,17 +186,20 @@ const addGroup = (rhino: RhinoModule, doc: Doc, name: string) => {
  *
  * LAYER_DEFS 순서로 레이어마다 Rhino 레이어(레이어 id 이름)를 만들고 그 위에 객체를 둔다. 문서 단위는 미터라 TinMesh 좌표를
  * 환산 없이 쓴다.
- * - 지형 tin: 정점 공유 메쉬 하나.
+ * - 지형 tin: 정점 공유 메쉬 하나. 녹지를 담으면(green + terrain.greenRanges) 녹지 아닌 삼각형은 "terrain" 레이어 메쉬, 분류마다 레이어
+ *   "녹지-<이름>"(색상표 원색) 위 메쉬 객체(같은 이름, 같은 색 재질, user text 에 OSM 출처). 레이어는 terrain 바로 뒤에 둔다.
  * - 지형 stepped: 레벨마다 "k·step 이상 영역" 을 두께 step 으로 돌출한 Extrusion(판). 건축 모형처럼 맨 아래 판(영역 전체)
  *   위에 다음 레벨 판이 쌓인다(SKP 내보내기와 같은 구조, terrainSlabs). 판은 "terrain-<높이>m" 이름의 객체이고 모두
  *   Rhino 그룹 "terrain" 에 넣어 한 번에 잡히게 한다(판 하나가 객체 하나라 판별 그룹은 두지 않는다).
+ *   녹지를 담으면(G12) 윗면에 녹지가 있는 판만 메쉬로 바꾼다: "terrain" 레이어 메쉬(아랫면·옆면·녹지 아닌 윗면) + 분류마다 녹지 레이어
+ *   메쉬(그 분류 윗면, 재질·user text 는 매끈한 면과 같음). 둘은 꼭짓점이 같아 겹치지 않고 Join 하면 닫힌 메쉬다. 녹지 없는 판은 Extrusion 그대로.
  * - 건물: 표(table)가 있으면 건물마다 footprint 를 높이만큼 돌출한 Extrusion(이름은 전국 고유 번호, 그룹 "buildings",
  *   건물 속성은 user text), 없으면 삼각형 메쉬 하나. 지형 밖이라 못 세운 건물은 넣지 않는다.
  * 진행률은 레이어의 원본 삼각형 수로 가중해 0 ~ 1 로 낸다. 취소는 메인에서 terminate 로 한다(요청마다 Worker 를 새로 만든다).
  * 오류는 메인의 worker.onerror 로 전달된다(비동기 핸들러 안의 오류는 unhandledrejection 이 아니라 throw 로 올린다).
  */
 self.onmessage = async (e: MessageEvent<Rhino3dmExportRequest>) => {
-    const { layers, mode, step } = e.data
+    const { layers, mode, step, green } = e.data
     importScripts(RHINO_SCRIPT)
     const rhino = await rhino3dm()
 
@@ -152,7 +215,30 @@ self.onmessage = async (e: MessageEvent<Rhino3dmExportRequest>) => {
     doc.applicationName = "asrbbt"
     doc.applicationUrl = attributionPageUrl()
     doc.applicationDetails = ATTRIBUTION_LINE
-    doc.strings().set("attribution", attributionFileText())
+    // 녹지: 매끈한 면은 지형 메쉬를, 계단형은 판 윗면을 분류로 나눈다. 출처 줄은 녹지를 담으면 형식과 무관하게 더한다
+    const greenRanges = green ? layers.terrain?.greenRanges : undefined
+    doc.strings().set("attribution", attributionFileText(greenRanges ? green!.fileLine : undefined))
+    /** 분류 → 녹지 레이어·재질·출처를 단 객체 속성(처음 쓸 때 레이어와 재질을 만든다. 지형이 처음이라 terrain 레이어 바로 뒤에 온다) */
+    const greenAttrs = new Map<number, Attributes>()
+    const greenAttributesOf = (cls: number) => {
+        let ga = greenAttrs.get(cls)
+        if (ga) return ga
+        const c = green!.classes[cls - 1]
+        const name = c?.name ?? `녹지-${cls}`
+        const [r, g, b] = c?.rgb ?? [160, 160, 160]
+        const material = new rhino.Material()
+        material.name = name
+        material.diffuseColor = { r, g, b, a: 255 } as unknown as number[]
+        doc.materials().add(material)
+        ga = new rhino.ObjectAttributes()
+        ga.layerIndex = doc.layers().addLayer(name, { r, g, b, a: 255 })
+        ga.name = name
+        ga.materialSource = rhino.ObjectMaterialSource.MaterialFromObject
+        ga.materialIndex = doc.materials().count - 1
+        for (const [key, value] of Object.entries(green!.source)) ga.setUserString(key, value)
+        greenAttrs.set(cls, ga)
+        return ga
+    }
     let skipped = 0
     let failedSolids = 0
     for (const { id } of LAYER_DEFS) {
@@ -170,21 +256,72 @@ self.onmessage = async (e: MessageEvent<Rhino3dmExportRequest>) => {
         }
         if (id === "terrain" && mode === "stepped") {
             const started = performance.now()
-            const result = buildTerrainSlabs(mesh, step, (done, all) => progress(0.5 * (done / all), w))
-            attributes.addToGroup(addGroup(rhino, doc, "terrain"))
+            const classes = greenRanges ? tagsOfRanges(greenRanges, Math.floor(mesh.indices.length / 3)) : undefined
+            const result = buildTerrainSlabs(mesh, step, (done, all) => progress(0.5 * (done / all), w), classes)
+            const converted = performance.now()
+            const group = addGroup(rhino, doc, "terrain")
+            attributes.addToGroup(group)
             let solids = 0
+            let meshSlabs = 0
+            const greenObjects = new Map<string, number>()
             result.slabs.forEach((slab, i) => {
                 attributes.name = `terrain-${slab.zTop}m`
-                for (const { outer, holes } of slab.polygons) {
-                    if (addExtrusion(rhino, doc, outer, holes, slab.zBottom, slab.zTop, attributes)) solids++
-                    else failedSolids++
+                const greenTops = slab.tops?.filter((top) => top.cls > 0) ?? []
+                if (greenTops.length === 0) {
+                    for (const { outer, holes } of slab.polygons) {
+                        if (addExtrusion(rhino, doc, outer, holes, slab.zBottom, slab.zTop, attributes)) solids++
+                        else failedSolids++
+                    }
+                } else {
+                    // 녹지가 윗면에 있는 판: 지형 메쉬(아랫면·옆면·녹지 아닌 윗면) + 분류별 녹지 윗면 메쉬
+                    meshSlabs++
+                    const plain = slab.tops!.filter((top) => top.cls <= 0).flatMap((top) => top.polygons)
+                    const m = slabMesh(plain, slab.zTop, slab.zBottom, slab.polygons)
+                    addMesh(m.positions, m.indices)
+                    for (const top of greenTops) {
+                        const ga = greenAttributesOf(top.cls)
+                        const g = slabMesh(top.polygons, slab.zTop, slab.zBottom)
+                        const r = toRhinoMesh(rhino, g.positions, g.indices)
+                        skipped += r.skipped
+                        const name = ga.name
+                        ga.name = `${name}-${slab.zTop}m`
+                        ga.addToGroup(group)
+                        doc.objects().addMesh(r.mesh, ga)
+                        ga.removeFromAllGroups()
+                        ga.name = name
+                        greenObjects.set(name, (greenObjects.get(name) ?? 0) + 1)
+                    }
                 }
                 progress(0.5 + 0.5 * ((i + 1) / result.slabs.length), w)
             })
-            console.log(`3DM 계단형(${step}m): 판 ${result.slabs.length}개, 솔리드 ${solids}개, ${Math.round(performance.now() - started)}ms`)
+            console.log(
+                `3DM 계단형(${step}m): 판 ${result.slabs.length}개, 솔리드 ${solids}개` +
+                    (classes ? `, 녹지 윗면 판 메쉬 ${meshSlabs}개(${[...greenObjects].map(([n, c]) => `${n} ${c}`).join(" · ") || "없음"})` : "") +
+                    `, 판 변환 ${Math.round(converted - started)}ms + 객체 ${Math.round(performance.now() - converted)}ms`,
+            )
             if (result.openChains || result.orphanHoles) {
                 console.warn(`3DM 계단형: 안 닫힌 사슬 ${result.openChains}개, 외곽 없는 구멍 ${result.orphanHoles}개 버림`)
             }
+        } else if (id === "terrain" && greenRanges && mode === "tin") {
+            const started = performance.now()
+            const counts: string[] = []
+            let faces = 0
+            for (const [cls, rs] of rangesByClass(greenRanges)) {
+                const part = compactMesh(mesh.positions, indicesOfRanges(mesh.indices, rs))
+                const onFace = (d: number) => progress((faces + d) / w, w)
+                if (cls === 0) {
+                    addMesh(part.positions, part.indices, onFace)
+                } else {
+                    const ga = greenAttributesOf(cls)
+                    const name = ga.name
+                    const m = toRhinoMesh(rhino, part.positions, part.indices, onFace)
+                    skipped += m.skipped
+                    doc.objects().addMesh(m.mesh, ga)
+                    counts.push(`${name} ${(part.indices.length / 3).toLocaleString()}`)
+                }
+                faces += part.indices.length / 3
+            }
+            console.log(`3DM 지형 녹지: 레이어 ${counts.length}개(${counts.join(" · ")}), ${Math.round(performance.now() - started)}ms`)
         } else if (id === "buildings" && mesh.table) {
             const started = performance.now()
             const table = mesh.table

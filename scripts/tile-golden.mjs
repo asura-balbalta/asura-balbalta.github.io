@@ -16,12 +16,13 @@
  * - loadPlan: tile-golden.tiles.json 의 장면(선택 bbox)을 일감으로 펼친다
  * - runGolden: 설정 × 장면 × 도엽을 정한 순서로 만들어 digestTile → golden.json·timing.json
  * - digestTile: TileData 의 모든 필드 정규화 해시 + 순서 무관 해시(삼각형·표 행 정렬) + 산림 마스크 도엽 폴리곤 안 해시
+ *   녹지(osm_green G7): 분류 범위(terrain[i]·tin 의 greenRanges)는 묶음 greenRanges, 통계는 greenStats(면적 0.01 m² 반올림). 둘 다 같음/다름만
  * - compareGoldens: 필드별 비교와 분류(같음 / 순서만 / 산림 폴리곤 밖만(허용 1) / 산림 귀퉁이 행(허용 2) / 폴리곤 밖 항목 표 행 / 다름)
  * - runTiming: 차가운(새 워커)·데운(같은 워커, reset 뒤 다시) 시간 5회 → 중앙값·p95
  * - runC0: 5K 가장자리 도엽마다 자료 대조(tileGolden.ts analyzeTile) + 결과 대조(자기 5K 만 vs 지금 방식, 실제 워커)
  *
  * 사용:
- *   npm run tile-golden -- [--label before] [--order baseline|reverse|shuffle:<seed>|fresh|switch] [--configs tin,stepped,forest0,roadsclip0]
+ *   npm run tile-golden -- [--label before] [--order baseline|reverse|shuffle:<seed>|fresh|switch] [--configs tin,stepped,forest0,roadsclip0,green0]
  *                          [--perturb vertex|mask|mask-outside|tri-order|tri-flip] [--out <dir>] [--logs(도엽 로그 줄 → logs.json)]
  *   npm run tile-golden -- --compare <a> <b> [--allow bbox-rows] [--common]   # 폴더 또는 golden.json. 실패가 있으면 종료 코드 1. --common 은 양쪽에 다 있는 기록만.
  *                                                                              # a = 기준(전), b = 새 코드(산림 허용 2 는 이 방향만 통과)
@@ -103,7 +104,7 @@ const takeFetchCounts = () => {
 
 /** C0 결과 대조: 레이어 50K 인덱스에서 자기 5K 가 아닌 항목의 개수를 0 으로 → loadX 가 그 5K 를 건너뛴다(src 수정 없이 "자기 5K 만") */
 const own5kTransform = (own5k) => (url, bytes) => {
-    if (!/^https:\/\/layers\.asrbbt\.world\/(buildings|roads|water|forest)\/index\/v1\/\d{5}\.json$/.test(url)) return bytes
+    if (!/^https:\/\/layers\.asrbbt\.world\/(buildings|roads|water|forest|osm_green)\/index\/v1\/\d{5}\.json$/.test(url)) return bytes
     const ix = JSON.parse(bytes.toString("utf8"))
     for (const s of ix.sheets ?? []) {
         if (String(s.id5k) === own5k) continue
@@ -448,6 +449,9 @@ const parseLayerMs = (line) => {
         water: n(/, 물 \d+\(하천 \d+, 호소 \d+, 띠 \d+\)(?:\([^)]*\))? (?:받기 (\d+)ms \+ )?(\d+)ms, 산림/),
         // 산림이 끝 조각이 아니어도 읽게(C3 검토 L3): 다음 ", " 또는 줄 끝 앞의 "(받기 Nms + )Nms"
         forest: n(/, 산림 \d+(?:\(건너뜀 \d+\))? .*?(?:받기 (\d+)ms \+ )?(\d+)ms(?:, |$)/),
+        // 녹지(osm_green G3·G7 2026-11-08)는 맨 뒤 조각 ", 녹지 5K n(전처리 합 Xms) 받기 Wms 분할 a→b(나눔 k[ 부채꼴 f][ 버림 d]) Yms"(나눈 것이 없으면 "분할 없음").
+        // 지형 조각 전에 지형 파일 받기와 겹쳐 받으므로 받기는 더하지 않고 분할 Yms 만. 전처리 합은 5K 전처리 캐시가 처음 만들 때 잰 값이라 적중해도 같은 수가 찍힌다
+        green: n(/, 녹지 5K \d+\(전처리 합 [\d.]+ms\) 받기 \d+ms 분할 (?:\d+→\d+\([^)]*\)|없음) ([\d.]+)ms$/),
     }
 }
 
@@ -592,10 +596,38 @@ const forestInside = (mask, poly) => {
     return { inside: H(parts.join(";")), insideNonzero, outsideNonzero }
 }
 
+/** 녹지 통계의 비교용 모양: 면적(m²)만 0.01 로 반올림(합하는 순서가 바뀌어도 같은 값이 되게), 나머지(조각 수·삼각형 수·fallback·dropped 등 정수)는 그대로 */
+const greenStatsNorm = (g) => Object.fromEntries(Object.entries(g).map(([k, v]) => [k, /AreaM2$|^areaM2$/.test(k) ? (Array.isArray(v) ? v.map((x) => Math.round(x * 100) / 100) : Math.round(v * 100) / 100) : v]))
+/** 녹지 범위 → 분류별 삼각형 수(0 비녹지 ~ 6) */
+const greenTris = (ranges) => {
+    const out = [0, 0, 0, 0, 0, 0, 0]
+    for (const r of ranges ?? []) out[r.cls] += r.count
+    return out
+}
+/**
+ * 사람이 읽을 녹지 요약(osm_green G7): TIN·조각의 분류별 삼각형 수와 녹지 범위 해시, 분류별 조각 수·면적(m², 정수 반올림)·fallback·dropped.
+ * 나누지 않은 도엽(녹지 없음·green=0)은 null
+ */
+const greenSummary = (data) => {
+    if (!data.greenStats && !data.tin.greenRanges) return null
+    const ranges = [data.tin.greenRanges ?? [], ...data.terrain.map((c) => c.greenRanges ?? [])]
+    const g = data.greenStats
+    return {
+        tinTris: greenTris(data.tin.greenRanges),
+        chunkTris: data.terrain.reduce((s, c) => greenTris(c.greenRanges).map((v, i) => s[i] + v), [0, 0, 0, 0, 0, 0, 0]),
+        rangesHash: H(JSON.stringify(ranges.map((rs) => rs.map((r) => [r.cls, r.first, r.count])))),
+        pieces: g?.pieces ?? null,
+        areaM2: g?.areaM2?.map((v) => Math.round(v)) ?? null,
+        fallback: g?.fallback ?? null,
+        dropped: g?.dropped ?? null,
+    }
+}
+
 /** TileData 하나의 기록: 정확한 필드 해시, 순서 무관 해시, 표 행, 산림 폴리곤 안 해시, 사람이 읽을 요약 */
 function digestTile(data, job) {
     const fields = {}
-    walk(data, "", fields)
+    // 녹지 통계(osm_green G7): 면적(double 합)은 0.01 m² 로 반올림해 해시한다(정수 항목은 그대로). 나누지 않은 도엽은 필드가 없다
+    walk(data.greenStats ? { ...data, greenStats: greenStatsNorm(data.greenStats) } : data, "", fields)
     const [ox, oy] = job.origin
     const poly = job.tile.corners.map(([x, y]) => [x - ox, y - oy])
     const rows = {
@@ -629,6 +661,7 @@ function digestTile(data, job) {
         waterStats: data.waterStats,
         forestRows: data.forestTable?.count ?? 0,
         forestSkipped: data.forestSkipped,
+        green: greenSummary(data),
     }
     return { fields, unordered, rows, forest: forestInside(data.forestMask, poly), summary }
 }
@@ -819,6 +852,8 @@ const loadGolden = async (p) => {
 }
 /** 필드 경로 → 묶음(순서 무관 해시·분류 단위) */
 const groupOf = (p) => {
+    // 녹지 분류 범위(osm_green G7): 지형 조각·TIN 안에 있지만 따로 묶는다(지형 기하 terrain·tin 과 분류 표시를 나눠 보이게. 순서 무관 해시 없음 = 같음/다름만)
+    if (/\.greenRanges(?:[.[]|$)/.test(p)) return "greenRanges"
     const head = p.split(/[.[]/)[0]
     if (["id", "name", "extra", "mode"].includes(head)) return "meta"
     return head
@@ -830,6 +865,8 @@ const LAYER_OF = {
     roads: "roads", roadChunks: "roads", roadTable: "roads", roadStats: "roads",
     water: "water", waterChunks: "water", waterTable: "water", waterStats: "water",
     forestMask: "forest", forestTable: "forest", forestSkipped: "forest",
+    // 녹지(osm_green G7): 지형을 나누므로 녹지 도엽에서는 terrain·tin 도 함께 바뀐다(green=0 이면 같아야 한다). 녹지 자체 기록은 둘
+    greenRanges: "osmGreen", greenStats: "osmGreen",
 }
 const MESH_OF_TABLE = { roadTable: ["roads", "roadChunks"], waterTable: ["water", "waterChunks"], buildingTable: ["buildings"] }
 const RANK = { same: 0, order: 1, "outside-1": 2, "corner-2": 2, derived: 2, "fresh-6": 2, "bbox-rows": 3, real: 4 }
@@ -969,6 +1006,18 @@ async function compareGoldens(pa, pb, allow = [], common = false, freshPath = nu
     await writeFile(path.join(outDir, name), JSON.stringify(result, null, 1))
     console.log(`비교 ${keys.length}개 기록: ${Object.entries(result.counts).map(([c, n]) => `${c} ${n}`).join(", ")}`)
     for (const [g, v] of Object.entries(result.byGroup)) console.log(`  ${g.padEnd(14)} ${Object.entries(v).map(([c, n]) => `${c} ${n}`).join(", ")}`)
+    // 레이어별(LAYER_OF, osm_green G7): 기록마다 그 레이어 묶음 중 가장 나쁜 분류를 한 번 센다. "녹지만 바뀌었나" 를 한 줄로 본다
+    const byLayer = {}
+    for (const r of Object.values(result.records)) {
+        const worstOf = {}
+        for (const [g, v] of Object.entries(r.groups ?? {})) {
+            const l = LAYER_OF[g] ?? g
+            if (!worstOf[l] || RANK[v.cls] > RANK[worstOf[l]]) worstOf[l] = v.cls
+        }
+        for (const [l, c] of Object.entries(worstOf)) ((byLayer[l] ??= {})[c] = (byLayer[l][c] ?? 0) + 1)
+    }
+    result.byLayer = byLayer
+    if (Object.keys(byLayer).length) console.log(`  레이어별 다른 기록: ${Object.entries(byLayer).map(([l, v]) => `${l} ${Object.entries(v).map(([c, n]) => `${c} ${n}`).join("·")}`).join(", ")}`)
     const shown = Object.entries(result.records).filter(([, r]) => r.worst === "real" || r.missing || (r.worst === "bbox-rows" && !allow.includes("bbox-rows"))).slice(0, 8)
     for (const [k, r] of shown) console.log(`  다름 ${k}: ${JSON.stringify(r.groups ?? r).slice(0, 300)}`)
     result.allow = allow
@@ -1030,7 +1079,7 @@ async function runTiming(lib, bundles, args) {
     }
     process.stdout.write("\n")
     if (network) console.log(`경고: 시간 재는 중 네트워크 받기 ${network}회(로컬 캐시가 비어 있었다). 다시 재세요`)
-    const LAYERS = ["merge", "mode", "buildings", "roads", "roadMerge", "roadFold", "water", "forest"]
+    const LAYERS = ["merge", "mode", "buildings", "roads", "roadMerge", "roadFold", "water", "forest", "green"]
     const perTile = {}
     for (const [key, xs] of Object.entries(samples)) {
         perTile[key] = {

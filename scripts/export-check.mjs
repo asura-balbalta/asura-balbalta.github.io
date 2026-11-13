@@ -9,10 +9,17 @@
  *   3DM 은 rhino3dm 으로 레이어·그룹·객체 이름·user string. SKP 는 openskp 의 parseSkp 로 정의·인스턴스 이름과 attribute dictionary.
  * --compare: 두 폴더의 summary.json 을 나란히 표로.
  *
+ * 녹지(OSM, docs/osm-green-layer-plan.md G5): --export 에 --uncheck "녹지 (OSM)" 을 주면 레이어 패널에서 그 레이어의 "내보내기" 를 끈 뒤 내려받는다
+ *   (녹지 끔 비교. 지형은 녹지로 나눈 그대로이고 재질만 하나). 형식마다 완료 토스트 글과 캡처(toast-<형식>.png)를 남긴다. --inspect 는 GLB 재질·
+ *   asset.copyright·지형 primitive 의 재질별 삼각형, 3DM 레이어·재질·문서 문자열 attribution·녹지 user text, SKP 재질·"녹지-" 정의별 면 수·
+ *   파일 안 "OpenStreetMap" 횟수(UTF-16)를 더 적는다.
+ *
  * 사용:
  *   node scripts/export-check.mjs --export docs/render-checks/<폴더> --bbox 14135700,4513980,14136500,4514780 [--base http://localhost:3000]
  *   node scripts/export-check.mjs --inspect docs/render-checks/<폴더>
  *   node scripts/export-check.mjs --compare <옛 폴더> <새 폴더>
+ *   (녹지) node scripts/export-check.mjs --export <폴더>/green-off --bbox 14127729,4511702,14130234,4514248 --uncheck "녹지 (OSM)"
+ *   (계단형, G12) 위 명령에 --stepped 를 더하면 설정 패널에서 보기 모드를 계단형으로 바꾼 뒤 내려받는다
  */
 import { mkdir, readFile, writeFile } from "node:fs/promises"
 import { createRequire } from "node:module"
@@ -23,7 +30,7 @@ const require = createRequire(import.meta.url)
 const KINDS = ["stl", "skp", "3dm", "glb"]
 
 const parseArgs = (argv) => {
-    const args = { mode: null, dirs: [], bbox: null, base: "http://localhost:3000", timeout: 240000 }
+    const args = { mode: null, dirs: [], bbox: null, base: "http://localhost:3000", timeout: 240000, uncheck: [], stepped: false }
     for (let i = 0; i < argv.length; i++) {
         const key = argv[i]
         const take = () => argv[++i]
@@ -34,6 +41,8 @@ const parseArgs = (argv) => {
             case "--bbox": args.bbox = take(); break
             case "--base": args.base = take().replace(/\/$/, ""); break
             case "--timeout": args.timeout = Number(take()); break
+            case "--uncheck": args.uncheck.push(take()); break
+            case "--stepped": args.stepped = true; break
             default: throw new Error(`모르는 옵션 ${key}`)
         }
     }
@@ -42,7 +51,7 @@ const parseArgs = (argv) => {
 }
 
 // ---- 내려받기 ----
-const runExport = async ({ dirs: [out], bbox, base, timeout }) => {
+const runExport = async ({ dirs: [out], bbox, base, timeout, uncheck, stepped }) => {
     if (!bbox) throw new Error("--bbox 가 필요합니다")
     const { chromium } = await import("playwright")
     await mkdir(out, { recursive: true })
@@ -63,6 +72,44 @@ const runExport = async ({ dirs: [out], bbox, base, timeout }) => {
     // 궤도 보기 준비: 선택 도엽 로딩 끝(옛 빌드는 data-busy 가 없어 "1 이 아니면")
     await page.waitForSelector('[data-debug-page][data-debug-state="ready"]:not([data-busy="1"])', { timeout })
     console.log(`준비 ${Date.now() - started} ms: ${url}`)
+    // 선택 도엽이 다 올라올 때까지: busy 가 한 번 켜졌다 꺼지고, 꺼진 채 2초 그대로인지(시간이 아니라 준비 신호의 안정으로 판단).
+    // 처음 ready 는 busy 가 켜지기 전일 수 있어 형식마다 담긴 도엽 수가 달라졌다(2026-11-08 G5 확인에서 발견)
+    const idle = '[data-debug-page]:not([data-busy="1"])'
+    await page.waitForSelector('[data-debug-page][data-busy="1"]', { timeout: 10000 }).catch(() => {})
+    for (;;) {
+        await page.waitForSelector(idle, { timeout })
+        const stable = await page
+            .waitForSelector('[data-debug-page][data-busy="1"]', { timeout: 2000 })
+            .then(() => false)
+            .catch(() => true)
+        if (stable) break
+    }
+    console.log(`도엽 다 올라옴 ${Date.now() - started} ms`)
+    if (stepped) {
+        // 설정 패널의 보기 모드를 계단형으로 바꾸고 다시 만든 도엽이 다 올라올 때까지 같은 안정 판정으로 기다린다(G12)
+        await page.getByRole("button", { name: "설정" }).first().click()
+        await page.getByRole("group", { name: "보기 모드" }).getByRole("button", { name: "계단형" }).click()
+        await page.waitForSelector('[data-debug-page][data-busy="1"]', { timeout: 10000 }).catch(() => {})
+        for (;;) {
+            await page.waitForSelector(idle, { timeout })
+            const stable = await page
+                .waitForSelector('[data-debug-page][data-busy="1"]', { timeout: 2000 })
+                .then(() => false)
+                .catch(() => true)
+            if (stable) break
+        }
+        console.log(`계단형 다 올라옴 ${Date.now() - started} ms`)
+    }
+    if (uncheck.length > 0) {
+        // 레이어 패널에서 "내보내기" 체크를 끈다(녹지 끔 비교 등)
+        await page.getByRole("button", { name: "레이어" }).first().click()
+        for (const label of uncheck) {
+            const box = page.getByRole("checkbox", { name: `${label} 내보내기` })
+            await box.waitFor({ timeout: 10000 })
+            if (await box.isChecked()) await box.click()
+            console.log(`내보내기 끔: ${label}`)
+        }
+    }
     await page.getByRole("button", { name: "내려받기" }).first().click()
     await page.waitForSelector(".ui-export-row", { timeout: 10000 })
     // 건물까지 담기게: 패널 꼬리말 "담는 레이어: 지형 · 건물" 을 기다린다(옛 빌드는 건물을 따로 받아 ready 뒤에 올라온다)
@@ -79,11 +126,22 @@ const runExport = async ({ dirs: [out], bbox, base, timeout }) => {
         await download.saveAs(file)
         // 진행 막대가 사라질 때까지(다음 형식 버튼이 활성화된다)
         await page.waitForSelector(".ui-export-progress", { state: "detached", timeout })
-        saved[kind] = { file, suggested: download.suggestedFilename(), ms: Date.now() - t0 }
+        // 완료 안내(토스트) 글과 캡처. 출처 줄(녹지면 OSM)이 형식과 무관하게 보이는지 본다
+        const title = `${kind.toUpperCase()} 파일을 내려받았습니다`
+        const toast = page.locator(".fui-Toast", { hasText: title }).last()
+        let toastText = null
+        try {
+            await toast.waitFor({ timeout: 10000 })
+            toastText = (await toast.innerText()).replace(/\s+/g, " ").trim()
+            await page.screenshot({ path: path.join(out, `toast-${kind}.png`) })
+        } catch {}
+        saved[kind] = { file, suggested: download.suggestedFilename(), ms: Date.now() - t0, toast: toastText }
         console.log(`${kind}: ${download.suggestedFilename()} (${saved[kind].ms} ms)`)
     }
     await writeFile(path.join(out, "export.log"), logs.join("\n"))
-    await writeFile(path.join(out, "export.json"), JSON.stringify({ createdAt: new Date().toISOString(), base, bbox, saved }, null, 2))
+    const errors = logs.filter((l) => l.startsWith("[error]"))
+    console.log(`콘솔 오류 ${errors.length}개${errors.length ? `: ${errors.slice(0, 3).join(" | ")}` : ""}`)
+    await writeFile(path.join(out, "export.json"), JSON.stringify({ createdAt: new Date().toISOString(), base, bbox, uncheck, stepped, saved, consoleErrors: errors }, null, 2))
     await browser.close()
 }
 
@@ -120,9 +178,20 @@ const inspectGlb = async (file) => {
     const keys = withExtras.length ? Object.keys(withExtras[0].extras) : []
     const missingName = children.filter((n) => !n.name).length
     const ids = children.map((n) => n.extras?.id).filter((v) => v !== undefined)
+    // 녹지: 재질 이름·색, 지형 primitive 의 재질별 삼각형, asset.copyright
+    const materials = (json.materials ?? []).map((m) => ({ name: m.name, color: m.pbrMetallicRoughness?.baseColorFactor?.slice(0, 3).map((v) => Math.round(v * 255)) }))
+    const terrainByMaterial = {}
+    if (terrain?.mesh !== undefined)
+        for (const p of meshes[terrain.mesh].primitives) {
+            const name = json.materials?.[p.material]?.name ?? `#${p.material}`
+            terrainByMaterial[name] = (terrainByMaterial[name] ?? 0) + accessors[p.indices].count / 3
+        }
     return {
         bytes: buf.length,
         root: nodes[0]?.name,
+        materials,
+        terrainByMaterial,
+        copyright: json.asset?.copyright ?? null,
         terrain: terrain ? meshStats(terrain) : null,
         buildings: { count: children.length, withExtras: withExtras.length, missingName, extrasKeys: keys, uniqueIds: new Set(ids).size, sample: children.slice(0, 3).map((n) => ({ name: n.name, extras: n.extras })) },
         assetExtras: json.asset?.extras ?? null,
@@ -185,7 +254,36 @@ const inspect3dm = async (file) => {
             if (sample.length < 3) sample.push({ name: attr.name, userStrings: Object.fromEntries(us) })
         }
     }
-    return { bytes: buf.length, layers, groups, perLayer, buildings: { withUserStrings, uniqueIds: ids.size, sample } }
+    const materials = []
+    for (let i = 0; i < doc.materials().count; i++) {
+        const m = doc.materials().get(i)
+        materials.push({ name: m.name, color: [m.diffuseColor.r, m.diffuseColor.g, m.diffuseColor.b] })
+    }
+    // 녹지 레이어 객체의 user text(출처)와 면 수
+    const green = {}
+    for (let i = 0; i < objects.count; i++) {
+        const obj = objects.get(i)
+        const attr = obj.attributes()
+        const layer = layers[attr.layerIndex] ?? ""
+        if (!layer.startsWith("녹지-") && layer !== "terrain") continue
+        const geo = obj.geometry()
+        const faces = geo?.faces ? geo.faces().count : 0
+        const g = (green[layer] ??= { objects: 0, faces: 0, material: null, userStrings: null })
+        g.objects++
+        g.faces += faces
+        if (layer !== "terrain") {
+            g.material = attr.materialIndex
+            g.userStrings = Object.fromEntries(attr.getUserStrings?.() ?? [])
+        }
+    }
+    // 문서 문자열 표(키 → 값). get(i) 는 [키, 값] 쌍
+    let attribution = null
+    const strings = doc.strings()
+    for (let i = 0; i < strings.count; i++) {
+        const entry = strings.get(i)
+        if (Array.isArray(entry) && entry[0] === "attribution") attribution = entry[1]
+    }
+    return { bytes: buf.length, layers, groups, perLayer, materials, green, attribution, buildings: { withUserStrings, uniqueIds: ids.size, sample } }
 }
 
 const inspectSkp = async (file) => {
@@ -212,8 +310,24 @@ const inspectSkp = async (file) => {
     const key = Buffer.from("asrbbt", "utf16le")
     let rawDictCount = 0
     for (let i = buf.indexOf(key); i >= 0; i = buf.indexOf(key, i + key.length)) rawDictCount++
+    const countOf = (text) => {
+        let n = 0
+        for (const k of [Buffer.from(text, "utf16le"), Buffer.from(text, "utf8")]) for (let i = buf.indexOf(k); i >= 0; i = buf.indexOf(k, i + k.length)) n++
+        return n
+    }
+    // 녹지: 재질(이름·색)과 "녹지-" 정의별 면 수, 지형 그룹 안 하위 그룹 이름
+    const greenDefs = Object.fromEntries(defs.filter((d) => d.name?.startsWith("녹지-")).map((d) => [d.name, d.faces?.length ?? null]))
+    const terrainNode = nodes.find((n) => n.name === "terrain")
+    const green = {
+        materials: (parsed.materials ?? []).map((m) => ({ name: m.name, color: [m.color.r, m.color.g, m.color.b] })),
+        defs: greenDefs,
+        terrainChildren: (terrainNode?.children ?? []).map((n) => n.name),
+        osmCount: countOf("OpenStreetMap"),
+        odblCount: countOf("ODbL"),
+    }
     return {
         rawDictCount,
+        green,
         attributesReadable: withDict.length > 0,
         bytes: buf.length,
         definitions: defs.length,
@@ -265,6 +379,15 @@ const runCompare = async ({ dirs: [a, b] }) => {
     row("3DM 건물 user string / 고유 id", sa["3dm"]?.buildings && [sa["3dm"].buildings.withUserStrings, sa["3dm"].buildings.uniqueIds], sb["3dm"]?.buildings && [sb["3dm"].buildings.withUserStrings, sb["3dm"].buildings.uniqueIds])
     row("SKP 정의 수 / 건물 그룹 / 이름 있음 / 파일 안 asrbbt 사전 수 / 정의 이름 예", sa.skp && [sa.skp.definitions, sa.skp.buildings.count, sa.skp.buildings.named, sa.skp.rawDictCount, sa.skp.buildings.definitionNames[0]], sb.skp && [sb.skp.definitions, sb.skp.buildings.count, sb.skp.buildings.named, sb.skp.rawDictCount, sb.skp.buildings.definitionNames[0]])
     row("SKP 지형 면 수", sa.skp?.terrain?.faces, sb.skp?.terrain?.faces)
+    // 녹지(G5)
+    row("파일 크기 STL / SKP / 3DM / GLB", KINDS.map((k) => sa[k]?.bytes), KINDS.map((k) => sb[k]?.bytes))
+    row("GLB 지형 재질별 삼각형", sa.glb?.terrainByMaterial, sb.glb?.terrainByMaterial)
+    row("GLB 재질", sa.glb?.materials?.map((m) => m.name), sb.glb?.materials?.map((m) => m.name))
+    row("GLB copyright 에 OpenStreetMap", !!sa.glb?.copyright?.includes("OpenStreetMap"), !!sb.glb?.copyright?.includes("OpenStreetMap"))
+    row("3DM 녹지·지형 레이어(객체·면)", sa["3dm"]?.green, sb["3dm"]?.green)
+    row("3DM 재질", sa["3dm"]?.materials?.map((m) => m.name), sb["3dm"]?.materials?.map((m) => m.name))
+    row("3DM attribution 에 OpenStreetMap", !!sa["3dm"]?.attribution?.includes("OpenStreetMap"), !!sb["3dm"]?.attribution?.includes("OpenStreetMap"))
+    row("SKP 재질 / 녹지 정의 면 수 / 파일 안 OpenStreetMap·ODbL 횟수", sa.skp?.green && [sa.skp.green.materials.length, sa.skp.green.defs, sa.skp.green.osmCount, sa.skp.green.odblCount], sb.skp?.green && [sb.skp.green.materials.length, sb.skp.green.defs, sb.skp.green.osmCount, sb.skp.green.odblCount])
     // 건물 id 포함 관계와 속성 일치(GLB extras 기준. 3DM user string 은 같은 함수에서 나온다)
     const ba = new Map((sa.glb?.all?.buildings ?? []).map((b) => [b.extras?.id, b]))
     const bb = new Map((sb.glb?.all?.buildings ?? []).map((b) => [b.extras?.id, b]))

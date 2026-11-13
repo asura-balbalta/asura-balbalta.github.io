@@ -4,6 +4,7 @@ import { cloneRoadTable, RoadTable, roadTableBuffers } from "../roadTable"
 import { cloneWaterTable, WaterTable, waterTableBuffers } from "../waterTable"
 import type { TinMesh } from "../terrainData"
 import type { TerrainMode } from "../webgpu/terrainRenderer"
+import type { GreenExport, GreenFaceRange } from "./greenExport"
 import { encodeStlHeader } from "./stl"
 import type { StlExportRequest, StlExportResponse } from "./stl.worker"
 
@@ -12,9 +13,10 @@ const STL_WORKER_URL = "export/stl.worker.js"
 
 /**
  * 내보낼 메쉬. 건물 레이어는 table(건물 표)을 함께 주면 SKP·3DM·GLB 가 건물마다 그룹과 속성을 만들고, 도로 레이어는 roadTable(도로 표)을
- * 함께 주면 이은 중심선마다 그룹과 속성을 만든다(도로 메쉬는 지형 평면 그대로라 Worker 가 띄움·계단화를 한다). 다른 형식은 무시한다
+ * 함께 주면 이은 중심선마다 그룹과 속성을 만든다(도로 메쉬는 지형 평면 그대로라 Worker 가 띄움·계단화를 한다). 지형은 greenRanges(녹지 분류 범위,
+ * 삼각형 단위)를 함께 주면 SKP·3DM·GLB 가 분류별 재질로 나눈다(녹지를 내보낼 때만 runExport 가 남긴다). 다른 형식은 무시한다
  */
-export type ExportMesh = TinMesh & { table?: BuildingTable; roadTable?: RoadTable; waterTable?: WaterTable }
+export type ExportMesh = TinMesh & { table?: BuildingTable; roadTable?: RoadTable; waterTable?: WaterTable; greenRanges?: GreenFaceRange[] }
 
 /** 내보낼 레이어별 메쉬. null 이면 그 레이어는 뺀다. 모두 같은 원점이어야 한다 */
 export type LayerMeshes = Record<LayerId, ExportMesh | null>
@@ -27,6 +29,8 @@ export type ExportOptions = {
     step: number
     /** 진행률(0 ~ 1) */
     onProgress?: (ratio: number) => void
+    /** 녹지를 담을 때 분류별 이름·색·출처(지형 greenRanges 와 함께). 없으면 지형은 한 재질 */
+    green?: GreenExport
 }
 
 /** 원본 mesh 는 호출자가 계속 쓰므로 slice() 사본을 만들고, 그 버퍼를 transfer 목록에 모은다 */
@@ -52,6 +56,7 @@ export const copyLayerMeshes = (layers: LayerMeshes, transfer: ArrayBuffer[]): L
             c.waterTable = cloneWaterTable(mesh.waterTable)
             transfer.push(...waterTableBuffers(c.waterTable))
         }
+        if (mesh.greenRanges) c.greenRanges = mesh.greenRanges.map((r) => ({ ...r }))
         out[id] = c
     }
     return out

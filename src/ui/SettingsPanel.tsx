@@ -201,7 +201,7 @@ export const SettingsPanel = ({
                 만들기" 를 누르세요(화면은 바로 바뀌고, 생성 시간·메모리는 다시 만든 뒤부터 줄어듭니다). 보이는 거리를 줄이면 프레임이 빨라지고 GPU
                 메모리가 줄지만, 먼 지형이 더 가까이 와서야 나타납니다.
                 <div className="ui-panel-footer-line">
-                    지형·건물은 공공데이터를 가공한 것입니다.{" "}
+                    지형·건물·도로·물은 공공데이터를, 녹지는 OpenStreetMap 을 가공한 것입니다.{" "}
                     <button type="button" className="ui-link" onClick={onAttribution}>
                         원본 데이터 출처
                     </button>

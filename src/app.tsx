@@ -29,7 +29,7 @@ import { SettingsPanel } from "./ui/SettingsPanel"
 import { DockPanel } from "./ui/DockPanel"
 import { StatusBar, StatusMenu } from "./ui/StatusBar"
 import { AttributionDialog } from "./ui/AttributionContent"
-import { ATTRIBUTION_SHORT } from "./attribution"
+import { ATTRIBUTION_SHORT, fallbackLayerShort, layerShort } from "./attribution"
 import { fluentTheme, uiCssVars } from "./ui/theme"
 import { AppToaster, useAppToast } from "./ui/Toasts"
 import { BottomSheet } from "./ui/BottomSheet"
@@ -134,7 +134,15 @@ type TerrainInfo = {
     water: { built: number; rivers: number; lakes: number; ribbons: number }
     /** 산림: 칠한 폴리곤 수를 임상별로(frtp 0 ~ 4, id 로 한 번만), 건너뛴 수 */
     forest: { types: number[]; skipped: number }
+    /**
+     * 녹지(OSM): 나눈 도엽 수, 분류별 표시 면적 m²·걸친 원본 조각 수(첨자 = 분류 코드, 0 은 비녹지. 조각은 도엽마다 센 합), 근사 분할·버린
+     * 삼각형 수. 내보내기 꼬리말이 녹지 유무를, 상태 표시줄이 OSM 표시 여부(tiles)를, 레이어 패널이 조각·면적을 본다
+     */
+    osmGreen: { tiles: number; areaM2: number[]; pieces: number[]; fallback: number; dropped: number }
 }
+
+/** 녹지 분류 이름(코드 1 ~ 6 순. PaletteEditor·runExport 의 목록과 같은 순서) */
+const GREEN_CLASS_LABELS = ["숲", "관목", "황야", "초지", "공원", "과수원"]
 
 /** 렌더 디버그 설정 → 도엽 스타일(roadsStyleOf·waterStyleOf·forestStyleOf·tileStyleOf)은 sceneSetup.ts 로 옮겼다(헤드리스 검사와 같은 함수) */
 
@@ -314,6 +322,8 @@ function App({
     useEffect(() => () => tiles.terminate(), [tiles])
     /** 레이어별 보기·내보내기 포함 상태 */
     const [layers, setLayers] = useState<LayerStates>(INITIAL_LAYER_STATES)
+    /** 녹지(OSM) 지도 표시 한 줄. 받기 전에는 대체문, 녹지가 처음 보일 때 서버 인덱스의 attribution.short 로 바꾼다(아래 effect) */
+    const [greenShort, setGreenShort] = useState(() => fallbackLayerShort("osmGreen"))
     /** 현재 지형 표현 방식. 바꾸면 같은 mesh 를 다시 올린다 */
     const [mode, setMode] = useState<TerrainMode>(INITIAL_TERRAIN_MODE)
     /** 계단형 층 간격(m). 바꾸면 계단형 지형을 다시 만든다 */
@@ -621,6 +631,7 @@ function App({
                     roads: stats.roads,
                     water: stats.water,
                     forest: stats.forest,
+                    osmGreen: stats.osmGreen,
                 })
             }
             if (event.first) showTerrain()
@@ -742,8 +753,9 @@ function App({
             mode,
             step: stepInterval,
             onProgress: (ratio) => setExporting({ kind, ratio }),
+            greenColors: paletteStore.palette.greenColors,
         })
-            .then(({ included }) => {
+            .then(({ included, credits }) => {
                 const names = LAYER_DEFS.filter((d) => included.includes(d.id)).map((d) => d.label)
                 // 아직 올라오는 중이라 빠진 레이어("내보내기" 체크됐지만 메쉬가 없음)
                 const pending = busy ? LAYER_DEFS.filter((d) => !included.includes(d.id) && layers[d.id].export).map((d) => d.label) : []
@@ -751,7 +763,8 @@ function App({
                     pending.length > 0
                         ? `${names.join(" · ")} 를 담았습니다. ${pending.join(" · ")} 은 아직 올라오는 중입니다.`
                         : `${names.join(" · ")} 를 담았습니다.`
-                toast.success(`${label} 파일을 내려받았습니다`, note)
+                // 녹지(OSM)를 담았으면 출처 한 줄(G9 a). STL 은 파일에 메타가 없어 이것이 유일한 표시라 형식과 무관하게 보인다
+                toast.success(`${label} 파일을 내려받았습니다`, [note, ...credits].join(" "))
             })
             .catch((err) => {
                 console.error(err)
@@ -794,10 +807,38 @@ function App({
         layerNotes.forest = `폴리곤 ${total.toLocaleString()}`
         layerNoteTitles.forest = `침엽 ${conifer.toLocaleString()} · 활엽 ${broadleaf.toLocaleString()} · 혼효 ${mixed.toLocaleString()} · 죽림 ${bamboo.toLocaleString()} · 무립목지 ${none.toLocaleString()}`
     }
+    if (terrain) {
+        // 녹지(OSM): 산림처럼 첫 열에는 "조각 N" 만, 분류별 조각·면적은 title. 조각은 도엽마다 걸친 원본 조각을 센 합이라 이웃 도엽에 걸친
+        // 조각은 여러 번 세어진다. 근사 분할·버린 삼각형은 0 이 아닐 때만
+        const g = terrain.osmGreen
+        const pieces = g.pieces.slice(1).reduce((a, b) => a + b, 0)
+        layerNotes.osmGreen = `조각 ${pieces.toLocaleString()}`
+        layerNoteTitles.osmGreen = [
+            "조각 수는 도엽마다 센 합(여러 도엽에 걸친 조각은 중복)",
+            ...GREEN_CLASS_LABELS.map(
+                (name, i) => `${name} ${g.pieces[i + 1].toLocaleString()} 조각 · ${(g.areaM2[i + 1] / 1e4).toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 })} ha`,
+            ),
+            ...(g.fallback > 0 ? [`근사 분할 삼각형 ${g.fallback.toLocaleString()}`] : []),
+            ...(g.dropped > 0 ? [`버린 납작한 삼각형 ${g.dropped.toLocaleString()}`] : []),
+        ].join("\n")
+    }
     if (terrain) layerNotes.water = `하천 ${terrain.water.rivers.toLocaleString()} · 호소 ${terrain.water.lakes.toLocaleString()}` + (terrain.water.ribbons > 0 ? ` · 띠 ${terrain.water.ribbons.toLocaleString()}` : "")
 
+    // 녹지(OSM) 출처 표시(docs/osm-green-layer-plan.md G6·G7): 레이어가 보이고 녹지로 나눈 도엽이 있을 때 상태 표시줄·모바일 줄에 덧붙인다.
+    // ODbL 은 지도에 표시가 조건이라 문구는 서버 인덱스에서 읽는다(처음 보일 때 한 번 받고, 받기 전·실패면 대체문)
+    const greenShown = layers.osmGreen.visible && (terrain?.osmGreen.tiles ?? 0) > 0
+    useEffect(() => {
+        if (!greenShown) return
+        let alive = true
+        layerShort("osmGreen").then((s) => alive && setGreenShort(s))
+        return () => void (alive = false)
+    }, [greenShown])
+
     const included = terrain
-        ? exportableLayers({ terrain: true, buildings: terrain.buildings > 0, roads: terrain.roads.built > 0, water: terrain.water.built > 0 }, layers)
+        ? exportableLayers(
+              { terrain: true, buildings: terrain.buildings > 0, roads: terrain.roads.built > 0, water: terrain.water.built > 0, osmGreen: terrain.osmGreen.areaM2.some((a, c) => c > 0 && a > 0) },
+              layers,
+          )
         : []
 
     // 폭에 따라 그릇만 바꾼다. props 는 같다
@@ -1004,12 +1045,18 @@ function App({
                 )
             )}
 
-            {/* 공공데이터 출처(src/attribution.ts). 모바일은 탭 막대 아래 왼쪽 9px 줄(전체 지도에서는 둘째 줄에 바탕 지도 저작권),
+            {/* 공공데이터 출처(src/attribution.ts). 모바일은 탭 막대 아래 왼쪽 9px 줄(둘째 줄에 녹지 OSM 표시·전체 지도의 바탕 지도 저작권),
                 데스크톱은 상태 표시줄 오른쪽. 누르면 출처 창 */}
             {isMobile && (
                 <button type="button" className="ui-attribution-mobile" onClick={() => openAttribution()} title="원본 데이터 출처 보기">
                     <span>{ATTRIBUTION_SHORT}</span>
-                    {view === "map" && <span>{basemapAttribution(basemap)}</span>}
+                    {/* 둘째 줄: 녹지(OSM) 표시는 줄어들지 않고 바탕 지도 저작권이 말줄임(첫 줄 공공데이터 문구를 자르지 않게 줄을 나눈다) */}
+                    {(greenShown || view === "map") && (
+                        <span className="ui-attribution-line">
+                            {greenShown && <span className="ui-attribution-tail">{greenShort + (view === "map" ? "\u00a0·\u00a0" : "")}</span>}
+                            {view === "map" && <span className="ui-attribution-head">{basemapAttribution(basemap)}</span>}
+                        </span>
+                    )}
                 </button>
             )}
             <AttributionDialog open={attributionOpen} layer={attributionLayer} onClose={() => setAttributionOpen(false)} />
@@ -1023,6 +1070,7 @@ function App({
                     stats={stats}
                     menus={menus}
                     attribution={ATTRIBUTION_SHORT}
+                    attributionTail={greenShown ? greenShort : undefined}
                     onAttribution={() => openAttribution()}
                 >
                     {walking && (

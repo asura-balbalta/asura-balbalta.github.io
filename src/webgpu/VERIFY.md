@@ -101,6 +101,10 @@ npm run render-check -- --params "bbox=14135700,4513980,14136500,4514780&yaw=90&
 | `forestres=2` | 산림 마스크 픽셀 크기(m, 1 또는 2, 기본 1. `forestMask.ts` FOREST_RES_M. 2026-10-22 결정 1 m by @nanangqq). 경계 톱니·메모리를 견줄 때. 범위 확정 때만 적용 |
 | `forestwalls=0` | 계단형 벽(수직면)은 산림 색을 칠하지 않고 표고 색 그대로(기본은 판·벽 모두 칠함) |
 | `forestcolor=6E8B5A` · `forestcolor=C9C6A6,6E8B5A,9DBB72,86A566,A9C08A` | 산림 색(RRGGBB, # 없이). 하나면 임상 전부, 다섯이면 임상 0 무립목지 · 1 침엽 · 2 활엽 · 3 혼효 · 4 죽림 순. 기본은 색상표 forestColors. Chrome 비교용(F2) |
+| `green=0` | 녹지(OSM)를 받지도 지형을 나누지도 않음. 지형 조각·TIN 이 녹지 전과 바이트까지 같고 화면도 **전과 비트까지 같아야 한다**(회귀 비교. `docs/osm-green-layer-plan.md`). 범위 확정 때만 적용(주소로 새로 연다). 레이어 패널의 "보기" 는 색만 바꾼다(재생성 없음) |
+| `greencolor=8FBF7F` · `greencolor=B8CCB7,C5D5C3,CAD5C3,D2DEC9,D2E0D2,CBD3B5` | 녹지 색(RRGGBB, # 없이). 하나면 분류 전부, 여섯이면 1 숲 · 2 관목 · 3 황야 · 4 초지 · 5 공원 · 6 과수원 순. 기본은 색상표 greenColors. Chrome 비교용(G5) |
+| `greenalpha=1` | 녹지 색을 표고 바탕색에 섞는 비율(0 ~ 1, 기본은 색상표 greenAlpha 0.6). 1 이면 녹지 색 그대로 |
+| `greenclass=5` · `greenclass=1,5` | 그 분류만 녹지 색, 나머지 분류는 지형 색(산림 마스크가 있으면 산림 색). 분류별 범위·경계를 가를 때 |
 | `ao=0` | SSAO 끄기 |
 | `shadow=0` | 그림자 끄기 |
 | `sky=0` | 절차적 하늘 끄기(안개는 배경색으로) |
@@ -144,10 +148,10 @@ npm run render-check -- --params "bbox=14135700,4513980,14136500,4514780&yaw=90&
 
 | 층 | 레이어 | 무엇 | 상한(스레드마다) |
 | --- | --- | --- | --- |
-| `fixed` | terrain·buildings·roads·water·forest | `sheets50k.json`(terrain)·`codes.json`(레이어). 레이어마다 하나로 고정 | 없음(`max` Infinity) |
-| `index` | 같음 | 50K 인덱스 JSON. 조정자·메인만 든다(보조 워커는 읽지 않음) | 14 |
-| `file` | terrain·레이어 | 5K 파일(파일 원점): 지형 ttp, 레이어 데이터 층(파일 + 전처리). select 의 reset 에도 남는다 | ttp 64, 레이어 32 |
-| `result` | terrain·레이어 | 도엽 결과(공통 원점, 키에 원점): 자른 TIN, 레이어 결과. reset 에 비운다. 지금 선택의 도엽은 고정 칸(`pinned`·`pinnedBytes`, 개수·바이트·적중은 합계), 선택 밖(둘러보기) 도엽만 LRU(D6 (b)) | 선택 도엽 없음, 밖 도엽 64(`max`) |
+| `fixed` | terrain·buildings·roads·water·forest(·osm_green) | `sheets50k.json`(terrain)·`codes.json`(레이어). 레이어마다 하나로 고정 | 없음(`max` Infinity) |
+| `index` | 같음(녹지 `index.osm_green`) | 50K 인덱스 JSON. 조정자·메인만 든다(보조 워커는 읽지 않음) | 14 |
+| `file` | terrain·레이어 | 5K 파일(파일 원점): 지형 ttp, 레이어 데이터 층(파일 + 전처리, 녹지 `file.osm_green`). select 의 reset 에도 남는다 | ttp 64, 레이어 32 |
+| `result` | terrain·레이어 | 도엽 결과(공통 원점, 키에 원점): 자른 TIN, 레이어 결과. 녹지 `result.osm_green` 은 도엽 결과가 아니라 **5K 전처리**(분류별 불리언, 5K 32개 LRU)이고 도엽 나누기는 캐시하지 않는다(도엽 로그에 "(캐시)" 표시 없음. perf-check·v3-check 의 `osmGreen` 은 "나눈 도엽" 수). reset 에 비운다. 지금 선택의 도엽은 고정 칸(`pinned`·`pinnedBytes`, 개수·바이트·적중은 합계), 선택 밖(둘러보기) 도엽만 LRU(D6 (b)) | 선택 도엽 없음, 밖 도엽 64(`max`) |
 
 `npm run perf-check` 의 메모리 요약은 이 표를 층별로 더한다(데이터 파일 = `file` 중 레이어, ttp = `file.terrain`, TIN = `result.terrain`, 도엽 결과 = `result` 중 레이어, 인덱스 JSON = `index` + `fixed` 의 모든 스레드 합, `cacheEvictions` = 키별 밀려남 합). 보조 워커는 50도엽마다 같은 표를 한 줄로 찍는다(`층.레이어 개수/상한 MB(적중·놓침·밀려남)`).
 
@@ -161,7 +165,7 @@ npm run render-check -- --params "bbox=14135700,4513980,14136500,4514780&yaw=90&
 
 | 겹 | 무엇 | 언제 |
 | --- | --- | --- |
-| 1 도엽 골든 | `tile-golden`(2026-10-31 기준 148기록, 약 40초)을 골든 기준과 바이트 비교. 모든 레이어·지형 두 모드 | 워커·데이터·메쉬·공유 코드가 바뀌면 |
+| 1 도엽 골든 | `tile-golden`(2026-10-31 기준 148기록 약 40초 → 2026-11-08 녹지 G7 로 설정 5 × 도엽 42 = 210기록 약 60초)을 골든 기준과 바이트 비교. 모든 레이어·지형 두 모드 | 워커·데이터·메쉬·공유 코드가 바뀌면 |
 | 2a smoke | 녹사평 기준 4조합 × 두 크기 = 8장(재검증 쌍 기본 ↔ `ao=0` 포함) | 캡처가 필요한 변경이면 언제나 |
 | 2b 레이어 | 고친 레이어의 장면 + 그 레이어를 끈 조합(둘러보기·궤도) | 레이어 파일만 바뀌면(smoke 에 더함) |
 | 2c 전체 | 27조합 × 두 크기 = 54장(`2026-10-23-cache-before/run.sh` 와 같은 장면·이름) | 공유 모듈·분류표에 없는 파일이 바뀌면, 또는 `--full`(커밋 전) |
@@ -184,7 +188,7 @@ npm run render-check -- --params "bbox=14135700,4513980,14136500,4514780&yaw=90&
 분류(처음 맞는 규칙. 근거는 보조 워커 번들 입력과 import 관계, 각 규칙의 `why`):
 
 - **shared → 골든 + 전체**: `src/webgpu/**`, `src/components/**`, `src/debug/**`, `index.tsx`, `app.tsx`(TileStyle 을 만든다), `layers.ts`, `usePalettes.ts`, 색상표·테마, 지형 파이프라인(`terrain*` — `terrainIndex.ts` 포함, 두 워커 번들 모두에 들어감), `meshNormals`·`lruCache`·`layerSheets`·`player`, `package-lock.json`·`patches/**`·`tsconfig.json`
-- **layer → 골든 + smoke + 그 레이어 장면**: buildings(`buildingsData/Mesh/Table/Pick`), roads(`roadsData/Mesh/roadTable`), water(`waterData/Mesh/Table`), forest(`forestData/Mask/Table`). 건물은 끄는 스위치가 없어 건물이 많은 장면(터널·한강 둘러보기, 녹사평·터널 궤도)으로 본다
+- **layer → 골든 + smoke + 그 레이어 장면**: buildings(`buildingsData/Mesh/Table/Pick`), roads(`roadsData/Mesh/roadTable`), water(`waterData/Mesh/Table`), forest(`forestData/Mask/Table`), osmGreen(`osmGreenData`·`osmGreenMesh`·`export/greenExport`, 2026-11-08). 건물은 끄는 스위치가 없어 건물이 많은 장면(터널·한강 둘러보기, 녹사평·터널 궤도)으로 본다
 - **ui·export → smoke**: `src/ui/**`, 지도·검색·출처·외부 서비스, `src/llm/**`(평가 도구 `src/llm/eval/**` 는 없음), `src/export/**`(**내보낸 파일은 이 검증이 보지 않는다** — 따로 확인)
 - **script → smoke**(스크립트가 여전히 도는지): `scripts/**`, `package.json`. 골든 하네스 자체(`tile-golden*`, `tileGolden.ts`)는 골든 + smoke
 - **none**: `docs/**`, `*.md`, `.firebase/**`, `.claude/**`, `firebase.json`
@@ -220,6 +224,8 @@ npm run verify -- --refresh-baseline        # 기준 다시 찍기(아래 정책
 - 물 레이어 장면(2026-10-22, 계획서 14절): 한강 여의도 `--params "bbox=14127729,4511702,14130234,4514248&yaw=90&pitch=-15"`(샛강 하중도·한강), 소양호 `--params "bbox=14232497,4567899,14235040,4570432&yaw=90&pitch=-15"`(호소 30개). 끈 조합 `water=0`, 높이 경로 비교 `waterz=low`. 기준은 `docs/render-checks/2026-10-22-water/`.
 - 산림 레이어 장면(2026-10-22, `docs/forest-layer-plan.md` 1.3절): 남해안 숲·농경지 경계(34616026) `--params "bbox=14124252,4052302,14126196,4054256&spawn=1110,460&yaw=110&pitch=-10"`, 남산 북사면 숲·시가지 경계(37608080) `--params "bbox=14135255,4516175,14136775,4517702&yaw=90&pitch=-15"`. 끈 조합 `forest=0`(before 와 같아야 함), 비교 `forestres=2`·`forestwalls=0`. 기준은 `docs/render-checks/2026-10-22-forest-before/`. **산림 켬/끔을 가를 때는 `--threshold 0.01`**: 기본 0.1 은 옅은 산림 색(섞는 비율 0.6)을 같은 색으로 봐 산림 켬 ↔ before 가 "같음" 으로 나온다(2026-10-22 r3: 0.1 에서 0 %, 0.01 에서 남해안 6.2 %·남산 70.1 %. `forest=0` ↔ before 는 둘 다 0 픽셀).
 - 매끈한 면 장면(2026-10-23, `docs/cache-refactor-plan.md` 6절 V2): 둘러보기는 계단형으로 바뀌므로 매끈한 면은 궤도 보기 `walk=0&orbitz=…` 로 찍는다(render-check 는 궤도 HUD 가 보인 뒤 busy 0 을 기다린다). 장면·끈 조합 전체와 비교 명령은 `docs/render-checks/2026-10-23-cache-before/run.sh`(git 제외).
+- 녹지(OSM) 장면(2026-11-08, `docs/osm-green-layer-plan.md` G7): 남산 숲·공원 경계는 기존 `namsan-walk`·`namsan-orbit` 에 `osmGreen` 태그, 끈 조합 `namsan-walk-green0`. 여의도공원·한강변 초지는 `yeouido-walk`(`$HANGANG&yaw=270&pitch=-30&hover=80`. `hangang-walk` 은 플레이어가 수면 아래라 공원이 안 보인다)과 `yeouido-walk-green0`. 판정은 산림처럼 0.1·0.01(옅은 녹지 색). **녹지는 지형 메쉬 자체를 나누므로**(b-2) 골든에서 녹지 있는 도엽의 `terrain`·`tin` 이 `greenRanges`·`greenStats` 와 함께 바뀐다. `green=0`(골든은 설정 `green0` 또는 `--style '{"osmGreen":{"enabled":false}}'`)이면 녹지 전 기준과 바이트까지 같아야 한다. 골든 녹지 묶음(`greenRanges` 분류 범위, `greenStats` 조각 수·면적 0.01 m² 반올림·fallback·dropped)은 같음/다름만 있고 허용 차이를 두지 않는다(분할·셈 모두 결정론). 비교 출력의 "레이어별 다른 기록" 줄(`LAYER_OF`)로 녹지·지형 밖이 같은지 본다. 도엽 세트 `yeouido-green`(37608088)·`namsan-green`(37608080).
+- **내보내기는 `npm run verify` 가 보지 않는다.** 녹지·내보내기 코드(`src/export/**`, `osmGreenMesh` 의 범위)를 고치면 `node scripts/export-check.mjs --export <폴더>/green-on --bbox 14127729,4511702,14130234,4514248` 과 `--uncheck "녹지 (OSM)"` 끈 조합, `--inspect`·`--compare` 를 따로 돌린다(서버 3000 필요, 계획서 8.9절).
 - **끄는 파라미터를 더하면 캡처의 왼쪽 위 파라미터 표가 한 줄 늘어** `[walking tiles=N]` 줄이 기본 마스크(140 px) 아래로 내려온다. 끈 조합을 before(이름에 `_<param>-0` 을 붙여 복사한 폴더)와 견줄 때는 `--mask 0,0,400,200` 을 준다(2026-10-19 `roads=0` 비교: 이것 없이는 0.14 ~ 0.99 % "다름", 가리면 12쌍 모두 같음).
 
 ### 순서

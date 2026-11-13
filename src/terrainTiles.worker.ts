@@ -8,6 +8,7 @@ import { WaterTable, waterTableBuffers } from "./waterTable"
 import type { ForestMask } from "./forestMask"
 import { ForestTable, forestTableBuffers } from "./forestTable"
 import { batchLayerSheets, createSheetsBatch, DATA_LAYERS, SheetsBatch } from "./layerSheets"
+import type { GreenRange, GreenStats } from "./osmGreenMesh"
 import { dataCacheTable, heapBytes, MeshChunk, TinMesh } from "./terrainData"
 import { getTtpSheetsInBbox, MB_PER_TILE, neighborReach, SELECTION_TILE_LIMITS } from "./terrainIndex"
 import type { BuildRequest, BuildResponse, HelperMemory } from "./terrainTileBuild.worker"
@@ -41,6 +42,8 @@ export type TileStyle = {
     water?: WaterStyle
     /** 산림 레이어 스위치(forestMask). 없으면 기본값 */
     forest?: ForestStyle
+    /** 녹지 레이어 스위치(osmGreenMesh). 없으면 기본값(켬) */
+    osmGreen?: GreenStyle
     /**
      * false 면 계단형 지형·도로에 매끈한 법선(먼 거리 조명용, terrainSteps normals)을 만들지 않는다. 설정 "먼 거리 계단 부드럽게"(품질 smoothFar)를
      * 끄고 다시 만들 때. 법선이 없는 조각은 렌더러가 원래 계단형 파이프라인으로 그린다. 없으면 만든다
@@ -53,6 +56,13 @@ export type ForestStyle = {
     enabled?: boolean
     /** 마스크 픽셀 크기(m, 1 또는 2). 없으면 FOREST_RES_M */
     res?: number
+}
+/**
+ * 녹지 옵션(디버그 페이지 green=0). 자료가 있으면 늘 지형을 나누고 패널의 켜고 끄기는 색만 바꾼다(계획서 3.1절). enabled false 만 녹지 인덱스·5K 를
+ * 받지도 나누지도 않는다(지형 출력이 녹지 전과 바이트까지 같다. 회귀 비교용)
+ */
+export type GreenStyle = {
+    enabled?: boolean
 }
 /** 물 얹기 옵션(디버그 페이지 waterclip=0·waterz=·waterlines=0·waterlift=·waterwidth=). lift 빼고는 메쉬 캐시 키에 들어간다 */
 export type WaterStyle = {
@@ -117,10 +127,18 @@ export type TileData = {
     mode: TerrainMode
     /** 도엽 xyz 범위(원점 기준 m. xy 는 도엽 폴리곤, z 는 지형) */
     bounds: { min: [number, number, number]; max: [number, number, number] }
-    /** 그릴 지형 조각(계단형, 또는 법선이 있는 TIN) */
-    terrain: MeshChunk[]
-    /** 발 높이 조회·내보내기용 원본 TIN(도엽 폴리곤으로 자른 것) */
-    tin: TinMesh
+    /**
+     * 그릴 지형 조각(계단형, 또는 법선이 있는 TIN). 녹지로 나눈 도엽이면 조각마다 greenRanges(조각 안 삼각형 단위 분류 범위, 분류 오름차순으로
+     * 조각 삼각형을 빈틈없이 덮음. 렌더러 G4 가 분류별로 나눠 그린다). 나누지 않은 도엽은 greenRanges 가 없다(전과 같은 객체 모양)
+     */
+    terrain: TerrainChunk[]
+    /**
+     * 발 높이 조회·내보내기용 원본 TIN(도엽 폴리곤으로 자른 것). 녹지로 나눈 도엽이면 나눈 TIN(정점이 경계에서 조금 늘고 표고는 그대로)과
+     * greenRanges(이 TIN 의 삼각형 단위 분류 범위. releaseTerrain 뒤에도 남아 내보내기 G5 가 쓴다)
+     */
+    tin: TinMesh & { greenRanges?: GreenRange[] }
+    /** 녹지로 나눈 도엽의 나누기 통계(분류별 조각·면적 등. 시간 ms 는 로그에만). 나누지 않은 도엽은 없다 */
+    greenStats?: Omit<GreenStats, "ms">
     /** 건물 메쉬(없으면 null) */
     buildings: TinMesh | null
     /** 건물 표(내보내기 속성용. 메쉬 오프셋은 이 도엽 건물 메쉬 기준) */
@@ -150,6 +168,9 @@ export type TileData = {
     /** 이 도엽에서 건너뛴 폴리곤 수(고리 3점 미만·예외) */
     forestSkipped: number
 }
+
+/** 지형 조각 하나(녹지로 나눈 도엽이면 분류 범위가 붙는다. TileData.terrain) */
+export type TerrainChunk = MeshChunk & { greenRanges?: GreenRange[] }
 
 export type TerrainTilesResponse =
     | {
@@ -295,8 +316,8 @@ const buildTile = async (t: QueryTile, q: Query, extra: boolean, gen: number): P
     const neighbors = q.tiles.filter((n) => extentsOverlap(n.bbox, neighborReach(t.bbox)))
     const ids5k = new Set(neighbors.map((n) => n.id5k))
     const sheets = q.sheets.filter((s) => ids5k.has(s.id5k)).map((s) => ({ id5k: s.id5k, path: s.path }))
-    // forest=0 이면 산림 인덱스를 읽지 않는다(보조 워커도 산림을 받지 않는다)
-    const keys = style.forest?.enabled === false ? DATA_LAYERS.filter((k) => k !== "forest") : DATA_LAYERS
+    // forest=0·green=0 이면 그 레이어 인덱스를 읽지 않는다(보조 워커도 받지 않는다)
+    const keys = DATA_LAYERS.filter((k) => !(k === "forest" && style.forest?.enabled === false) && !(k === "osmGreen" && style.osmGreen?.enabled === false))
     const layers = await batchLayerSheets(extra && walkBatch ? walkBatch : selectBatch, t, keys)
     if (gen !== generation) return null
     const jobId = nextJobId++

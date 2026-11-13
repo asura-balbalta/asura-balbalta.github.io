@@ -247,8 +247,10 @@ button.ui-status-pill:focus-visible,
     font-weight: 400;
 }
 
-/* 데이터 출처 한 줄(버튼). 상태 표시줄에서 유일하게 줄어드는 항목. 창이 좁으면 말줄임 */
+/* 데이터 출처 한 줄(버튼). 상태 표시줄에서 유일하게 줄어드는 항목. 창이 좁으면 말줄임. 안은 앞(.ui-attribution-head, 말줄임)과
+   뒤(.ui-attribution-tail, 녹지 OSM 표시. 줄어들지 않음)라 flex(2026-11-08 G6) */
 .ui-statusbar-attribution {
+    display: flex;
     flex: 0 1 auto;
     min-width: 0;
     overflow: hidden;
@@ -264,6 +266,16 @@ button.ui-status-pill:focus-visible,
 }
 button.ui-statusbar-attribution {
     cursor: pointer;
+}
+.ui-attribution-head {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.ui-attribution-tail {
+    flex: 0 0 auto;
+    white-space: nowrap;
 }
 button.ui-statusbar-attribution:hover {
     color: var(--ui-text);
@@ -1337,10 +1349,14 @@ button.ui-status-pill {
         overflow: hidden;
         cursor: pointer;
     }
-    .ui-attribution-mobile span {
+    .ui-attribution-mobile > span {
         display: block;
         overflow: hidden;
         text-overflow: ellipsis;
+    }
+    /* 둘째 줄: 녹지(OSM) 표시(줄어들지 않음) · 바탕 지도 저작권(말줄임). 안은 .ui-attribution-tail·head */
+    .ui-attribution-mobile > .ui-attribution-line {
+        display: flex;
     }
     /* 전체 지도의 저작권: 탭 막대 아래 왼쪽 9px 한 줄(화면 시안). 바탕 없이 글자만 */
     .ui-map-full .ui-map-attribution {

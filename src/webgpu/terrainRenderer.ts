@@ -1,7 +1,8 @@
 import type { ForestMask } from "../forestMask"
+import type { GreenRange } from "../osmGreenMesh"
 import { LayerId } from "../layers"
 import { MeshChunk, TinMesh } from "../terrainData"
-import { DEFAULT_WALK_LIGHTING, QualitySettings, ScenePalette, WalkLightingStrength } from "../scenePalette"
+import { DEFAULT_WALK_LIGHTING, GREEN_COLOR_COUNT, QualitySettings, ScenePalette, WalkLightingStrength } from "../scenePalette"
 import { hexToRgb, STOP_COUNT, stopsToUniform } from "../terrainTheme"
 import { createAoPasses } from "./ao"
 import { createSkyPass, sunDirection } from "./sky"
@@ -53,6 +54,8 @@ const STEP_NORMAL_OFFSET = WATER_COLOR_OFFSET + 16 // vec4f: 계단형 매끈한
 const FOREST_STYLE_SIZE = 16 * 5 + 16
 /** 도엽 격자 uniform(group 1 binding 1): (x0, y0, 픽셀 크기, 0) f32 + (폭, 높이, 0, 0) u32. shaders.ts ForestTile */
 const FOREST_TILE_SIZE = 32
+/** 녹지 색 uniform(group 1 binding 0) 한 칸: 분류 하나의 vec4f(rgb + 섞는 비율). shaders.ts greenWgsl 의 GreenStyle. 칸은 오프셋 정렬 단위마다 */
+const GREEN_STYLE_SIZE = 16
 const UNIFORM_SIZE = STEP_NORMAL_OFFSET + 16 // viewProj(0~64) + zRange(64~72) + eye(80~92) + stops + buildingColor + lightViewProj + lighting + fogColor + hemi + lightViewProjNear + sky + highlightColor + roadColor + waterColor + stepNormal
 /**
  * 도로 파이프라인의 깊이 바이어스(상수·기울기 배수). 도로는 지형과 같은 평면에 띄움 0.1 m 로 놓이는데 아주 멀리서 비스듬히 보면 그 차이가
@@ -180,12 +183,20 @@ export type RenderDebug = {
     stepDim?: number
     /** false 면 산림을 받지도 칠하지도 않는다(forest=0. 지형은 산림 없는 원래 셰이더로 그려 전과 비트까지 같다) */
     forest?: boolean
+    /** false 면 녹지(OSM)를 받지도 지형을 나누지도 않는다(green=0. 지형 출력이 녹지 전과 바이트까지 같다. 도엽 스타일 osmGreen.enabled) */
+    green?: boolean
     /** 산림 마스크 픽셀 크기(m, 1 또는 2. forestres=). 없으면 forestMask FOREST_RES_M. 범위 확정 때만 적용 */
     forestRes?: number
     /** false 면 계단형 벽(수직면)은 산림 색을 칠하지 않는다(forestwalls=0) */
     forestWalls?: boolean
     /** 산림 색("#RRGGBB" 하나면 임상 전부, 다섯이면 임상 0 ~ 4 순. forestcolor=). 없으면 색상표 forestColors */
     forestColor?: string[]
+    /** 녹지 색("#RRGGBB" 하나면 분류 전부, 여섯이면 분류 1 ~ 6 순. greencolor=). 없으면 색상표 greenColors */
+    greenColor?: string[]
+    /** 녹지 색을 섞는 비율(0 ~ 1. greenalpha=). 없으면 색상표 greenAlpha */
+    greenAlpha?: number
+    /** 녹지 색으로 그릴 분류 코드(1 ~ 6, greenclass=). 나머지 분류는 지형 색. 없으면 전부 */
+    greenClass?: number[]
     /** false 면 먼 거리 계단 부드럽게를 끈다(smoothfar=0. 표시: stepFade·stepNormal 끔, 생성: 계단형 매끈한 법선 안 만듦). 없으면 품질 설정 smoothFar */
     smoothFar?: boolean
     /**
@@ -515,7 +526,15 @@ const createTerrainDrawingPassAndUpdaters = (
     const createWaterSmoothPipeline = () =>
         createPipelineSet("water smooth", createWaterSmoothShader(), [float32x3Layout(0), float32x3Layout(1)], { depthBias: currentRoadsBias, transparent: true })
     const pipelines: Record<
-        TerrainMode | "steppedSmooth" | "forestTin" | "forestStepped" | "forestSteppedSmooth" | "buildings" | "buildingHighlight" | "roads" | "roadsSmooth" | "roadsStepped" | "water" | "waterSmooth",
+        | TerrainMode
+        | "steppedSmooth"
+        | "forestTin"
+        | "forestStepped"
+        | "forestSteppedSmooth"
+        | "greenTin"
+        | "greenStepped"
+        | "greenSteppedSmooth"
+        | "buildings" | "buildingHighlight" | "roads" | "roadsSmooth" | "roadsStepped" | "water" | "waterSmooth",
         ReturnType<typeof createPipelineSet>
     > = {
         tin: createPipelineSet("terrain tin", createSmoothTerrainShader(), [
@@ -528,9 +547,13 @@ const createTerrainDrawingPassAndUpdaters = (
         // 매끈한 법선을 실은 계단형 조각(terrainSteps normals): 멀리서 그 법선으로 조명한다
         steppedSmooth: createPipelineSet("terrain stepped smooth", createSteppedTerrainShader(true), [float32x3Layout(0), float32x3Layout(1)]),
         // 산림 마스크가 있는 도엽의 지형(셰이더에 forestWgsl 이 붙은 변형. group 1 은 도엽마다 forestGroupFor). 산림이 없거나 꺼지면 위의 원래 것
-        forestTin: createPipelineSet("terrain tin forest", createSmoothTerrainShader(true), [float32x3Layout(0), float32x3Layout(1)]),
-        forestStepped: createPipelineSet("terrain stepped forest", createSteppedTerrainShader(false, true), [float32x3Layout(0)]),
-        forestSteppedSmooth: createPipelineSet("terrain stepped smooth forest", createSteppedTerrainShader(true, true), [float32x3Layout(0), float32x3Layout(1)]),
+        forestTin: createPipelineSet("terrain tin forest", createSmoothTerrainShader("forest"), [float32x3Layout(0), float32x3Layout(1)]),
+        forestStepped: createPipelineSet("terrain stepped forest", createSteppedTerrainShader(false, "forest"), [float32x3Layout(0)]),
+        forestSteppedSmooth: createPipelineSet("terrain stepped smooth forest", createSteppedTerrainShader(true, "forest"), [float32x3Layout(0), float32x3Layout(1)]),
+        // 녹지로 나눈 지형 조각의 분류 1 ~ 6 범위(셰이더에 greenWgsl 이 붙은 변형. group 1 은 분류마다 greenGroupFor). 분류 0 범위·녹지 없는 도엽은 위의 것
+        greenTin: createPipelineSet("terrain tin green", createSmoothTerrainShader("green"), [float32x3Layout(0), float32x3Layout(1)]),
+        greenStepped: createPipelineSet("terrain stepped green", createSteppedTerrainShader(false, "green"), [float32x3Layout(0)]),
+        greenSteppedSmooth: createPipelineSet("terrain stepped smooth green", createSteppedTerrainShader(true, "green"), [float32x3Layout(0), float32x3Layout(1)]),
         buildings: createPipelineSet("buildings", createBuildingShader(), [float32x3Layout(0)]),
         buildingHighlight: createPipelineSet("building highlight", createBuildingHighlightShader(), [float32x3Layout(0)], { overlay: true }),
         // 깊이 바이어스는 파이프라인 상태라 디버그 값이 바뀌면 다시 만든다(debugUpdater)
@@ -548,8 +571,10 @@ const createTerrainDrawingPassAndUpdaters = (
         indexCount: number
         /** 원본 메쉬 인덱스 배열에서 이 조각이 시작하는 자리(조각이 삼각형 순서대로 나뉘므로). 건물 강조가 삼각형 범위를 조각 안 자리로 옮기는 데 쓴다 */
         indexStart: number
+        /** 녹지로 나눈 지형 조각의 분류 범위(조각 안 삼각형 단위, 분류 오름차순, 빈틈없이 덮음). 없으면 나누지 않은 조각. CPU 에만 둔다(GPU 메모리 0) */
+        greenRanges?: GreenRange[]
     }
-    const layerVisible: Record<LayerId, boolean> = { terrain: true, buildings: true, roads: true, water: true, forest: true }
+    const layerVisible: Record<LayerId, boolean> = { terrain: true, buildings: true, roads: true, water: true, forest: true, osmGreen: true }
 
     /** 산림 색 uniform(모든 도엽 공용). paletteUpdater 가 쓴다 */
     const forestStyleBuffer = device.createBuffer({ label: "forest style", size: FOREST_STYLE_SIZE, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST })
@@ -577,6 +602,35 @@ const createTerrainDrawingPassAndUpdaters = (
         f.texture.destroy()
         f.tileBuffer.destroy()
     }
+    /**
+     * 녹지 색 uniform(모든 도엽 공용, paletteUpdater 가 쓴다): 분류 1 ~ 6 의 칸이 오프셋 정렬 단위(보통 256 B)마다. 바인드그룹은 파이프라인 × 분류마다
+     * 한 칸을 가리킨다(layout "auto" 는 동적 오프셋이 없어서). 분류를 셰이더가 고르지 않으므로 분류 범위마다 drawIndexed 를 나눈다
+     */
+    const greenSlot = Math.max(GREEN_STYLE_SIZE, device.limits.minUniformBufferOffsetAlignment)
+    const greenStyleBuffer = device.createBuffer({ label: "green style", size: greenSlot * GREEN_COLOR_COUNT, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST })
+    const greenGroups = new Map<GPURenderPipeline, GPUBindGroup[]>()
+    /** 녹지 변형 파이프라인의 분류 cls(1 ~ 6) 바인드그룹(처음 쓸 때 만든다) */
+    const greenGroupFor = (set: ReturnType<typeof createPipelineSet>, cls: number) => {
+        let groups = greenGroups.get(set.pipeline)
+        if (!groups) {
+            groups = Array.from({ length: GREEN_COLOR_COUNT }, (_, i) =>
+                device.createBindGroup({
+                    label: `bind group (green class ${i + 1})`,
+                    layout: set.pipeline.getBindGroupLayout(1),
+                    entries: [{ binding: 0, resource: { buffer: greenStyleBuffer, offset: i * greenSlot, size: GREEN_STYLE_SIZE } }],
+                }),
+            )
+            greenGroups.set(set.pipeline, groups)
+        }
+        return groups[cls - 1]
+    }
+    /** 도엽 지형 조각들에 든 녹지 분류(1 ~ 6, 오름차순). 나누지 않은 도엽은 빈 배열 */
+    const greenClassesOf = (chunks: GpuChunk[]) => {
+        const seen = new Set<number>()
+        for (const c of chunks) for (const r of c.greenRanges ?? []) if (r.cls >= 1 && r.cls <= GREEN_COLOR_COUNT && r.count > 0) seen.add(r.cls)
+        return [...seen].sort((a, b) => a - b)
+    }
+
     const forestGroupFor = (f: GpuForest, set: ReturnType<typeof createPipelineSet>) => {
         let g = f.groups.get(set.pipeline)
         if (!g) {
@@ -613,15 +667,17 @@ const createTerrainDrawingPassAndUpdaters = (
     }
 
     /** 조각을 GPU 버퍼로 올린 GpuChunk 를 만든다 */
-    const uploadChunk = (label: string, chunk: MeshChunk, indexStart = 0): GpuChunk => {
+    const uploadChunk = (label: string, chunk: MeshChunk & { greenRanges?: GreenRange[] }, indexStart = 0): GpuChunk => {
         residentBytes += chunk.positions.byteLength + (chunk.normals?.byteLength ?? 0) + chunk.indices.byteLength
-        return {
+        const gpu: GpuChunk = {
             vertexBuffer: uploadBuffer(`${label} vertices`, GPUBufferUsage.VERTEX, chunk.positions),
             normalBuffer: chunk.normals ? uploadBuffer(`${label} normals`, GPUBufferUsage.VERTEX, chunk.normals) : null,
             indexBuffer: uploadBuffer(`${label} indices`, GPUBufferUsage.INDEX, chunk.indices),
             indexCount: chunk.indices.length,
             indexStart,
         }
+        if (chunk.greenRanges) gpu.greenRanges = chunk.greenRanges
+        return gpu
     }
     /** GPU 상주 도엽 수와 버퍼 바이트 합 */
     const residentStats = () => ({ tiles: streamTiles.size, bytes: residentBytes })
@@ -793,6 +849,15 @@ const createTerrainDrawingPassAndUpdaters = (
         })
         forestStyle[20] = getDebug().forestWalls === false ? 0 : 1
         device.queue.writeBuffer(forestStyleBuffer, 0, forestStyle)
+        // 녹지 색(분류 1 ~ 6) + 섞는 비율: 디버그 greencolor=(하나면 전부, 여섯이면 분류 순)·greenalpha= 가 있으면 그 값, 없으면 색상표
+        const debugGreen = (getDebug().greenColor ?? []).filter((h) => /^#[0-9a-fA-F]{6}$/.test(h))
+        const greenAlpha = Math.min(1, Math.max(0, getDebug().greenAlpha ?? palette.greenAlpha))
+        const greenStyle = new Float32Array((greenSlot * GREEN_COLOR_COUNT) / 4)
+        palette.greenColors.slice(0, GREEN_COLOR_COUNT).forEach((hex, i) => {
+            const c = hexToRgb(debugGreen.length >= GREEN_COLOR_COUNT ? debugGreen[i] : debugGreen.length > 0 ? debugGreen[0] : hex)
+            greenStyle.set([c.r, c.g, c.b, greenAlpha], (i * greenSlot) / 4)
+        })
+        device.queue.writeBuffer(greenStyleBuffer, 0, greenStyle)
         sunDir = sunDirection(getDebug().sun ?? palette.sunAltitude, [LIGHT_DIR[0], LIGHT_DIR[1]])
         writeSky()
     }
@@ -809,7 +874,17 @@ const createTerrainDrawingPassAndUpdaters = (
     type TileBounds = { min: [number, number]; max: [number, number] }
     const streamTiles = new Map<
         string,
-        { terrain: GpuChunk[]; buildings: GpuChunk[]; roads: GpuChunk[]; water: GpuChunk[]; forest: GpuForest | null; mode: TerrainMode; bounds: TileBounds | null }
+        {
+            terrain: GpuChunk[]
+            buildings: GpuChunk[]
+            roads: GpuChunk[]
+            water: GpuChunk[]
+            forest: GpuForest | null
+            /** 지형 조각에 든 녹지 분류(1 ~ 6). 비면 녹지로 나누지 않은 도엽(지금 경로 그대로) */
+            greenClasses: number[]
+            mode: TerrainMode
+            bounds: TileBounds | null
+        }
     >()
     /**
      * 거리 거르기 반경(m). 둘러보기 중에만 켜진다(cullRadiusUpdater). 카메라 xy 에서 도엽 xy 범위까지의 거리가 이보다 멀면
@@ -836,7 +911,8 @@ const createTerrainDrawingPassAndUpdaters = (
     const streamTileUpdater = (
         id: string,
         tile: {
-            terrain: MeshChunk[]
+            /** 지형 조각. 녹지로 나눈 도엽이면 조각마다 greenRanges(분류 범위)가 붙어 그 범위를 분류별로 나눠 그린다 */
+            terrain: (MeshChunk & { greenRanges?: GreenRange[] })[]
             buildings: TinMesh | null
             roads?: MeshChunk[]
             water?: MeshChunk[]
@@ -870,7 +946,7 @@ const createTerrainDrawingPassAndUpdaters = (
         const roads = (tile.roads ?? []).filter((c) => c.indices.length > 0).map((c) => uploadChunk(`tile ${id} roads`, c))
         const water = (tile.water ?? []).filter((c) => c.indices.length > 0).map((c) => uploadChunk(`tile ${id} water`, c))
         const forest = tile.forest ? uploadForest(id, tile.forest) : null
-        streamTiles.set(id, { terrain, buildings, roads, water, forest, mode: tile.mode, bounds: tile.bounds ?? null })
+        streamTiles.set(id, { terrain, buildings, roads, water, forest, greenClasses: greenClassesOf(terrain), mode: tile.mode, bounds: tile.bounds ?? null })
     }
     /**
      * 표고 색 범위(uniform offset 64)를 쓴다. 도엽이 하나씩 올라오며 범위가 넓어질 때마다 다시 쓴다
@@ -908,10 +984,17 @@ const createTerrainDrawingPassAndUpdaters = (
      *
      * @param radius 거리 거르기 반경(m). null 이면 모두 그린다
      * @param withWater true 면 물 조각을 **맨 뒤에** 더한다(투명이라 불투명한 것 뒤에 그려야 한다. 그림자 pass 는 물을 빼 그림자를 드리우지 않게)
+     * @param splitGreen true 면 녹지로 나눈 지형 조각을 분류 범위별로 가른다(장면 pass). 그림자 pass 는 깊이만 그려 색이 없으므로 조각 통째로(전과 같게)
      */
-    const collectDraws = (radius: number | null, withWater = false) => {
-        /** group1: 산림 마스크 바인드그룹(산림 변형 파이프라인일 때만) */
-        const draws: { chunks: GpuChunk[]; set: ReturnType<typeof createPipelineSet>; group1?: GPUBindGroup }[] = []
+    const collectDraws = (radius: number | null, withWater = false, splitGreen = false) => {
+        /**
+         * group1: 산림 마스크 또는 녹지 분류 색 바인드그룹(변형 파이프라인일 때만). part: 있으면 조각의 녹지 분류 범위 중 part(분류)가 참인 것만
+         * 그린다(녹지 범위가 없는 조각은 분류 0 하나로 본다). 없으면 조각 통째로
+         */
+        const draws: { chunks: GpuChunk[]; set: ReturnType<typeof createPipelineSet>; group1?: GPUBindGroup; part?: (cls: number) => boolean }[] = []
+        /** 녹지 색으로 그릴 분류: 레이어가 보이고 장면 pass 일 때, 디버그 greenclass= 가 있으면 그 분류만 */
+        const greenClassFilter = getDebug().greenClass
+        const greenShown = (cls: number) => !greenClassFilter || greenClassFilter.includes(cls)
         const water: typeof draws = []
         const eye = radius !== null ? lastEye : null
         for (const t of streamTiles.values()) {
@@ -919,12 +1002,22 @@ const createTerrainDrawingPassAndUpdaters = (
             if (layerVisible.terrain && t.terrain.length > 0) {
                 const smoothStepped = t.mode === "stepped" && t.terrain.every((c) => c.normalBuffer)
                 // 산림: 레이어가 보이고 forest=0 이 아니고 이 도엽에 마스크가 있을 때만 산림 변형. 아니면 원래 파이프라인 그대로(출력이 전과 같다)
-                if (t.forest && layerVisible.forest && getDebug().forest !== false) {
-                    const set = smoothStepped ? pipelines.forestSteppedSmooth : t.mode === "stepped" ? pipelines.forestStepped : pipelines.forestTin
-                    draws.push({ chunks: t.terrain, set, group1: forestGroupFor(t.forest, set) })
+                const base: { set: ReturnType<typeof createPipelineSet>; group1?: GPUBindGroup } = (() => {
+                    if (t.forest && layerVisible.forest && getDebug().forest !== false) {
+                        const set = smoothStepped ? pipelines.forestSteppedSmooth : t.mode === "stepped" ? pipelines.forestStepped : pipelines.forestTin
+                        return { set, group1: forestGroupFor(t.forest, set) }
+                    }
+                    return { set: smoothStepped ? pipelines.steppedSmooth : pipelines[t.mode] }
+                })()
+                // 녹지: 나눈 도엽이고 레이어가 보이면 녹지 분류 범위는 녹지 변형으로(산림 색을 덮음 = 산림 변형을 쓰지 않음), 나머지는 위의 것.
+                // 나누지 않은 도엽·레이어 끔·그림자 pass 는 조각 통째로 위의 것(나누지 않은 도엽은 전과 같은 호출)
+                const shown = splitGreen && layerVisible.osmGreen ? t.greenClasses.filter(greenShown) : []
+                if (shown.length === 0) {
+                    draws.push({ chunks: t.terrain, ...base })
                 } else {
-                    const set = smoothStepped ? pipelines.steppedSmooth : pipelines[t.mode]
-                    draws.push({ chunks: t.terrain, set })
+                    draws.push({ chunks: t.terrain, ...base, part: (cls) => !shown.includes(cls) })
+                    const set = smoothStepped ? pipelines.greenSteppedSmooth : t.mode === "stepped" ? pipelines.greenStepped : pipelines.greenTin
+                    for (const cls of shown) draws.push({ chunks: t.terrain, set, group1: greenGroupFor(set, cls), part: (c) => c === cls })
                 }
             }
             if (layerVisible.buildings && t.buildings.length > 0) draws.push({ chunks: t.buildings, set: pipelines.buildings })
@@ -972,6 +1065,24 @@ const createTerrainDrawingPassAndUpdaters = (
     }
 
     /**
+     * 조각의 녹지 분류 범위 중 part(분류)가 참인 것을 이어 붙인 인덱스 구간 [firstIndex, indexCount, ...]. 범위가 없는 조각은 분류 0 하나
+     *
+     * @param c 지형 조각
+     * @param part 그릴 분류인지
+     */
+    const greenRuns = (c: GpuChunk, part: (cls: number) => boolean): number[] => {
+        if (!c.greenRanges) return part(0) ? [0, c.indexCount] : []
+        const runs: number[] = []
+        for (const r of c.greenRanges) {
+            if (r.count <= 0 || !part(r.cls)) continue
+            const n = runs.length
+            if (n > 0 && runs[n - 2] + runs[n - 1] === r.first * 3) runs[n - 1] += r.count * 3
+            else runs.push(r.first * 3, r.count * 3)
+        }
+        return runs
+    }
+
+    /**
      * 장면을 그리는 pass. 배경 pass 가 비운 색·깊이 버퍼를 load 해서 그 위에 그린다.
      * 보이는 레이어마다 파이프라인을 바꾸고(지형은 도엽이 들고 온 모드, 건물은 전용), 조각마다 버퍼를
      * 바꿔 가며 drawIndexed 한다(tin 모드에서만 법선 버퍼 바인딩). 그릴 조각이 없으면 아무것도 하지 않는다.
@@ -980,7 +1091,7 @@ const createTerrainDrawingPassAndUpdaters = (
      * @param target 그릴 색 텍스처 view(캔버스 또는 오프스크린 장면 텍스처)
      */
     const scenePass = (encoder: GPUCommandEncoder, target: GPUTextureView) => {
-        const draws = collectDraws(cullRadius, true)
+        const draws = collectDraws(cullRadius, true, true)
         if (draws.length === 0) return
 
         const pass = encoder.beginRenderPass({
@@ -997,15 +1108,19 @@ const createTerrainDrawingPassAndUpdaters = (
                 depthStoreOp: "store",
             },
         })
-        for (const { chunks, set, group1 } of draws) {
+        for (const { chunks, set, group1, part } of draws) {
             pass.setPipeline(set.pipeline)
             pass.setBindGroup(0, set.bindGroup)
             if (group1) pass.setBindGroup(1, group1)
             for (const c of chunks) {
+                // 분류 범위로 가른 그리기: part 가 참인 범위만, 이어진 범위는 한 번에(인덱스 버퍼 하나, firstIndex·indexCount)
+                const runs = part ? greenRuns(c, part) : null
+                if (runs && runs.length === 0) continue
                 pass.setVertexBuffer(0, c.vertexBuffer)
                 if (c.normalBuffer) pass.setVertexBuffer(1, c.normalBuffer)
                 pass.setIndexBuffer(c.indexBuffer, "uint32")
-                pass.drawIndexed(c.indexCount)
+                if (!runs) pass.drawIndexed(c.indexCount)
+                else for (let i = 0; i < runs.length; i += 2) pass.drawIndexed(runs[i + 1], 1, runs[i])
             }
         }
         // 건물 강조: 장면을 다 그린 뒤 그 건물의 삼각형 범위만 반투명으로 한 번 더(조각이 여럿이면 범위가 걸치는 조각마다 그 부분)

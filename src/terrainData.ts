@@ -193,7 +193,8 @@ export const jsonFetcher = (ns: string) => ({
 /** 행: LruCache.stats(). 고정 칸이 있는 캐시(result.*, D6 (b))는 개수·바이트·적중이 합계이고 pinned·pinnedBytes 가 고정 칸(max 는 LRU 쪽) */
 export type CacheTable = Record<string, LruStats & { pinned?: number; pinnedBytes?: number }>
 const TIERS = ["fixed", "index", "file", "result"]
-const LAYER_ORDER = ["terrain", "buildings", "roads", "water", "forest"]
+/** 레이어 이름공간 순서. 녹지는 서버 경로와 같은 이름공간 "osm_green"(LayerId "osmGreen" 과 섞지 않는다. 결과 층의 5K 전처리 행도 result.osm_green) */
+const LAYER_ORDER = ["terrain", "buildings", "roads", "water", "forest", "osm_green"]
 /** 표를 층 → 레이어 순으로(로그·보고가 늘 같은 순서) */
 export const sortCacheTable = (t: CacheTable): CacheTable => {
     const rank = (k: string) => {

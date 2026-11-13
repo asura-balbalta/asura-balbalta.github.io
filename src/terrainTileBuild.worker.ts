@@ -9,18 +9,20 @@ import { fetchRoads5k, loadRoadCodes, Roads5k, roadsInTile } from "./roadsData"
 import { buildRoadsMesh, ROAD_LIFT_M, roadDisplayChunks, RoadMesh } from "./roadsMesh"
 import { cloneRoadTable, ROAD_LINE_FLAG, RoadTable, roadTableBuffers } from "./roadTable"
 import { ClippedMesh, clipMeshToConvexPolygon } from "./terrainClip"
-import { CacheTable, cacheTableLine, dataCacheTable, fetchGunzip, heapBytes, MeshChunk, sheetsOf, sortCacheTable, TinMesh, XyBounds } from "./terrainData"
+import { CacheTable, cacheTableLine, dataCacheTable, fetchGunzip, heapBytes, Layer5k, MeshChunk, sheetsOf, sortCacheTable, TinMesh, XyBounds } from "./terrainData"
 import { emptyLiftFixStats } from "./terrainDrape"
 import { TTP_BASE } from "./terrainIndex"
 import { mergeTtpTilesForTile, parseTtp, TtpTile } from "./terrainPslg"
 import { buildSteppedMeshChunks, emptyStepMergeStats } from "./terrainSteps"
-import type { QueryTile, TileData, TileStyle } from "./terrainTiles.worker"
+import type { QueryTile, TerrainChunk, TileData, TileStyle } from "./terrainTiles.worker"
 import { fetchWater5k, loadWaterCodes, Water5k, waterOfTile } from "./waterData"
 import { buildWaterMesh, WATER_LIFT_M, waterDisplayChunks, WaterMesh } from "./waterMesh"
 import { cloneWaterTable, WaterTable, waterTableBuffers } from "./waterTable"
 import { fetchForest5k, Forest5k, forestInTile, loadForestCodes } from "./forestData"
 import { buildForestMask, ForestMask, forestResOf } from "./forestMask"
 import { cloneForestTable, ForestTable, forestTableBuffers } from "./forestTable"
+import { fetchGreen5k, greenInTile } from "./osmGreenData"
+import { GreenPrepared, GreenSplit, greenTerrainChunks, prepareGreen5k, splitTinByGreen } from "./osmGreenMesh"
 
 /**
  * 도엽 생성 보조 Worker(계획 문서 7절 L5-B, 2026-10-14). 조정자(terrainTiles.worker.ts)가 도엽 하나를 만들라고 보내면
@@ -40,6 +42,9 @@ import { cloneForestTable, ForestTable, forestTableBuffers } from "./forestTable
  *   (`fields = {} as LayerFields` 라 output 이 빠뜨려도 타입이 잡지 못한다) · 아래 transferablesOf 와 조정자 postTile 의 transfer 목록 ·
  *   DataLayerId·layerSheets.ts(조정자가 실을 5K 목록) · 하네스 tile-golden.mjs 의 parseLayerMs·digest. 메모리 보고·로그는 캐시 표라 따로 손댈 것 없다
  * - reset 은 select 때 원점에 묶인 캐시(TIN·레이어 결과)를 비운다. 파일 원점인 지형 파일(ttp)·레이어 데이터 층은 남긴다(D4)
+ * - 녹지(osm_green, G3 2026-11-08)는 레지스트리 밖이다: 지형 자체를 나누므로(b-2) 지형 조각을 만들기 **전에** 5K 자료가 필요하다. 받기는
+ *   데이터 층(fetchGreen5k), 5K 전처리(prepareGreen5k)는 "5K 경로 + 공통 원점" 키의 결과 층 greenPrepCache(5K 단위라 도엽 단위 레지스트리 결과
+ *   캐시와 따로). 지형 단계가 자른 TIN(+법선) → splitTinByGreen → greenTerrainChunks 로 지금의 지형 조각 자리를 채운다(아래 buildTile)
  */
 export type BuildJob = {
     type: "build"
@@ -125,6 +130,25 @@ const tinCache = createPinnedLruCache<string, CachedTin>({
     max: TIN_CACHE_MAX,
     bytesOf: (t) => t.positions.byteLength + t.indices.byteLength + (t.normals?.byteLength ?? 0),
 })
+
+// ---- 녹지 5K 전처리(osm_green G3, 2026-11-08. 계획서 2.3절) ----
+
+/**
+ * 녹지 5K 전처리 캐시 상한(5K 수, 보조 워커 하나당). 데이터 층(LAYER_5K_CACHE_MAX 32)과 같은 개수: 받은 5K 는 전처리도 남긴다.
+ * 5 km 둘러보기가 쓰는 5K 는 약 16장이다(계획서 3절)
+ */
+const GREEN_PREP_CACHE_MAX = 32
+const greenPrepBytes = (g: GreenPrepared) =>
+    g.pieceBox.byteLength + g.pieceCls.byteLength + g.classes.reduce((s, c) => s + c.xy.byteLength + c.ringStart.byteLength + c.polyStart.byteLength + c.ringBox.byteLength, 0)
+/**
+ * 녹지 5K 전처리(분류별 불리언) 결과: `${5K 경로}|${공통 원점}` → GreenPrepared(LruCache, Promise). 같은 5K 의 도엽 25장과 이웃 5K 도엽이 한 번
+ * 만든 것을 같이 쓴다(전처리는 5K 당 0.3–44 ms, 계획서 8.7절). 공통 원점에 묶여 reset 에 비운다. 읽기만 하고 transfer 하지 않으므로 사본을 두지 않는다.
+ * 캐시 표 행은 result.osm_green(이름공간 = 서버 경로)
+ */
+const greenPrepCache = createLruCache<string, Promise<GreenPrepared>>({ max: GREEN_PREP_CACHE_MAX, bytesOf: greenPrepBytes })
+/** 녹지 5K 하나의 전처리(받기는 데이터 층). 공통 원점으로 옮긴 조각 전부를 넘긴다 */
+const greenPrepared = (s: Layer5k, origin: [number, number]) =>
+    greenPrepCache.getOrLoad(`${s.path}|${origin}`, async () => prepareGreen5k(greenInTile([await fetchGreen5k(s)], origin, () => true), origin))
 
 /** 메모리 측정(2026-10-15): 이 워커가 만든 도엽 수. 캐시 바이트는 각 LruCache 가 넣을 때(Promise 는 끝났을 때) 잰 값의 합(C5 캐시 표) */
 let builtCount = 0
@@ -458,6 +482,7 @@ const LAYERS: RegisteredLayer[] = [
 /** select 때 원점에 묶인 캐시(자른 TIN·레이어 결과)를 비운다. 파일 원점인 지형 파일·레이어 데이터 층은 남긴다(D4) */
 const reset = () => {
     tinCache.clear()
+    greenPrepCache.clear()
     for (const layer of LAYERS) layer.clear()
 }
 
@@ -467,7 +492,7 @@ const reset = () => {
  * 바이트는 typed array(와 JSON 글자 수)만 센다(항목 객체·구멍 배열·이름 문자열은 빠져 실제 힙은 더 크다). 디버그 페이지 memory() 와 50개마다 찍는 로그가 부른다
  */
 const memoryStats = async () => {
-    const caches: CacheTable = { "file.terrain": ttpCache.stats(), "result.terrain": tinCache.stats(), ...dataCacheTable() }
+    const caches: CacheTable = { "file.terrain": ttpCache.stats(), "result.terrain": tinCache.stats(), "result.osm_green": greenPrepCache.stats(), ...dataCacheTable() }
     for (const l of LAYERS) caches[`result.${l.id}`] = l.stats()
     return { built: builtCount, heap: heapBytes(), caches: sortCacheTable(caches) }
 }
@@ -485,6 +510,25 @@ const buildTile = async (job: BuildJob): Promise<{ data: TileData; transfer: Tra
     const [ox, oy] = origin
     const pathById5k = new Map(job.sheets.map((s) => [s.id5k, s.path]))
     const ids5k = [...new Set(neighbors.map((n) => n.id5k))]
+    // 녹지(G3): green=0 이 아니면 걸친 5K 의 받기·전처리를 지형 파일과 같이 시작한다(지형 조각 전에 필요). 실패는 값으로 받아 나중에 경고만 한다
+    // (기다리기 전에 거부돼도 "Uncaught (in promise)" 가 따로 찍히지 않게). 목록이 비면(녹지 없는 5K) 받지 않고 지금 경로 그대로
+    const tg = performance.now()
+    let greenSheets: Layer5k[] = []
+    let greenFail: unknown = null
+    if (style.osmGreen?.enabled !== false) {
+        try {
+            greenSheets = sheetsOf(job.layers.osmGreen)
+        } catch (err) {
+            greenFail = err
+        }
+    }
+    const greenLoad =
+        greenSheets.length > 0
+            ? Promise.all(greenSheets.map((s) => greenPrepared(s, origin))).then(
+                  (prepared) => ({ prepared, wait: performance.now() - tg }),
+                  (err: unknown) => ({ prepared: null, wait: performance.now() - tg, err }),
+              )
+            : null
     const files = await Promise.all(ids5k.map((id) => fetchTtpCached(pathById5k.get(id)!)))
     const ttpById = new Map<string, TtpTile>()
     for (const f of files) for (const tile of f.tiles) ttpById.set(tile.mapId, tile)
@@ -496,7 +540,9 @@ const buildTile = async (job: BuildJob): Promise<{ data: TileData; transfer: Tra
     // 계단형도 먼 거리 조명용 매끈한 법선을 실을 때는 TIN 법선이 필요하다(terrainSteps normals, 2026-10-22). 설정에서 끄면(smoothNormals false)
     // 매끈한 면만 계산한다(C 이전과 같음. 도로·물 얹기는 mergedNormals 를 따로 부른다)
     const smoothStepped = style.smoothNormals !== false
-    const needNormals = style.mode === "tin" || smoothStepped
+    // 녹지로 나누려면 법선이 필요하다(새 정점 법선을 원래 삼각형에서 보간. 계획서 8.6절 4). 걸친 녹지 5K 가 있으면 계단형 smoothNormals 끔에도 계산한다
+    // (조각에는 싣지 않으므로 계단형 출력은 그대로)
+    const needNormals = style.mode === "tin" || smoothStepped || greenLoad !== null
     const band = style.band ?? NEIGHBOR_BAND_M
     /** 이웃을 합친 메쉬(띠 범위만, 외접원 검사로 넓힘). 캐시가 맞으면 만들지 않는다(건물 바닥 높이에 필요하면 그때 만든다) */
     let merged: TinMesh | null = null
@@ -532,8 +578,34 @@ const buildTile = async (job: BuildJob): Promise<{ data: TileData; transfer: Tra
         tinCache.set(tinKey, { positions: tin.positions.slice(), indices: tin.indices.slice(), normals: tin.normals?.slice() }, !extra)
     }
     const t1 = performance.now()
-    let terrain: MeshChunk[]
-    if (style.mode === "stepped" && style.step > 0) {
+    // 녹지 나누기(G3, 계획서 2.3절): "합침 → 법선 → 1K 자르기" 뒤의 TIN 을 걸친 5K 들의 전처리로 나눈다. tinCache 는 나누기 전 TIN 그대로다.
+    // 녹지가 없거나(splitTinByGreen 이 입력 객체를 그대로 돌려줌) 실패·green=0 이면 아래 지금의 지형 조각 경로를 그대로 탄다(바이트까지 같다)
+    let split: GreenSplit | null = null
+    let greenNote = ""
+    if (greenFail) console.warn(`도엽 ${t.name} 녹지 실패:`, greenFail)
+    if (greenLoad) {
+        const g = await greenLoad
+        if (!g.prepared) console.warn(`도엽 ${t.name} 녹지 실패:`, g.err)
+        else {
+            const tw = performance.now()
+            try {
+                const s = splitTinByGreen(tin as ClippedMesh & { normals: Float32Array }, g.prepared, poly)
+                if (s.tin !== tin) split = s
+                const st = s.stats
+                const prepMs = g.prepared.reduce((a, p) => a + p.stats.ms, 0)
+                // 로그 조각 ", 녹지 5K n(전처리 합 Xms) 받기 Wms 분할 a→b 삼각형(나눔 k) Yms". 쉼표를 넣지 않는다(조각 구분자)
+                greenNote = `녹지 5K ${g.prepared.length}(전처리 합 ${prepMs.toFixed(1)}ms) 받기 ${Math.round(g.wait)}ms 분할 ${split ? `${st.trianglesIn}→${st.trianglesOut}(나눔 ${st.splitTriangles}${st.fallback ? ` 부채꼴 ${st.fallback}` : ""}${st.dropped ? ` 버림 ${st.dropped}` : ""})` : "없음"} ${(performance.now() - tw).toFixed(1)}ms`
+            } catch (err) {
+                console.warn(`도엽 ${t.name} 녹지 나누기 실패:`, err)
+            }
+        }
+    }
+    const t1b = performance.now()
+    let terrain: TerrainChunk[]
+    if (split) {
+        const stepped = style.mode === "stepped" && style.step > 0
+        terrain = [...greenTerrainChunks(split, { stepped, step: style.step, maxBytes, smoothNormals: smoothStepped })].map(({ ranges, ...ch }) => ({ ...ch, greenRanges: ranges }))
+    } else if (style.mode === "stepped" && style.step > 0) {
         terrain = [...buildSteppedMeshChunks(tin, style.step, maxBytes, undefined, { normals: smoothStepped ? tin.normals : undefined })]
     } else {
         terrain = [{ positions: tin.positions, indices: tin.indices, normals: tin.normals! }]
@@ -567,13 +639,17 @@ const buildTile = async (job: BuildJob): Promise<{ data: TileData; transfer: Tra
         Object.assign(fields, r.fields)
         layerLogs.push(r.log)
     }
+    // 녹지 조각은 맨 뒤(하네스 parseLayerMs 의 산림 정규식은 ", " 앞에서 끊는다). 모드 ms 는 나누기를 뺀 조각 만들기 시간
+    if (greenNote) layerLogs.push(greenNote)
     console.log(
-        `도엽 ${t.name}${extra ? "(밖)" : ""}: ${fromCache ? "캐시" : `이웃 ${ttpTiles.length}개 ${mergeNote} 합침`} ${Math.round(t1 - t0)}ms, ${style.mode} ${Math.round(t2 - t1)}ms, 삼각형 ${tin.indices.length / 3}, ${layerLogs.join(", ")}`,
+        `도엽 ${t.name}${extra ? "(밖)" : ""}: ${fromCache ? "캐시" : `이웃 ${ttpTiles.length}개 ${mergeNote} 합침`} ${Math.round(t1 - t0)}ms, ${style.mode} ${Math.round(t2 - t1b)}ms, 삼각형 ${tin.indices.length / 3}, ${layerLogs.join(", ")}`,
     )
 
     builtCount++
     if (builtCount % 50 === 0) void memoryStats().then(logMemory)
-    const xy = positionsBounds(tin.positions)
+    // 내보내기·발 높이는 나눈 TIN(표고 그대로, 계획서 8.7절 2)과 그 분류 범위를 쓴다
+    const outTin: TileData["tin"] = split ? { origin, positions: split.tin.positions, indices: split.tin.indices, greenRanges: split.ranges } : { origin, positions: tin.positions, indices: tin.indices }
+    const xy = positionsBounds(outTin.positions)
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
     for (const [x, y] of poly) {
         if (x < minX) minX = x
@@ -588,7 +664,7 @@ const buildTile = async (job: BuildJob): Promise<{ data: TileData; transfer: Tra
         mode: style.mode,
         bounds: { min: [minX, minY, xy.min[2]], max: [maxX, maxY, xy.max[2]] },
         terrain,
-        tin: { origin, positions: tin.positions, indices: tin.indices },
+        tin: outTin,
         // 레이어 필드(등록된 레이어의 output. 메인 사본의 도로·물에는 법선이 없다)
         buildings: fields.buildings,
         buildingTable: fields.buildingTable,
@@ -604,6 +680,11 @@ const buildTile = async (job: BuildJob): Promise<{ data: TileData; transfer: Tra
         forestMask: fields.forestMask,
         forestTable: fields.forestTable,
         forestSkipped: fields.forestSkipped,
+    }
+    // 나눈 도엽만 필드를 둔다(나누지 않은 도엽은 전과 같은 객체 모양. 시간 ms 는 로그에만: 골든 해시가 실행마다 흔들리지 않게)
+    if (split) {
+        const { ms: _ms, ...stats } = split.stats
+        data.greenStats = stats
     }
     return { data, transfer: transferablesOf(data) }
 }

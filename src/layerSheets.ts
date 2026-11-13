@@ -3,6 +3,7 @@ import proj4 from "proj4"
 
 import { buildingsSheetsOf } from "./buildingsData"
 import { forestSheetsOf } from "./forestData"
+import { greenSheetsOf } from "./osmGreenData"
 import { roadsSheetsOf } from "./roadsData"
 import type { JsonMemo, Layer5k, LayerSheets } from "./terrainData"
 import { getTtpSheetsInBbox } from "./terrainIndex"
@@ -16,9 +17,9 @@ import { waterSheetsOf } from "./waterData"
  * 5K 를 고르고(getTtpSheetsInBbox 의 sheets 순서), 레이어 50K 인덱스에서 비지 않은 것만 그 순서로 남긴다. C2 전에는 5K 목록을 그 5K 의 첫 도엽
  * bbox 로 채워 결과가 도엽 순서에 따라 달랐다(계획서 1.1-3)
  */
-export type DataLayerId = "buildings" | "roads" | "water" | "forest"
-export const DATA_LAYERS: DataLayerId[] = ["buildings", "roads", "water", "forest"]
-/** 도엽 하나의 레이어별 5K 목록. 계산하지 않은 레이어(산림 끔)는 빠진다 */
+export type DataLayerId = "buildings" | "roads" | "water" | "forest" | "osmGreen"
+export const DATA_LAYERS: DataLayerId[] = ["buildings", "roads", "water", "forest", "osmGreen"]
+/** 도엽 하나의 레이어별 5K 목록. 계산하지 않은 레이어(산림 끔·녹지 끔)는 빠진다 */
 export type TileLayerSheets = Partial<Record<DataLayerId, LayerSheets>>
 
 const SHEETS_OF: Record<DataLayerId, (sheets: { id5k: string }[], memo?: JsonMemo) => Promise<Layer5k[]>> = {
@@ -26,6 +27,7 @@ const SHEETS_OF: Record<DataLayerId, (sheets: { id5k: string }[], memo?: JsonMem
     roads: roadsSheetsOf,
     water: waterSheetsOf,
     forest: forestSheetsOf,
+    osmGreen: greenSheetsOf,
 }
 
 /** 5179 m 좌표를 3857 로(보조 워커가 C2 전 loadX 에 넘기던 bbox 와 같은 계산) */

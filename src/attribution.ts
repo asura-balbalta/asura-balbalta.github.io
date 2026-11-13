@@ -2,10 +2,12 @@
  * 공공데이터 출처 표시(2026-10-16, 데이터 서버 → fb_web 안내문. docs/design-code-plan.md 의 출처 표시 절).
  *
  * 서빙 중인 레이어의 원자료는 모두 "출처만 표시하면 상업 이용·가공 가능" 조건이라 웹이 할 일은 둘이다:
- * 1. 지도 화면 구석에 한 줄(ATTRIBUTION_SHORT)을 항상 표시(데스크톱 상태 표시줄, 모바일 탭 막대 아래).
+ * 1. 지도 화면 구석에 한 줄(ATTRIBUTION_SHORT)을 항상 표시(데스크톱 상태 표시줄, 모바일 탭 막대 아래). 녹지(OSM)가 보이면 그 뒤에 서버
+ *    인덱스의 attribution.short 를 덧붙인다(layerShort, docs/osm-green-layer-plan.md G6·G7. ODbL 은 지도에 표시가 조건).
  * 2. 출처 창·페이지(#/attribution)에 자료별 전체 표시문. 문구는 서버 인덱스의 `attribution` 을 받아 쓰고, 못 받으면
  *    여기 적힌 대체문(FALLBACK_SOURCES)을 쓴다. 기준일(asof)·가공 내용이 바뀌면 서버가 인덱스만 다시 내면 된다.
- * 3. 내려받기 파일(SKP·3DM·GLB)에도 같은 한 줄과 페이지 주소를 메타데이터로 남긴다(attributionFileText).
+ * 3. 내려받기 파일(SKP·3DM·GLB)에도 같은 한 줄과 페이지 주소를 메타데이터로 남긴다(attributionFileText). 녹지(OSM)를 담으면 그 줄을
+ *    서버 인덱스 문구로 덧붙인다(exportLayerCredit).
  *
  * 레이어 패널의 "출처보기" 는 그 레이어의 인덱스만 받아 그 자료만 보인다(fetchLayerAttribution). 통합 창은 전 레이어를 합친다(fetchAttribution).
  *
@@ -28,6 +30,7 @@ const LAYER_INDEX_URLS: Record<LayerId, string> = {
     roads: `${LAYERS_BASE}/roads/index/v1/sheets50k.json`,
     water: `${LAYERS_BASE}/water/index/v1/sheets50k.json`,
     forest: `${LAYERS_BASE}/forest/index/v1/sheets50k.json`,
+    osmGreen: `${LAYERS_BASE}/osm_green/index/v1/sheets50k.json`,
 }
 
 /** 버킷 루트의 사람이 읽는 전체 표시문(텍스트). 출처 창에서 링크한다 */
@@ -70,6 +73,9 @@ export type AttributionSource = {
  */
 export const AS_IS_LAYERS: ReadonlySet<LayerId> = new Set<LayerId>(["forest"])
 
+/** 공공데이터가 아닌 자료의 레이어(녹지 = OpenStreetMap). 출처 창 머리말이 "공공데이터" 대신 "자료" 로 적는다 */
+export const NON_PUBLIC_LAYERS: ReadonlySet<LayerId> = new Set<LayerId>(["osmGreen"])
+
 /** 서버 인덱스의 `attribution` 키(안내문 2.1절) */
 type IndexAttribution = {
     short?: string
@@ -85,6 +91,8 @@ export type LayerAttribution = {
     disclaimer: string
     /** 서버에서 받았으면 true, 대체문이면 false(창에 작게 표시) */
     fromServer: boolean
+    /** 서버 인덱스의 attribution.short(내보내기 완료 안내 등. 대체문이면 없음) */
+    short?: string
 }
 
 /** 통합 출처 창·페이지가 그리는 내용(전 레이어 + 레이어 밖) */
@@ -164,6 +172,18 @@ const FALLBACK_SOURCES: Record<LayerId, AttributionSource[]> = {
             processing: "5K 도엽 단위로 통째로 복사(폴리곤은 자르거나 고치지 않음)",
         },
     ],
+    // 녹지(OSM): 실제 문구(상태 표시줄 한 줄 포함)는 서버 인덱스(sheets50k.json attribution)에서 읽는다. 여기는 받기 전·받지 못할 때만
+    osmGreen: [
+        {
+            name: "녹지 (OpenStreetMap 녹지 태그 9종 → 분류 6종)",
+            provider: "© OpenStreetMap contributors",
+            portal: "Geofabrik 추출본",
+            url: "https://www.openstreetmap.org/copyright",
+            license: "ODbL 1.0",
+            license_url: "https://opendatacommons.org/licenses/odbl/1-0/",
+            processing: "분류 묶기, 5K 도엽 경계로 자름",
+        },
+    ],
 }
 
 /** 레이어 밖의 출처. 검색은 VWorld 통합 검색 API(vworld.ts), 바탕 지도는 basemap.ts 의 타일 출처 */
@@ -188,10 +208,63 @@ const EXTRA_SOURCES: AttributionSource[] = [
 export const attributionPageUrl = () => `${self.location.origin}/#/attribution`
 
 /**
- * 내려받기 파일 메타데이터에 적는 문구(여러 줄). GLB asset.copyright, 3DM 문서 문자열, SKP 그룹 속성에 같은 글을 넣는다
+ * 내려받기 파일 메타데이터에 적는 문구(여러 줄). GLB asset.copyright, 3DM 문서 문자열에 같은 글을 넣는다.
+ *
+ * @param greenLine 녹지(OSM)를 담을 때만 그 출처 한 줄(exportLayerCredit("osmGreen").fileLine). 주면 머리에 "녹지" 를 더하고 이 줄을 덧붙인다.
+ *   없으면 녹지 전과 같은 글이다
  */
-export const attributionFileText = () =>
-    `지형·건물·도로·물 데이터 출처: ${ATTRIBUTION_LINE}\n출처 전체: ${attributionPageUrl()} · ${ATTRIBUTION_TXT_URL}\n${ATTRIBUTION_DISCLAIMER}`
+export const attributionFileText = (greenLine?: string) =>
+    greenLine
+        ? `지형·건물·도로·물·녹지 데이터 출처: ${ATTRIBUTION_LINE}\n${greenLine}\n출처 전체: ${attributionPageUrl()} · ${ATTRIBUTION_TXT_URL}\n${ATTRIBUTION_DISCLAIMER}`
+        : `지형·건물·도로·물 데이터 출처: ${ATTRIBUTION_LINE}\n출처 전체: ${attributionPageUrl()} · ${ATTRIBUTION_TXT_URL}\n${ATTRIBUTION_DISCLAIMER}`
+
+/** 내보내기에 쓰는 레이어 하나의 출처(파일 메타·그룹 속성·완료 안내) */
+export type ExportLayerCredit = {
+    /** 한 줄 표시("© OpenStreetMap contributors (ODbL)"). 서버 인덱스 attribution.short, 없으면 대체문의 제공자 (라이선스) */
+    short: string
+    /** 제공자("© OpenStreetMap contributors". © 가 없으면 붙인다) */
+    provider: string
+    /** 출처 주소(source.url) */
+    url: string
+    /** 라이선스 이름(괄호 풀이는 뺌. "ODbL 1.0") */
+    license: string
+    /** 파일 메타 문구 한 줄("녹지: © OpenStreetMap contributors (ODbL 1.0, https://www.openstreetmap.org/copyright)") */
+    fileLine: string
+}
+
+/**
+ * 내보내기용 출처(docs/osm-green-layer-plan.md G5·G7). 문구는 그 레이어의 서버 인덱스(LAYER_INDEX_URLS)의 attribution.short·sources[0] 에서 읽고,
+ * 못 받으면 FALLBACK_SOURCES 의 첫 항목에서 만든다(하드코딩하지 않는다). fetchLayerAttribution 과 캐시를 같이 쓴다
+ *
+ * @param label 파일 메타 줄 머리("녹지")
+ */
+export const exportLayerCredit = async (id: LayerId, label: string): Promise<ExportLayerCredit> => {
+    const a = await fetchLayerAttribution(id)
+    return creditOf(a.sources[0] ?? FALLBACK_SOURCES[id][0], a.short, label)
+}
+
+/** 원자료 한 항목(+ 인덱스 short)으로 출처 묶음을 만든다. short 가 없으면 "제공자 (라이선스)" */
+const creditOf = (s: AttributionSource, short: string | undefined, label: string): ExportLayerCredit => {
+    const provider = s.provider.startsWith("©") ? s.provider : `© ${s.provider}`
+    const license = s.license.replace(/\s*\(.*\)\s*$/, "")
+    const url = s.url ?? s.license_url ?? ""
+    return {
+        short: short || `${provider} (${license})`,
+        provider,
+        url,
+        license,
+        fileLine: `${label}: ${provider} (${license}${url ? `, ${url}` : ""})`,
+    }
+}
+
+/**
+ * 레이어 하나의 지도 표시 한 줄(상태 표시줄·모바일 줄에 덧붙임). 서버 인덱스의 attribution.short(exportLayerCredit 과 같은 출처·캐시),
+ * 못 받으면 대체문에서 만든 것
+ */
+export const layerShort = async (id: LayerId): Promise<string> => (await exportLayerCredit(id, "")).short
+
+/** 받기 전에 쓰는 한 줄(대체문 FALLBACK_SOURCES 에서 만든 것. 받으면 layerShort 로 바꾼다) */
+export const fallbackLayerShort = (id: LayerId): string => creditOf(FALLBACK_SOURCES[id][0], undefined, "").short
 
 const layerCache = new Map<LayerId, Promise<LayerAttribution>>()
 
@@ -213,6 +286,7 @@ export const fetchLayerAttribution = (id: LayerId): Promise<LayerAttribution> =>
                 sources: a.sources.map((s) => ({ ...s, processing: s.processing ?? a.processing, ...label })),
                 disclaimer: a.disclaimer || ATTRIBUTION_DISCLAIMER,
                 fromServer: true,
+                ...(a.short ? { short: a.short } : {}),
             }
         })
     layerCache.set(id, p)

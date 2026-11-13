@@ -9,6 +9,15 @@ export type StatusMenu = {
     items: { label: string; selected?: boolean; onSelect: () => void }[]
 }
 
+/** 출처 글자: 앞(줄어듦·말줄임) + 뒤(" · " 와 함께 줄어들지 않음). 감싸는 요소는 flex(ui.css .ui-statusbar-attribution)라 flex 항목 앞뒤 공백이
+ *  접히므로 " · " 는 줄바꿈 없는 공백(\u00a0)으로 */
+export const AttributionText = ({ text, tail }: { text: string; tail?: string }) => (
+    <>
+        <span className="ui-attribution-head">{text}</span>
+        {tail && <span className="ui-attribution-tail">{`\u00a0·\u00a0${tail}`}</span>}
+    </>
+)
+
 /**
  * 화면 맨 아래 28px 상태 표시줄(얇은 유리). 왼쪽은 진행 상태와 수치, 오른쪽은 드롭다운과 저작권.
  * 진행 중인 작업이 없으면 왼쪽은 수치만 보인다. 모양은 ui.css(.ui-statusbar).
@@ -18,6 +27,8 @@ export type StatusMenu = {
  * @param props.stats 수치 항목("범위 2.4 × 2.4 km" 같은 완성된 문구)
  * @param props.menus 오른쪽 드롭다운들
  * @param props.attribution 데이터 출처 한 줄(attribution.ts ATTRIBUTION_SHORT). 바탕 지도 저작권은 MapFrame 안에 따로 있다
+ * @param props.attributionTail 출처 뒤에 덧붙이는 한 줄(녹지가 보일 때 "© OpenStreetMap contributors (ODbL)"). 줄어들지 않고, 좁으면 앞의
+ *   attribution 이 대신 말줄임된다(ODbL 표시가 잘리지 않게. docs/osm-green-layer-plan.md G6)
  * @param props.onAttribution 출처 글자를 눌렀을 때(출처 창 열기). 있으면 글자가 버튼이 된다
  * @param props.children 수치 뒤에 둘 추가 항목("3D로 돌아가기" 같은 작은 버튼)
  */
@@ -27,6 +38,7 @@ export const StatusBar = ({
     stats,
     menus,
     attribution,
+    attributionTail,
     onAttribution,
     children,
 }: {
@@ -35,6 +47,7 @@ export const StatusBar = ({
     stats: string[]
     menus: StatusMenu[]
     attribution?: string
+    attributionTail?: string
     onAttribution?: () => void
     children?: ReactNode
 }) => (
@@ -96,10 +109,12 @@ export const StatusBar = ({
         {attribution &&
             (onAttribution ? (
                 <button type="button" className="ui-statusbar-attribution" onClick={onAttribution} title="원본 데이터 출처 보기">
-                    {attribution}
+                    <AttributionText text={attribution} tail={attributionTail} />
                 </button>
             ) : (
-                <span className="ui-statusbar-attribution">{attribution}</span>
+                <span className="ui-statusbar-attribution">
+                    <AttributionText text={attribution} tail={attributionTail} />
+                </span>
             ))}
     </footer>
 )

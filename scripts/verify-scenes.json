@@ -1,5 +1,5 @@
 {
-    "about": "scripts/verify-select.mjs 의 캡처 장면(2026-10-31). docs/render-checks/2026-10-23-cache-before/run.sh 의 27조합 × 두 크기 = 54장을 옮긴 것. smoke = 언제나 찍는 기본 4조합, layers = 그 레이어를 고쳤을 때 찍는 장면(끈 조합 포함), 어느 쪽도 아니면 full 에서만. judge = 판정에 쓰는 pixelmatch 임계값(모두 같음이어야 통과): 둘러보기는 0.1·0.01 모두 0 이 기대값, 궤도 보기(walk=0)는 같은 코드에서도 겹친 면 순서로 0.08 % 까지 달라 0.1 로만, 산림 장면은 0.01 도(기본 0.1 은 옅은 산림 색을 같은 색으로 본다). 근거는 docs/cache-refactor-plan.md C6·V2, VERIFY.md 6절. 장면을 바꾸면 기준을 새로 찍는다(npm run verify -- --refresh-baseline). 둘러보기 장면은 walkradius=5000 으로 고정한다(2026-11-07 보이는 거리 기본값이 설정 3000 으로 바뀌어도 기준이 그대로 비교되도록. 계획서 22절)",
+    "about": "scripts/verify-select.mjs 의 캡처 장면(2026-10-31). docs/render-checks/2026-10-23-cache-before/run.sh 의 27조합 × 두 크기 = 54장을 옮긴 것. smoke = 언제나 찍는 기본 4조합, layers = 그 레이어를 고쳤을 때 찍는 장면(끈 조합 포함), 어느 쪽도 아니면 full 에서만. judge = 판정에 쓰는 pixelmatch 임계값(모두 같음이어야 통과): 둘러보기는 0.1·0.01 모두 0 이 기대값, 궤도 보기(walk=0)는 같은 코드에서도 겹친 면 순서로 0.08 % 까지 달라 0.1 로만, 산림·녹지 장면은 0.01 도(기본 0.1 은 옅은 산림·녹지 색을 같은 색으로 본다). 녹지(osm_green, 2026-11-08 G7): 남산(숲·공원 경계, namsan-walk·orbit 에 태그)과 여의도(공원·한강변 초지, yeouido-walk 은 hangang-walk 가 수면 아래라 새로 둠)를 green=0 끈 조합과 함께 본다. 기존 장면 id 는 PNG 이름과 이어져 바꾸지 않는다. 근거는 docs/cache-refactor-plan.md C6·V2, VERIFY.md 6절. 장면을 바꾸면 기준을 새로 찍는다(npm run verify -- --refresh-baseline). 둘러보기 장면은 walkradius=5000 으로 고정한다(2026-11-07 보이는 거리 기본값이 설정 3000 으로 바뀌어도 기준이 그대로 비교되도록. 계획서 22절)",
     "sizes": ["878x946", "1024x768"],
     "mask": ["0,0,400,200"],
     "maxDiffRatio": 0.001,
@@ -25,8 +25,11 @@
         { "id": "soyang-walk-water0", "params": "$SOYANG&yaw=90&pitch=-15&water=0&walkradius=5000", "layers": ["water"], "off": "water", "judge": [0.1, 0.01] },
         { "id": "namhae-walk", "params": "$NAMHAE&spawn=1110,460&yaw=110&pitch=-10&walkradius=5000", "layers": ["forest"], "judge": [0.1, 0.01], "note": "남해안 숲·농경지" },
         { "id": "namhae-walk-forest0", "params": "$NAMHAE&spawn=1110,460&yaw=110&pitch=-10&forest=0&walkradius=5000", "layers": ["forest"], "off": "forest", "judge": [0.1, 0.01] },
-        { "id": "namsan-walk", "params": "$NAMSAN&yaw=90&pitch=-15&walkradius=5000", "layers": ["forest"], "judge": [0.1, 0.01], "note": "남산 북사면" },
+        { "id": "namsan-walk", "params": "$NAMSAN&yaw=90&pitch=-15&walkradius=5000", "layers": ["forest", "osmGreen"], "judge": [0.1, 0.01], "note": "남산 북사면" },
         { "id": "namsan-walk-forest0", "params": "$NAMSAN&yaw=90&pitch=-15&forest=0&walkradius=5000", "layers": ["forest"], "off": "forest", "judge": [0.1, 0.01] },
+        { "id": "namsan-walk-green0", "params": "$NAMSAN&yaw=90&pitch=-15&green=0&walkradius=5000", "layers": ["osmGreen"], "off": "green", "judge": [0.1, 0.01], "note": "녹지 끔(osm_green G7). 녹지 전과 비트까지 같아야 하는 조합" },
+        { "id": "yeouido-walk", "params": "$HANGANG&yaw=270&pitch=-30&hover=80&walkradius=5000", "layers": ["osmGreen"], "judge": [0.1, 0.01], "note": "여의도공원·한강변 초지(osm_green G7). 가운데는 수면이라 80 m 공중 정지에서 남쪽 공원을 내려다본다" },
+        { "id": "yeouido-walk-green0", "params": "$HANGANG&yaw=270&pitch=-30&hover=80&green=0&walkradius=5000", "layers": ["osmGreen"], "off": "green", "judge": [0.1, 0.01] },
 
         { "id": "base-orbit", "params": "$BASE&walk=0", "layers": [], "judge": [0.1], "note": "카나리아: orbitz 없음(5K 하나라 결정론). full 에서만" },
         { "id": "base-orbit40", "params": "$BASE&walk=0&orbitz=40", "layers": ["roads", "buildings"], "judge": [0.1] },
@@ -39,7 +42,7 @@
         { "id": "soyang-orbit-water0", "params": "$SOYANG&walk=0&orbitz=250&water=0", "layers": ["water"], "off": "water", "judge": [0.1] },
         { "id": "namhae-orbit", "params": "$NAMHAE&walk=0&orbitz=50", "layers": ["forest"], "judge": [0.1, 0.01] },
         { "id": "namhae-orbit-forest0", "params": "$NAMHAE&walk=0&orbitz=50&forest=0", "layers": ["forest"], "off": "forest", "judge": [0.1, 0.01] },
-        { "id": "namsan-orbit", "params": "$NAMSAN&walk=0&orbitz=150", "layers": ["forest"], "judge": [0.1, 0.01] },
+        { "id": "namsan-orbit", "params": "$NAMSAN&walk=0&orbitz=150", "layers": ["forest", "osmGreen"], "judge": [0.1, 0.01] },
         { "id": "namsan-orbit-forest0", "params": "$NAMSAN&walk=0&orbitz=150&forest=0", "layers": ["forest"], "off": "forest", "judge": [0.1, 0.01] }
     ]
 }

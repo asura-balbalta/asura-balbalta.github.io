@@ -56,6 +56,12 @@ export const parseWalkParams = (params: URLSearchParams): { preset: AppPreset; r
         pitch: toRadians(number(params, "pitch")),
         hover: number(params, "hover"),
     }
+    // greenclass=5 · greenclass=1,5: 녹지 색으로 그릴 분류(1 ~ 6). 틀린 값이 하나라도 있으면 무시
+    const greenClassRaw = params.has("greenclass") ? params.get("greenclass")!.split(",").map((v) => Number(v.trim())) : undefined
+    const greenClass = greenClassRaw && greenClassRaw.length > 0 && greenClassRaw.every((v) => Number.isInteger(v) && v >= 1 && v <= 6) ? greenClassRaw : undefined
+    if (params.has("greenclass") && !greenClass) notes.push("greenclass 는 1 ~ 6 의 쉼표 목록(1 숲 · 2 관목 · 3 황야 · 4 초지 · 5 공원 · 6 과수원)")
+    const greenAlphaRaw = number(params, "greenalpha")
+    if (params.has("greenalpha") && (greenAlphaRaw === undefined || greenAlphaRaw < 0 || greenAlphaRaw > 1)) notes.push("greenalpha 는 0 ~ 1")
     const walkRadiusRaw = number(params, "walkradius")
     const residentRaw = number(params, "resident")
     const renderDebug: RenderDebug = {
@@ -97,6 +103,10 @@ export const parseWalkParams = (params: URLSearchParams): { preset: AppPreset; r
         forestRes: number(params, "forestres"),
         forestWalls: flag(params, "forestwalls"),
         forestColor: params.has("forestcolor") ? params.get("forestcolor")!.split(",").map((h) => `#${h.trim()}`) : undefined,
+        green: flag(params, "green"),
+        greenColor: params.has("greencolor") ? params.get("greencolor")!.split(",").map((h) => `#${h.trim()}`) : undefined,
+        greenAlpha: greenAlphaRaw !== undefined && greenAlphaRaw >= 0 && greenAlphaRaw <= 1 ? greenAlphaRaw : undefined,
+        greenClass,
         orbitZ: number(params, "orbitz"),
     }
     return { preset, renderDebug, notes }

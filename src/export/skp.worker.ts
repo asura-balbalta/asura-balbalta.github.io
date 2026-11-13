@@ -11,7 +11,8 @@ import { waterAttributes, waterGroups, waterLabel, WaterTable } from "../waterTa
 import type { TinMesh } from "../terrainData"
 import type { TerrainMode } from "../webgpu/terrainRenderer"
 import type { ExportMesh, LayerMeshes } from "./stlClient"
-import { buildTerrainSlabs, P2 } from "./terrainSlabs"
+import { GreenExport, GreenFaceRange, indicesOfRanges, rangesByClass, tagsOfRanges } from "./greenExport"
+import { buildTerrainSlabs, P2, SlabPolygon } from "./terrainSlabs"
 
 /**
  * 메인 → Worker: SKP 생성 요청. 레이어마다 넣을지 말지를 메인이 정해 메쉬를 주거나(null 이면 뺌) 만다.
@@ -23,6 +24,8 @@ export type SkpExportRequest = {
     mode: TerrainMode
     /** stepped 일 때 층 간격(m) */
     step: number
+    /** 녹지를 담을 때(지형 greenRanges 와 함께). 지형 그룹(매끈한 면) 또는 판 정의(계단형, 윗면만) 안에 분류별 하위 그룹·재질을 둔다 */
+    green?: GreenExport
 }
 
 /** Worker → 메인: 진행률(0 ~ 1), 완료(.skp 파일 바이트, transfer) */
@@ -47,7 +50,7 @@ const ATTRIBUTION_ATTRS = {
 }
 
 type Builder = ReturnType<typeof create>
-type FaceOptions = { softEdges?: boolean; smoothEdges?: boolean }
+type FaceOptions = { softEdges?: boolean; smoothEdges?: boolean; material?: number }
 type GroupBuilder = ReturnType<Builder["addGroup"]>
 
 /**
@@ -95,12 +98,23 @@ const addTriangles = (
  * openskp 는 중첩 그룹을 인라인으로 못 만들고, 정의(addComponentDefinition)를 먼저 만든 뒤 바깥 그룹 안에서
  * addGroupInstance 로 배치해야 한다. 그래서 판마다 정의 하나("terrain-<높이>m")를 만들고 "terrain" 그룹이 그것들을 담는다.
  *
+ * 녹지를 담으면(green, G12) 윗면을 판 정의 한 장 대신 terrainSlabs 의 tops 조각으로 나눈다: 녹지 아님(분류 0)과 위 판에 덮이는 부분은
+ * 판 정의에 바로, 분류 1 ~ 6 은 분류별 하위 그룹("녹지-<이름>", 정의 → 판 정의 안에 배치, 면에 분류 재질, 사전 "asrbbt" 에 OSM 출처)으로.
+ * 조각들은 꼭짓점을 공유해 겹치지 않고 합치면 원래 윗면이다. 아랫면·옆면은 그대로라 판 정의와 하위 그룹을 합친 면은 닫혀 있다.
+ *
  * @param progress 이 레이어 안의 진행률(0 ~ 1). 앞 절반은 판 변환, 뒤 절반은 면 쓰기
  * @returns 건너뛴(면 생성이 실패한) 면 수
  */
-const addTerrainSlabs = (builder: Builder, mesh: TinMesh, step: number, progress: (ratio: number) => void) => {
+const addTerrainSlabs = (
+    builder: Builder,
+    mesh: TinMesh,
+    step: number,
+    progress: (ratio: number) => void,
+    green?: { ranges: GreenFaceRange[]; info: GreenExport; materials: Map<number, number> },
+) => {
     const started = performance.now()
-    const result = buildTerrainSlabs(mesh, step, (done, all) => progress(0.5 * (done / all)))
+    const classes = green ? tagsOfRanges(green.ranges, Math.floor(mesh.indices.length / 3)) : undefined
+    const result = buildTerrainSlabs(mesh, step, (done, all) => progress(0.5 * (done / all)), classes)
     const converted = performance.now()
     // 다각형이 없는 판은 정의를 만들 수 없다(openskp 가 빈 정의를 거부한다). 정상이면 없지만 보호한다
     const bands = result.slabs.filter((s) => s.polygons.length > 0)
@@ -109,7 +123,33 @@ const addTerrainSlabs = (builder: Builder, mesh: TinMesh, step: number, progress
 
     let faces = 0
     let skipped = 0
+    /** 분류 이름 → 하위 그룹 수(콘솔 요약) */
+    const greenCounts = new Map<string, number>()
     const defs = bands.map((band, i) => {
+        /** 윗면 다각형들을 def 에 넣는다(지금 윗면과 같은 면 옵션 + 재질) */
+        const addTops = (def: Pick<GroupBuilder, "addFace">, polygons: SlabPolygon[], material?: number) => {
+            for (const { outer, holes } of polygons) {
+                try {
+                    def.addFace(ringPts(outer, band.zTop, false), {
+                        ...(holes.length > 0 ? { holes: holes.map((h) => ringPts(h, band.zTop, false)) } : {}),
+                        ...(material !== undefined ? { material } : {}),
+                    })
+                    faces++
+                } catch {
+                    skipped++
+                }
+            }
+        }
+        // 하위 그룹 정의는 판 정의보다 먼저 닫혀 있어야 판 정의 안에 놓을 수 있다
+        const subGroups = (band.tops ?? [])
+            .filter((top) => top.cls > 0)
+            .map((top) => {
+                const c = green!.info.classes[top.cls - 1]
+                const name = c?.name ?? `녹지-${top.cls}`
+                greenCounts.set(name, (greenCounts.get(name) ?? 0) + 1)
+                const def = builder.addComponentDefinition(`${name}-${band.zTop}m`, (def) => addTops(def, top.polygons, green!.materials.get(top.cls)))
+                return { def, name }
+            })
         const def = builder.addComponentDefinition(`terrain-${band.zTop}m`, (def) => {
             const face = (points: Point3[], holes?: Point3[][]) => {
                 try {
@@ -119,11 +159,14 @@ const addTerrainSlabs = (builder: Builder, mesh: TinMesh, step: number, progress
                     skipped++
                 }
             }
+            if (band.tops) for (const top of band.tops) if (top.cls <= 0) addTops(def, top.polygons)
+            for (const { def: sub, name } of subGroups) def.addGroupInstance(sub, { name, attributes: green!.info.source, attributeDictName: "asrbbt" })
             for (const { outer, holes } of band.polygons) {
-                face(
-                    ringPts(outer, band.zTop, false),
-                    holes.map((h) => ringPts(h, band.zTop, false)),
-                )
+                if (!band.tops)
+                    face(
+                        ringPts(outer, band.zTop, false),
+                        holes.map((h) => ringPts(h, band.zTop, false)),
+                    )
                 face(
                     ringPts(outer, band.zBottom, true),
                     holes.map((h) => ringPts(h, band.zBottom, true)),
@@ -149,15 +192,73 @@ const addTerrainSlabs = (builder: Builder, mesh: TinMesh, step: number, progress
 
     const polygons = bands.reduce((s, b) => s + b.polygons.length, 0)
     const holes = bands.reduce((s, b) => s + b.polygons.reduce((t, p) => t + p.holes.length, 0), 0)
+    const tops = bands.reduce((s, b) => s + (b.tops?.reduce((t, top) => t + top.polygons.length, 0) ?? 0), 0)
     console.log(
-        `SKP 계단형(${step}m): 판 ${bands.length}개, 다각형 ${polygons}개(구멍 ${holes}개), 면 ${faces}개, ` +
-            `판 변환 ${Math.round(converted - started)}ms + 면 쓰기 ${Math.round(performance.now() - converted)}ms`,
+        `SKP 계단형(${step}m): 판 ${bands.length}개, 다각형 ${polygons}개(구멍 ${holes}개), ` +
+            (green ? `윗면 조각 ${tops}개(녹지 하위 그룹 ${[...greenCounts].map(([n, c]) => `${n} ${c}`).join(" · ") || "없음"}), ` : "") +
+            `면 ${faces}개, 판 변환 ${Math.round(converted - started)}ms + 면 쓰기 ${Math.round(performance.now() - converted)}ms`,
     )
     if (result.openChains || result.emptyRings || result.orphanHoles) {
         console.warn(
             `SKP 계단형: 안 닫힌 사슬 ${result.openChains}개, 빈 고리 ${result.emptyRings}개, 외곽 없는 구멍 ${result.orphanHoles}개 버림`,
         )
     }
+    const td = result.topsDropped
+    if (td && (td.openChains || td.emptyRings || td.orphanHoles)) {
+        console.warn(`SKP 계단형 윗면 조각: 안 닫힌 사슬 ${td.openChains}개, 빈 고리 ${td.emptyRings}개, 외곽 없는 구멍 ${td.orphanHoles}개 버림`)
+    }
+    return skipped
+}
+
+/**
+ * 매끈한 면 지형을 녹지 분류로 나눠 "terrain" 그룹에 넣는다(docs/osm-green-layer-plan.md G5, 결정 G1 b-2). 녹지 아닌 삼각형은 지금처럼 그룹에 바로
+ * (재질 없음), 분류마다 하위 그룹 "녹지-<이름>"(정의 → 배치, 건물·도로와 같은 구조)에 넣고 면에 그 분류 재질(색상표 원색)을 칠한다. 하위 그룹의
+ * 속성 사전 "asrbbt" 에 OSM 출처(source·source_url·license)를 적는다(ODbL: 결과물에 출처 표시). 재질은 openskp 규칙대로 메인 루프 시작 전에
+ * 등록해 둔 것(materials)을 쓴다. 면은 soft·smooth(지형 tin 과 같음). 그룹이 갈려 분류 경계에서는 SketchUp 의 매끈한 음영이 이어지지 않는다
+ *
+ * @returns 건너뛴 면 수
+ */
+const addGreenTerrain = (
+    builder: Builder,
+    mesh: TinMesh,
+    ranges: GreenFaceRange[],
+    green: GreenExport,
+    materials: Map<number, number>,
+    progress: (ratio: number) => void,
+) => {
+    const started = performance.now()
+    const options: FaceOptions = { softEdges: true, smoothEdges: true }
+    const total = Math.max(1, mesh.indices.length / 3)
+    let done = 0
+    let skipped = 0
+    const byClass = rangesByClass(ranges)
+    const defs: { def: ReturnType<Builder["addComponentDefinition"]>; name: string }[] = []
+    const counts: string[] = []
+    for (const [cls, rs] of byClass) {
+        if (cls === 0) continue
+        const c = green.classes[cls - 1]
+        const name = c?.name ?? `녹지-${cls}`
+        const indices = indicesOfRanges(mesh.indices, rs)
+        defs.push({
+            name,
+            def: builder.addComponentDefinition(name, (def) => {
+                skipped += addTriangles(def, mesh.positions, indices, { ...options, material: materials.get(cls) })
+            }),
+        })
+        done += indices.length / 3
+        counts.push(`${name} ${(indices.length / 3).toLocaleString()}`)
+        progress(done / total)
+    }
+    const plain = byClass.get(0)
+    builder.addGroup(
+        (group) => {
+            if (plain) skipped += addTriangles(group, mesh.positions, indicesOfRanges(mesh.indices, plain), options)
+            for (const { def, name } of defs) group.addGroupInstance(def, { name, attributes: green.source, attributeDictName: "asrbbt" })
+        },
+        { name: "terrain", ...ATTRIBUTION_ATTRS },
+    )
+    progress(1)
+    console.log(`SKP 지형 녹지: 하위 그룹 ${defs.length}개(${counts.join(" · ")}), ${Math.round(performance.now() - started)}ms`)
     return skipped
 }
 
@@ -333,7 +434,7 @@ const addWaterGroups = (builder: Builder, mesh: TinMesh, table: WaterTable, prog
  * 오류는 메인의 worker.onerror 로 전달된다.
  */
 self.onmessage = (e: MessageEvent<SkpExportRequest>) => {
-    const { layers, mode, step } = e.data
+    const { layers, mode, step, green } = e.data
     const weight = (m: TinMesh | null) => (m ? m.indices.length / 3 : 0)
     const total = Object.values(layers).reduce((sum, m) => sum + weight(m), 0) || 1
     let doneBefore = 0
@@ -351,13 +452,25 @@ self.onmessage = (e: MessageEvent<SkpExportRequest>) => {
     }
 
     const builder = create()
+    // 녹지(매끈한 면은 지형 그룹, 계단형은 판 윗면을 분류로 나눔): openskp 는 재질을 모든 정의·그룹보다 먼저 등록해야 하므로 여기서 분류 재질을 만든다
+    const greenRanges = green ? layers.terrain?.greenRanges : undefined
+    const greenMaterials = new Map<number, number>()
+    if (greenRanges) {
+        for (const cls of rangesByClass(greenRanges).keys()) {
+            const c = green!.classes[cls - 1]
+            if (cls > 0 && c) greenMaterials.set(cls, builder.addMaterial(c.name, c.rgb))
+        }
+    }
     let skipped = 0
     for (const { id } of LAYER_DEFS) {
         const mesh: ExportMesh | null = layers[id]
         if (!mesh) continue
         const w = weight(mesh)
         if (id === "terrain" && mode === "stepped") {
-            skipped += addTerrainSlabs(builder, mesh, step, (ratio) => progress(ratio, w))
+            const g = greenRanges ? { ranges: greenRanges, info: green!, materials: greenMaterials } : undefined
+            skipped += addTerrainSlabs(builder, mesh, step, (ratio) => progress(ratio, w), g)
+        } else if (id === "terrain" && greenRanges) {
+            skipped += addGreenTerrain(builder, mesh, greenRanges, green!, greenMaterials, (ratio) => progress(ratio, w))
         } else if (id === "buildings" && mesh.table) {
             skipped += addBuildingGroups(builder, mesh.table, (ratio) => progress(ratio, w))
         } else if (id === "roads" && mesh.roadTable) {

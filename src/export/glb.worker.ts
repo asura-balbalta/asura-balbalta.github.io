@@ -8,7 +8,8 @@ import type { TinMesh } from "../terrainData"
 import { buildSteppedMeshChunks } from "../terrainSteps"
 import type { TerrainMode } from "../webgpu/terrainRenderer"
 import { attributionFileText } from "../attribution"
-import { computeVertexNormals, encodeGlb, GlbMaterial, GlbNode, toFlatPrimitive } from "./glb"
+import { computeVertexNormals, encodeGlb, GlbMaterial, GlbNode, GlbPrimitive, toFlatPrimitive } from "./glb"
+import { compactMesh, GreenExport, indicesOfRanges, rangesByClass, rangesOfTagRanges, tagsOfRanges } from "./greenExport"
 import type { ExportMesh, LayerMeshes } from "./stlClient"
 
 /**
@@ -21,6 +22,8 @@ export type GlbExportRequest = {
     mode: TerrainMode
     /** stepped 일 때 층 간격(m) */
     step: number
+    /** 녹지를 담을 때(지형 greenRanges 와 함께). 지형을 분류별 primitive·재질로 나누고 출처 줄을 asset.copyright 에 더한다 */
+    green?: GreenExport
 }
 
 /** Worker → 메인: 진행률(0 ~ 1), 완료(.glb 파일 바이트, transfer) */
@@ -44,6 +47,8 @@ const post = (msg: GlbExportResponse, transfer: Transferable[] = []) => self.pos
  *
  * 루트 노드(이름은 레이어 id 를 "+" 로 이은 것) 아래에 LAYER_DEFS 순서로 레이어 노드를 둔다. 재질은 레이어마다 하나.
  * - 지형 tin: 정점 법선을 넣어 부드럽게. stepped: 변환 조각마다 면 법선 평면 조각(toFlatPrimitive).
+ *   녹지를 담으면(green + terrain.greenRanges) "terrain" 메쉬의 primitive 를 분류별로 나눈다: 녹지 아닌 삼각형은 재질 "terrain", 분류 c 는
+ *   재질 "녹지-<이름>"(색상표 원색). tin 은 전체 메쉬로 계산한 정점 법선을 나눠 쓰므로 분류 경계에서 음영이 끊기지 않는다.
  * - 건물: 표(table)가 있으면 "buildings" 노드 아래에 건물마다 노드(이름 = 전국 고유 번호, extras = 속성)를 두고, 합쳐진 메쉬에서
  *   그 건물의 삼각형 범위(표의 첫 삼각형 번호부터 다음 세운 건물 전까지)를 평면 조각으로 넣는다. 표가 없으면 레이어 전체가
  *   평면 조각 하나다.
@@ -51,7 +56,7 @@ const post = (msg: GlbExportResponse, transfer: Transferable[] = []) => self.pos
  * 취소는 메인에서 terminate 로 한다(요청마다 Worker 를 새로 만든다). 오류는 메인의 worker.onerror 로 전달된다.
  */
 self.onmessage = (e: MessageEvent<GlbExportRequest>) => {
-    const { layers, mode, step } = e.data
+    const { layers, mode, step, green } = e.data
     const weight = (m: TinMesh | null) => (m ? m.indices.length / 3 : 0)
     const total = Object.values(layers).reduce((sum, m) => sum + weight(m), 0) || 1
     let doneBefore = 0
@@ -68,9 +73,37 @@ self.onmessage = (e: MessageEvent<GlbExportRequest>) => {
         const material = materials.push({ name: id, color: LAYER_COLORS[id] ?? [0.63, 0.63, 0.63] }) - 1
         const w = weight(mesh)
         const node: GlbNode = { name: id, primitives: [] }
-        if (id === "terrain" && mode === "stepped") {
+        const greenRanges = id === "terrain" && green ? mesh.greenRanges : undefined
+        /** 녹지 분류 → 재질 번호(처음 쓸 때 만든다. 분류 0 은 지형 재질) */
+        const greenMaterials = new Map<number, number>([[0, material]])
+        const materialOf = (cls: number) => {
+            let m = greenMaterials.get(cls)
+            if (m === undefined) {
+                const c = green!.classes[cls - 1]
+                m = materials.push({ name: c?.name ?? `녹지-${cls}`, color: (c?.rgb ?? [160, 160, 160]).map((v) => v / 255) as [number, number, number] }) - 1
+                greenMaterials.set(cls, m)
+            }
+            return m
+        }
+        if (id === "terrain" && mode === "stepped" && greenRanges) {
+            // 판·벽이 원래 삼각형의 분류를 따라간다(buildSteppedMeshChunks tags. 화면의 계단형 녹지와 같은 규칙)
+            const tags = tagsOfRanges(greenRanges, mesh.indices.length / 3)
+            const chunks = buildSteppedMeshChunks(mesh, step, STEPPED_CHUNK_BYTES, (done, all) => progress(done / all, w), { tags })
+            for (const chunk of chunks) {
+                for (const [cls, rs] of rangesByClass(rangesOfTagRanges(chunk.tagRanges!))) {
+                    node.primitives!.push(toFlatPrimitive(chunk.positions, indicesOfRanges(chunk.indices, rs), materialOf(cls)))
+                }
+            }
+        } else if (id === "terrain" && mode === "stepped") {
             const chunks = buildSteppedMeshChunks(mesh, step, STEPPED_CHUNK_BYTES, (done, all) => progress(done / all, w))
             for (const chunk of chunks) node.primitives!.push(toFlatPrimitive(chunk.positions, chunk.indices, material))
+        } else if (id === "terrain" && greenRanges) {
+            const normals = computeVertexNormals(mesh.positions, mesh.indices)
+            for (const [cls, rs] of rangesByClass(greenRanges)) {
+                const part = compactMesh(mesh.positions, indicesOfRanges(mesh.indices, rs), normals)
+                const prim: GlbPrimitive = { positions: part.positions, indices: part.indices, normals: part.normals, material: materialOf(cls) }
+                node.primitives!.push(prim)
+            }
         } else if (id === "terrain") {
             node.primitives!.push({
                 positions: mesh.positions,
@@ -137,13 +170,14 @@ self.onmessage = (e: MessageEvent<GlbExportRequest>) => {
         doneBefore += w
         progress(0, 0)
     }
-    const root: GlbNode = { name: materials.map((m) => m.name).join("+"), children }
+    // 루트 이름은 레이어 노드 이름(녹지 재질은 지형 노드 안이라 넣지 않는다. 녹지를 담으면 끝에 osmGreen)
+    const root: GlbNode = { name: [...children.map((c) => c.name), ...(green && layers.terrain?.greenRanges ? ["osmGreen"] : [])].join("+"), children }
     const buffer = encodeGlb(
         root,
         materials,
         { origin, crs: "ESRI:102080", unit: "m", up: "+Y (원본 Z-up 을 (x, z, -y) 로 변환)" },
-        // 공공데이터 출처(src/attribution.ts)를 표준 asset.copyright 에
-        attributionFileText(),
+        // 공공데이터 출처(src/attribution.ts)를 표준 asset.copyright 에. 녹지를 담으면 OSM 줄을 더한다
+        attributionFileText(green && layers.terrain?.greenRanges ? green.fileLine : undefined),
     )
     post({ type: "done", buffer }, [buffer])
 }

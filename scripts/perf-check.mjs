@@ -169,6 +169,9 @@ const cacheFlags = (text) => ({
     roads: /도로 \d+\([^)]*\)\(캐시\)/.test(text),
     water: /물 \d+\([^)]*\)\(캐시\)/.test(text),
     forest: /산림 \d+(\(건너뜀 \d+\))? \(캐시\)/.test(text),
+    // 녹지(osm_green G7 2026-11-08)는 도엽 나누기를 캐시하지 않는다(계획서 2.3절: tinCache 는 나누기 전 TIN, 나누기는 매번). 5K 전처리 캐시는
+    // 로그에 표시가 없어 memory() 캐시 표 result.osm_green 의 hits 로 본다. 그래서 여기서는 "녹지로 나눈 도엽" 만 센다(캐시 적중이 아님)
+    osmGreen: /, 녹지 5K \d+\(전처리 합 [\d.]+ms\) 받기 \d+ms 분할 \d+→\d+/.test(text),
 })
 
 const MB = (bytes) => (bytes == null ? null : Math.round((bytes / 1048576) * 10) / 10)
@@ -378,7 +381,7 @@ const measureInPage = async (context, rec, args, url, logName) => {
                 tilesBuilt: logs.length,
                 extraBuilt: logs.filter((l) => l.extra).length,
                 // 층별로 캐시에서 꺼낸 도엽 수(나머지는 그 층을 새로 만듦)
-                cacheHits: Object.fromEntries(["terrain", "buildings", "roads", "water", "forest"].map((k) => [k, logs.filter((l) => l.cached?.[k]).length])),
+                cacheHits: Object.fromEntries(["terrain", "buildings", "roads", "water", "forest", "osmGreen"].map((k) => [k, logs.filter((l) => l.cached?.[k]).length])),
             }
         }
         const problemsIn = (a, b) => problems.filter((p) => p.t >= a && p.t < b).map(({ type, source, text }) => ({ type, source, text }))
@@ -566,7 +569,7 @@ const metricStats = (records) => {
         sub("walkEntryMs", (r) => r.times.walkEntryMs)
         sub("entryTilesBuilt", (r) => r.phases.entry.tilesBuilt)
         sub("entryLayerRequests", (r) => r.phases.entry.layerRequests)
-        for (const k of ["terrain", "buildings", "roads", "water", "forest"]) sub(`entryCacheHits.${k}`, (r) => r.phases.entry.cacheHits?.[k])
+        for (const k of ["terrain", "buildings", "roads", "water", "forest", "osmGreen"]) sub(`entryCacheHits.${k}`, (r) => r.phases.entry.cacheHits?.[k])
     }
     return out
 }
