@@ -1,0 +1,104 @@
+#!/usr/bin/env node
+/**
+ * 공개 문서(README.md·README.en.md·THIRD_PARTY.md)를 HTML 로 바꿔 배포 폴더에 넣는다. .github/workflows/pages.yml 이 빌드 뒤에 부른다.
+ *
+ * 변환은 GitHub Markdown API(POST /markdown)에 맡긴다. github.com 에서 보는 것과 같은 표·코드 블록이 나오고 npm 의존성이 늘지 않는다.
+ * 문서끼리의 링크는 변환된 .html 로, 그 밖의 저장소 안 경로(LICENSE, src/…)는 GitHub 의 그 커밋 주소로 바꾼다.
+ *
+ * 사용: node .github/scripts/render-docs.mjs <출력 폴더>
+ * 환경: GITHUB_TOKEN(있으면 인증. 없으면 비인증 한도 시간당 60회), GITHUB_REPOSITORY, GITHUB_SHA(없으면 main)
+ */
+import { mkdir, readFile, writeFile } from "node:fs/promises"
+import path from "node:path"
+
+const outDir = process.argv[2]
+if (!outDir) {
+    console.error("usage: node .github/scripts/render-docs.mjs <out dir>")
+    process.exit(1)
+}
+const repo = process.env.GITHUB_REPOSITORY || "asura-balbalta/asura-balbalta.github.io"
+const ref = process.env.GITHUB_SHA || "main"
+
+/** 변환할 문서. src 는 저장소 루트 기준, out 은 출력 폴더 기준 */
+const DOCS = [
+    { src: "README.md", out: "readme.html", lang: "ko", title: "아수라발발타 — README" },
+    { src: "README.en.md", out: "readme.en.html", lang: "en", title: "Asura Balbalta — README" },
+    { src: "THIRD_PARTY.md", out: "third-party.html", lang: "ko", title: "아수라발발타 — 서드파티 고지" },
+]
+const DOC_LINKS = new Map(DOCS.map((d) => [d.src, d.out]))
+
+/** 마크다운 본문을 GitHub Markdown API 로 HTML 조각으로 바꾼다. 일시 오류는 세 번까지 다시 부른다 */
+async function renderMarkdown(text) {
+    const headers = { Accept: "application/vnd.github+json", "Content-Type": "application/json", "X-GitHub-Api-Version": "2022-11-28" }
+    if (process.env.GITHUB_TOKEN) headers.Authorization = `Bearer ${process.env.GITHUB_TOKEN}`
+    let last = ""
+    for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+            const res = await fetch("https://api.github.com/markdown", { method: "POST", headers, body: JSON.stringify({ text, mode: "markdown" }) })
+            if (res.ok) return await res.text()
+            last = `HTTP ${res.status} ${(await res.text()).slice(0, 200)}`
+            if (res.status < 500 && res.status !== 429 && res.status !== 403) break
+        } catch (e) {
+            last = String(e)
+        }
+        await new Promise((r) => setTimeout(r, 2000 * attempt))
+    }
+    throw new Error(`markdown API failed: ${last}`)
+}
+
+/** 상대 링크를 고친다: 변환한 문서는 그 .html 로, 그 밖의 저장소 경로는 GitHub 의 이 커밋 주소로. 절대 주소·#·mailto 는 그대로 */
+function rewriteLinks(html) {
+    return html.replace(/href="([^"]+)"/g, (whole, href) => {
+        if (/^([a-z][a-z0-9+.-]*:|#|\/)/i.test(href)) return whole
+        const [file, hash] = href.split("#")
+        const target = DOC_LINKS.get(file)
+        const next = target ? target : `https://github.com/${repo}/blob/${ref}/${file}`
+        return `href="${next}${hash ? `#${hash}` : ""}"`
+    })
+}
+
+const CSS = `
+:root { color-scheme: light dark; --fg: #1f2328; --bg: #ffffff; --muted: #59636e; --line: #d1d9e0; --code: #f6f8fa; --link: #0969da; }
+@media (prefers-color-scheme: dark) { :root { --fg: #f0f6fc; --bg: #0d1117; --muted: #9198a1; --line: #3d444d; --code: #151b23; --link: #4493f8; } }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", "Apple SD Gothic Neo", "Noto Sans KR", sans-serif; }
+nav, main { max-width: 900px; margin: 0 auto; padding: 0 20px; }
+nav { padding-top: 16px; font-size: 14px; color: var(--muted); }
+main { padding-bottom: 80px; overflow-wrap: break-word; }
+a { color: var(--link); text-decoration: none; } a:hover { text-decoration: underline; }
+h1, h2 { border-bottom: 1px solid var(--line); padding-bottom: 0.3em; } h1 { font-size: 1.9em; } h2 { font-size: 1.4em; margin-top: 1.8em; }
+.anchor { display: none; }
+table { display: block; width: max-content; max-width: 100%; overflow-x: auto; border-collapse: collapse; margin: 12px 0 18px; font-size: 14.5px; }
+th, td { border: 1px solid var(--line); padding: 6px 12px; vertical-align: top; text-align: left; } th { background: var(--code); }
+@media (min-width: 720px) { th:first-child, td:first-child { white-space: nowrap; } }
+code { background: var(--code); padding: 0.15em 0.4em; border-radius: 6px; font: 85%/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
+pre { background: var(--code); padding: 14px 16px; border-radius: 6px; overflow-x: auto; } pre code { background: none; padding: 0; font-size: 13.5px; }
+blockquote { margin: 12px 0; padding: 0 1em; color: var(--muted); border-left: 4px solid var(--line); }
+`
+
+/** 변환한 조각을 한 페이지로 감싼다. 위에 앱·저장소로 가는 줄을 둔다 */
+function page(doc, body) {
+    return `<!doctype html>
+<html lang="${doc.lang}">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>${doc.title}</title>
+<style>${CSS}</style>
+</head>
+<body>
+<nav><a href="./">${doc.lang === "en" ? "Open the app" : "앱 열기"}</a> · <a href="https://github.com/${repo}">GitHub</a></nav>
+<main>
+${body}
+</main>
+</body>
+</html>
+`
+}
+
+await mkdir(outDir, { recursive: true })
+for (const doc of DOCS) {
+    const html = rewriteLinks(await renderMarkdown(await readFile(doc.src, "utf8")))
+    await writeFile(path.join(outDir, doc.out), page(doc, html))
+    console.log(`${doc.src} → ${path.join(outDir, doc.out)} (${html.length} chars)`)
+}

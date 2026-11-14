@@ -82,7 +82,7 @@ npx serve dist -l 3000 # http://localhost:3000
 - 개발은 비공개 작업 저장소에서 하고, 커밋을 한 개씩 이 저장소에 재현해 올린다. author 날짜는 원래 작업한 시점이고 committer 날짜는 옮긴 시점이다.
 - 커밋 메시지와 주석에 보이는 `docs/…`, "계획서 N절", "보고서" 는 비공개 저장소의 작업 기록(계획·측정·캡처)을 가리킨다. 이 저장소에는 없다. 코드 주석의 `by @nanangqq` 는 그 결정·확인을 한 사람이다.
 - 커밋 메시지는 한국어, `type(scope): 한 문장` 꼴이다.
-- 배포는 `v*` 태그를 push 하면 GitHub Actions 가 빌드해 GitHub Pages 에 올린다(`.github/workflows/pages.yml`). main push 로는 배포되지 않는다.
+- 배포는 `v*` 태그를 push 하면 GitHub Actions 가 빌드해 GitHub Pages 에 올린다(`.github/workflows/pages.yml`). main push 로는 배포되지 않는다. 배포본에서는 이 문서를 `/readme.html`(영어 `/readme.en.html`), 서드파티 고지를 `/third-party.html` 로 볼 수 있다(`.github/scripts/render-docs.mjs` 가 변환한다).
 - 이슈는 환영한다. PR 은 비공개 저장소에 손으로 옮겨 반영한 뒤 재현 커밋으로 올라오므로 머지 커밋이 아니라 같은 내용의 커밋으로 반영된다.
 
 ## 라이선스

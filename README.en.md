@@ -87,7 +87,7 @@ with your own and register your domain.
 - Development happens in a private working repository; commits are replayed into this one one at a time. The author date is when the work was done, the committer date is when it was replayed.
 - References in commit messages and comments such as `docs/…`, "계획서 N절" (plan, section N) or "보고서" (report) point to the private working notes (plans, measurements, captures). They are not in this repository. `by @nanangqq` in code comments names the person who made that decision or check.
 - Commit messages are in Korean, in the form `type(scope): one sentence`.
-- Deployment: pushing a `v*` tag makes GitHub Actions build and publish to GitHub Pages (`.github/workflows/pages.yml`). Pushing to main does not deploy.
+- Deployment: pushing a `v*` tag makes GitHub Actions build and publish to GitHub Pages (`.github/workflows/pages.yml`). Pushing to main does not deploy. On the deployed site this document is at `/readme.html` (Korean) and `/readme.en.html`, and the third-party notices are at `/third-party.html` (converted by `.github/scripts/render-docs.mjs`).
 - Issues are welcome. Pull requests are applied by hand in the private repository and arrive here as replayed commits, so they land as equivalent commits rather than merge commits.
 
 ## License
