@@ -8,7 +8,7 @@ import { getDistance } from "ol/sphere"
 
 // Firebase 앱 초기화(부수효과). 값은 아직 쓰지 않는다
 import "./fb"
-import { basemapAttribution, BasemapProvider } from "./basemap"
+import { basemapAttribution, BasemapProvider, defaultBasemapProvider } from "./basemap"
 import { CanvasDebug, TerrainViewCanvas } from "./components/TerrainViewCanvas"
 import type { ExportKind } from "./export/download"
 import { exportableLayers, runExport } from "./export/runExport"
@@ -115,8 +115,8 @@ const writeStored = (key: string, value: unknown) => {
 /** 처음 보여 줄 지형 표현 방식·처음 색 테마. 값은 장면 설정 공용 모듈(sceneSetup.ts. 헤드리스 검사도 같은 값을 쓴다) */
 const INITIAL_TERRAIN_MODE: TerrainMode = APP_INITIAL_TERRAIN_MODE
 const INITIAL_THEME: Theme = APP_INITIAL_THEME
-/** 처음 바탕 지도 출처(basemap.ts). 설정에서 바꿀 수 있고, 타일이 안 나오면 자동으로 다음 출처로 넘어간다 */
-const INITIAL_BASEMAP: BasemapProvider = "stadia"
+/** 처음 바탕 지도 출처(basemap.ts. 호스트에 따라 다르다: github.io 는 carto, 그 밖은 stadia). 설정에서 바꿀 수 있고, 타일이 안 나오면 자동으로 다음 출처로 넘어간다 */
+const INITIAL_BASEMAP: BasemapProvider = defaultBasemapProvider()
 /** 계단형일 때 처음 층 간격(m). 설정 패널에서 0.1 ~ 5 로 바꾼다(값은 sceneSetup.ts) */
 const INITIAL_STEP_INTERVAL = APP_INITIAL_STEP_INTERVAL
 /** 올라온 지형(도엽 집합)의 요약. 도엽이 하나씩 올라올 때마다 갱신된다. 원본 도엽은 TerrainTilesClient 가 든다 */

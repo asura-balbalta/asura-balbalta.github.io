@@ -31,10 +31,31 @@ export const BASEMAP_PROVIDERS: { id: BasemapProvider; label: string }[] = [
 export const basemapAttribution = (provider: BasemapProvider): string =>
     provider === "stadia" ? "© Stadia Maps · © OpenMapTiles · © OpenStreetMap" : "© OpenStreetMap · © CARTO"
 
-/** 목록에서 다음 출처(마지막이면 처음으로) */
+/**
+ * Stadia 를 쓸 수 없는 호스트. 공개 저장소의 GitHub Pages(https://asura-balbalta.github.io)는 Stadia 허용 도메인 밖이라
+ * 타일이 안 나온다(2026-11-14, by @nanangqq). 이 호스트에서는 목록에서 Stadia 를 빼 CARTO 가 기본이 되고 설정에도 보이지 않는다
+ */
+const STADIA_BLOCKED_HOST = /(^|\.)github\.io$/
+
+/** 지금 페이지의 호스트 이름. 브라우저 밖(Node 검산·번들 시점)에서는 빈 문자열 */
+const currentHostname = () => (typeof location === "undefined" ? "" : location.hostname)
+
+/**
+ * 이 호스트에서 쓸 수 있는 출처 목록(화면에 보이는 순서이자 자동 대체 순서). 첫 항목이 기본값
+ *
+ * @param hostname 호스트 이름. 생략하면 지금 페이지
+ */
+export const availableBasemapProviders = (hostname: string = currentHostname()) =>
+    STADIA_BLOCKED_HOST.test(hostname) ? BASEMAP_PROVIDERS.filter((p) => p.id !== "stadia") : BASEMAP_PROVIDERS
+
+/** 이 호스트의 처음 바탕 지도 출처(쓸 수 있는 목록의 첫 항목). github.io 면 carto, 그 밖은 stadia */
+export const defaultBasemapProvider = (hostname: string = currentHostname()): BasemapProvider => availableBasemapProviders(hostname)[0].id
+
+/** 쓸 수 있는 목록에서 다음 출처(마지막이면 처음으로). 목록에 없는 출처면 첫 항목 */
 export const nextBasemapProvider = (id: BasemapProvider): BasemapProvider => {
-    const i = BASEMAP_PROVIDERS.findIndex((p) => p.id === id)
-    return BASEMAP_PROVIDERS[(i + 1) % BASEMAP_PROVIDERS.length].id
+    const list = availableBasemapProviders()
+    const i = list.findIndex((p) => p.id === id)
+    return list[(i + 1) % list.length].id
 }
 
 /**

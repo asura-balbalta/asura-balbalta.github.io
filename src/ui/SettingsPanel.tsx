@@ -1,7 +1,7 @@
 import { Button, Checkbox, Input } from "@fluentui/react-components"
 import React, { useEffect, useState } from "react"
 
-import { BASEMAP_PROVIDERS, BasemapProvider } from "../basemap"
+import { availableBasemapProviders, BasemapProvider } from "../basemap"
 import { Theme } from "../terrainTheme"
 import { WALK_RADIUS_CHOICES } from "../scenePalette"
 import type { PaletteStore } from "../usePalettes"
@@ -114,7 +114,7 @@ export const SettingsPanel = ({
                 <Segment
                     label="바탕 지도"
                     value={basemap}
-                    options={BASEMAP_PROVIDERS.map((p) => ({ value: p.id, label: p.label }))}
+                    options={availableBasemapProviders().map((p) => ({ value: p.id, label: p.label }))}
                     onChange={onBasemap}
                 />
             </div>
