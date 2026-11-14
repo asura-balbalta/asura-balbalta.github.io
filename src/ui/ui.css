@@ -1433,3 +1433,13 @@ button.ui-status-pill {
 .ui-palette-dialog {
     max-width: 440px;
 }
+
+/* ---- 정보 패널(InfoPanel): 바깥 링크 행. 글자는 본문색, 오른쪽 끝에 바깥 링크 아이콘 ---- */
+.ui-info-row {
+    justify-content: space-between;
+    color: var(--ui-text);
+    text-decoration: none;
+}
+.ui-info-row svg {
+    color: var(--ui-text-secondary);
+}

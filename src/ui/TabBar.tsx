@@ -1,4 +1,4 @@
-import { ArrowDownloadRegular, LayerRegular, SettingsRegular, SquareRegular } from "@fluentui/react-icons"
+import { ArrowDownloadRegular, InfoRegular, LayerRegular, SettingsRegular, SquareRegular } from "@fluentui/react-icons"
 import React from "react"
 
 import { PanelId } from "./Dock"
@@ -7,6 +7,7 @@ const PANELS: { id: PanelId; label: string; icon: React.ReactElement }[] = [
     { id: "layers", label: "레이어", icon: <LayerRegular fontSize={18} /> },
     { id: "export", label: "내려받기", icon: <ArrowDownloadRegular fontSize={18} /> },
     { id: "settings", label: "설정", icon: <SettingsRegular fontSize={18} /> },
+    { id: "info", label: "정보", icon: <InfoRegular fontSize={18} /> },
 ]
 
 /**

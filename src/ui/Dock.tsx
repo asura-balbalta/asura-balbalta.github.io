@@ -1,14 +1,15 @@
 import { Button } from "@fluentui/react-components"
-import { ArrowDownloadRegular, LayerRegular, SettingsRegular, SquareRegular } from "@fluentui/react-icons"
+import { ArrowDownloadRegular, InfoRegular, LayerRegular, SettingsRegular, SquareRegular } from "@fluentui/react-icons"
 import React from "react"
 
 /** 독·탭 막대에서 여는 패널. 한 번에 하나만 열린다 */
-export type PanelId = "layers" | "export" | "settings"
+export type PanelId = "layers" | "export" | "settings" | "info"
 
 const PANELS: { id: PanelId; label: string; icon: React.ReactElement }[] = [
     { id: "layers", label: "레이어", icon: <LayerRegular /> },
     { id: "export", label: "내려받기", icon: <ArrowDownloadRegular /> },
     { id: "settings", label: "설정", icon: <SettingsRegular /> },
+    { id: "info", label: "정보", icon: <InfoRegular /> },
 ]
 
 /**

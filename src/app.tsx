@@ -26,6 +26,7 @@ import { LayersPanel } from "./ui/LayersPanel"
 import { MapFrame } from "./ui/MapFrame"
 import { Dock, PanelId } from "./ui/Dock"
 import { SettingsPanel } from "./ui/SettingsPanel"
+import { InfoPanel } from "./ui/InfoPanel"
 import { DockPanel } from "./ui/DockPanel"
 import { StatusBar, StatusMenu } from "./ui/StatusBar"
 import { AttributionDialog } from "./ui/AttributionContent"
@@ -1014,6 +1015,11 @@ function App({
                         rebuildPending={smoothFarStale}
                         onAttribution={() => openAttribution()}
                     />
+                </Panel>
+            )}
+            {openPanel === "info" && (
+                <Panel title="정보" onClose={() => setOpenPanel(null)} above={panelAbove}>
+                    <InfoPanel />
                 </Panel>
             )}
 
