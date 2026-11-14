@@ -3,7 +3,7 @@
 > 이 문서는 Claude(Anthropic 의 AI)가 `package-lock.json` 과 `node_modules` 의 라이선스 필드를 읽고 작성했고 @nanangqq 가 검토했다.
 
 이 저장소의 코드는 MIT 라이선스([`LICENSE`](LICENSE))로 배포한다. 아래는 번들에 들어가거나 빌드·검증에 쓰이는 외부 코드와 그 라이선스다.
-버전은 `package-lock.json` 기준(2026-10-20). 라이선스 전문은 각 패키지의 `node_modules/<이름>/LICENSE*` 에 있다.
+버전은 `package-lock.json` 기준(2026-11-14). 라이선스 전문은 각 패키지의 `node_modules/<이름>/LICENSE*` 에 있다.
 
 ## 1. 번들에 들어가는 런타임 의존성 (Runtime dependencies)
 
@@ -17,6 +17,7 @@
 | delaunator | 5.1.0 | ISC | Delaunay 삼각분할 |
 | @kninnug/constrainautor | 4.1.0 | ISC | 제약 Delaunay(지형 TIN) |
 | earcut | 3.2.4 | ISC | 다각형 삼각분할(건물·도로 면) |
+| polygon-clipping | 0.15.7 | MIT | 녹지(OSM) 레이어의 폴리곤 연산(`src/osmGreenMesh.ts`). `splaytree` 3.2.3(MIT)을 함께 들인다 |
 | openskp | 1.3.0 | MIT | SKP 내보내기. `patches/openskp+1.3.0.patch` 로 수정해 쓴다(아래 3절) |
 | rhino3dm | 8.35.0 | MIT | 3DM 내보내기. 빌드가 `rhino3dm.min.js`·`rhino3dm.wasm` 을 `dist/export/` 로 복사한다 |
 | firebase | 12.19.0 | Apache-2.0 | 초기 스캐폴딩(`src/fb.ts`). 앱이 호출하지 않는다 |
@@ -43,6 +44,7 @@
 | patch-package | 8.0.1 | MIT | 3절 패치 적용 |
 | playwright | 1.64.0 | Apache-2.0 | `scripts/render-check.mjs` 가 설치된 Chrome 을 띄우는 데만 쓴다 |
 | pixelmatch, pngjs | 8.0.0, 7.0.0 | ISC, MIT | 캡처 비교 |
+| webgpu (Dawn 의 Node 바인딩) | 0.6.2 | MIT | 헤드리스 렌더 검사(`scripts/render-headless.mjs`) 전용. 루트가 아니라 `scripts/headless/` 에 선택 설치한다(`npm --prefix scripts/headless install`) |
 | firebase-tools | 15.30.1 | MIT | Firebase Hosting 배포(`npm run deploy`). GitHub Pages 배포에는 쓰지 않는다 |
 
 ## 5. 지도 타일·검색 API (Map tiles and search)
@@ -55,5 +57,5 @@
 
 ## 6. 데이터 (Data)
 
-지형·건물·도로 데이터는 한국 공공데이터를 가공한 것이며 코드 라이선스(MIT)와 별개다. 원자료별 출처와 이용 조건(공공누리 제1유형, CC BY 등)은
+지형·건물·도로·물·산림 데이터는 한국 공공데이터이고 녹지는 OpenStreetMap 자료이며, 모두 코드 라이선스(MIT)와 별개다. 원자료별 출처와 이용 조건(공공누리 제1유형, CC BY, 산림 CC BY-NC-ND, 녹지 ODbL 1.0 등)은
 앱의 출처 페이지(`#/attribution`)와 `src/attribution.ts` 에 있다.
