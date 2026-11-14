@@ -73,6 +73,9 @@ export const createBasemapSource = (provider: BasemapProvider, tone: BasemapTone
             const key = CARTO_API_KEY ? `?key=${encodeURIComponent(CARTO_API_KEY)}` : ""
             return new XYZ({
                 url: `https://{a-d}.basemaps.cartocdn.com/${style}/{z}/{x}/{y}@2x.png${key}`,
+                // CORS 로 받아야 미니맵 캔버스가 오염되지 않는다(유리 효과가 미니맵을 toDataURL·texImage2D 로 캡처한다. StadiaMaps 소스는
+                // 기본이 anonymous 라 문제없었고, CARTO 는 빠져 있어 github.io(CARTO 기본)에서 SecurityError 가 매 프레임 났다. 2026-11-15)
+                crossOrigin: "anonymous",
                 tilePixelRatio: 2,
                 maxZoom: 20,
                 attributions:
