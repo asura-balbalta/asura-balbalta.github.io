@@ -1,8 +1,11 @@
 import { OpenRegular } from "@fluentui/react-icons"
 import React from "react"
 
-/** 소개: 공개 저장소(asura-balbalta.github.io)의 GitHub Pages. 프로젝트 소개는 이 페이지가 맡는다 */
-const INTRO_URL = "https://asura-balbalta.github.io/"
+/**
+ * 소개: 공개 저장소 GitHub Pages 의 readme.html. 루트(https://asura-balbalta.github.io/)는 Actions 배포 뒤로 앱 자체라
+ * 소개가 아니다(2026-11-14. github.io 배포본에서 누르면 같은 앱이 또 열림)
+ */
+const INTRO_URL = "https://asura-balbalta.github.io/readme.html"
 /** GitHub: 공개 저장소(fb_web 커밋을 재현해 올리는 곳. docs/opensource-release-plan.md) */
 const REPO_URL = "https://github.com/asura-balbalta/asura-balbalta.github.io"
 
