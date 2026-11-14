@@ -205,13 +205,13 @@ npm run verify -- --refresh-baseline        # 기준 다시 찍기(아래 정책
 
 - 판정(장면별 `judge`, `scripts/verify-scenes.json`): 비교는 언제나 `--mask 0,0,400,200`, 다른 픽셀 비율 ≤ 0.1 %. 둘러보기는 0.1·0.01 모두 같음이어야 하고(기대값 0 px), 궤도 보기(`walk=0`)는 0.1 로만 판정한다(같은 코드에서도 겹친 면 그리기 순서로 0.08 % 까지, 0.01 은 참고). 산림 장면은 궤도도 0.01 까지. 재검증 쌍(기본 ↔ `ao=0`)이 모든 임계값에서 "다름" 이 아니면 실패. 골든은 같은 코드·같은 순서로 만든 HEAD 기준이라 허용 차이(`--allow`·`--fresh`)를 쓰지 않는다(그 관례는 옛 92a8954 기준용).
 - 결과: `docs/render-checks/<날짜>-verify[-n]/`(`golden/`, PNG·`index.json`, `compare-t0.1.json`·`compare-t0.01.json`, `diff/` 는 t0.1, `verify.json`). 끝에 장면 × 크기 표. 예상 밖 차이가 하나라도 있으면 종료 코드 1, 환경 문제(서버 없음·기준 없음·Chrome 버전 다름)는 2.
-- 실행 전 확인: 미리보기 서버(3000), src 가 dist 보다 새로우면 경고(빌드 잊음), 기준 manifest 의 Chrome 버전 ≠ 설치된 Chrome 이면 **비교하지 않고 멈춘다**(7절 4). 골든 기준의 Node 버전이 다르면 경고.
+- 실행 전 확인: 미리보기 서버(3000), src 가 dist 보다 새로우면 경고(빌드 잊음), 기준 manifest 의 Chrome 버전 ≠ 설치된 Chrome 이면 **비교하지 않고 멈춘다**(7절 4). 기준의 macOS(`os`, `sw_vers`)·헤드리스 어댑터 설명(기계·Metal 드라이버)이 지금과 달라도 그 층(헤드리스·브라우저)만 비교 없이 멈춘다(골든은 그대로 돌고 끝에 종료 코드 2, 2026-11-14). 이런 "갱신 필요(환경이 바뀜)" 는 `--dry-run` 에서도 맨 앞에 보인다. 골든 기준의 Node 버전이 다르면 경고.
 
 **기준 정책**
 
-- 기준 세 폴더: `docs/render-checks/golden-baseline/`(골든 + `manifest.json`: 커밋·Node·기록 수), `docs/render-checks/headless-baseline/`(54장 + `index.json` + `manifest.json`: 커밋·webgpu 버전·GPU·Node·장면 해시), `docs/render-checks/capture-baseline/`(54장 + `index.json` + `manifest.json`: 커밋·Chrome·장면 해시·완전 여부). **git 제외, 기계마다 따로**다(다른 Mac·Chrome 의 캡처와 섞지 않는다).
+- 기준 세 폴더: `docs/render-checks/golden-baseline/`(골든 + `manifest.json`: 커밋·Node·기록 수), `docs/render-checks/headless-baseline/`(54장 + `index.json` + `manifest.json`: 커밋·webgpu 버전·GPU·macOS·Node·장면 해시), `docs/render-checks/capture-baseline/`(54장 + `index.json` + `manifest.json`: 커밋·Chrome·macOS·장면 해시·완전 여부). **git 제외, 기계마다 따로**다(다른 Mac·Chrome 의 캡처와 섞지 않는다).
 - 헤드리스 기준은 화면·워커 출력이 바뀐 커밋 뒤와 **webgpu 버전·기계가 바뀌면** 다시 찍는다. Chrome 업데이트와는 무관하다(브라우저 기준만 다시). `--refresh-baseline` 은 골든·헤드리스·브라우저를 모두 찍고, 헤드리스만 다시 찍을 때는 `node scripts/render-headless.mjs --refresh-baseline`(이전 기준은 `headless-baseline-<커밋>` 으로 옮김).
-- **화면·워커 출력이 바뀐 커밋 뒤에는 HEAD 에서 `--refresh-baseline`** 으로 "후" 를 새 기준으로 만든다(기준 = 마지막으로 받아들인 상태). 배포 커밋(호스팅 캐시만)·문서·검증 스크립트만의 커밋 뒤에는 기준이 그대로 유효하므로 갱신하지 않는다. 기준 커밋과 HEAD 사이에 출력에 닿는 파일이 바뀐 커밋이 있으면 실행이 "갱신 권장" 을 알린다. **Chrome 이 올라가면**(실행이 버전 차이로 멈추면) 변경 전 커밋에서 다시 찍는다. 장면 목록(`verify-scenes.json`)·골든 도엽 세트를 바꿨을 때도.
+- **화면·워커 출력이 바뀐 커밋 뒤에는 HEAD 에서 `--refresh-baseline`** 으로 "후" 를 새 기준으로 만든다(기준 = 마지막으로 받아들인 상태). 배포 커밋(호스팅 캐시만)·문서·검증 스크립트만의 커밋 뒤에는 기준이 그대로 유효하므로 갱신하지 않는다. 기준 커밋과 HEAD 사이에 출력에 닿는 파일이 바뀐 커밋이 있으면 실행이 "갱신 권장" 을 알린다. **Chrome 이 올라가면**(실행이 버전 차이로 멈추면) 변경 전 커밋에서 다시 찍는다. **macOS(Metal 드라이버)가 올라가면 헤드리스·브라우저 기준 둘 다 다시 찍는다(골든은 그대로).** 실행이 OS·어댑터 차이로 멈춘다(2026-11-14 결정 by @nanangqq, `docs/headless-check-plan.md` 9절. 옛 브라우저 기준처럼 OS 기록이 없으면 유효성을 알 수 없어 멈춘다). 장면 목록(`verify-scenes.json`)·골든 도엽 세트를 바꿨을 때도.
 - 갱신은 출력에 닿는 커밋 안 된 변경(문서·검증 스크립트 밖)이 있으면 거부한다(`--allow-dirty` 로 일부러). 이전 기준은 지우지 않고 `<폴더>-<그 커밋>` 으로 옮긴다(필요 없으면 지워도 됨). 전체 갱신은 약 11분.
 
 ### 장면 내력과 레이어별 메모
@@ -251,7 +251,7 @@ npm run verify -- --refresh-baseline        # 기준 다시 찍기(아래 정책
 1. **결정론 고정.** 주소(bbox·spawn·yaw·pitch)와 옵션(크기·dpr·효과 스위치)이 장면을 완전히 정한다. 애니메이션·시간 의존 값(안내 알약 사라짐, 프레임 ms)은 캡처에 들어가지 않게 한다(마스크). 기다림은 `sleep` 이 아니라 준비 신호로: HUD 등장 → **주변 도엽 스트리밍이 멈춤**(`src/debug/walk.tsx` 의 `data-walk-tiles` 가 `--stable` 2초 동안 그대로) → `--settle` 1초 → 캡처. App 은 `onDebugState` 로 busy·walking·도엽 수를 디버그 페이지에 알린다.
 2. **허용 오차 두 겹.** 픽셀당 색 차 임계값(pixelmatch `threshold`, 기본 0.1)과 다른 픽셀의 최대 비율(기본 0.1 %). 안티앨리어싱 픽셀은 제외(`includeAA: false`). 한 겹만 두면 노이즈에 실패하거나 진짜 회귀를 놓친다. 값은 기본 ↔ `ao=0` 같은 "달라야 하는 쌍" 이 잡히는 범위 안에서만 느슨하게 한다.
 3. **비교 알고리즘은 빌린다.** `pixelmatch`(+ `pngjs` 로 Node 에서 디코딩. 창 없이 비교)로 before/after 의 다른 픽셀 비율과 diff PNG(다른 자리를 빨강으로)를 낸다. 지각 차이(odiff 의 YIQ)·SSIM 은 노이즈가 문제될 때 검토한다. 스크립트가 `--compare <before> <after>` 로 같은 이름의 PNG 를 짝지어 `compare.json` 과 `diff/` 를 쓴다.
-4. **기준 환경 하나.** 기준 이미지는 @nanangqq 의 Mac + 설치된 Chrome 의 것이다. `--compare` 는 두 `index.json` 의 `browser`(이름·버전)가 다르면 비교를 거부하고, dpr·크기가 다른 쌍은 건너뛴다. 다른 기기의 캡처는 그 기기의 before 와만 비교한다(플랫폼별 골든).
+4. **기준 환경 하나.** 기준 이미지는 @nanangqq 의 Mac + 설치된 Chrome + 그 macOS(Metal 드라이버)의 것이다. `--compare` 는 두 `index.json` 의 `browser`(이름·버전)나 `os`(둘 다 있을 때)가 다르면 비교를 거부하고, dpr·크기가 다른 쌍은 건너뛴다. 다른 기기의 캡처는 그 기기의 before 와만 비교한다(플랫폼별 골든).
 5. **가리기.** 변하는 영역은 임계값이 아니라 마스크로 뺀다: HUD(위 가운데), 파라미터 표(왼쪽 위), 미니맵·조절 패널(오른쪽), 상태 표시줄(아래), 조준점·안내 알약(가운데). 기본 마스크 목록은 스크립트의 `DEFAULT_MASKS` 이고 단위는 **CSS px**(UI 는 창 비율이 아니라 고정 px 로 놓이므로. 비율로 두었더니 창이 좁을수록 표가 비어져 나왔다): x·y 는 왼쪽·위에서의 px, 음수면 오른쪽·아래에서, `c` 면 가운데. `--mask x,y,w,h` 로 더하고 `diff/masked.png` 로 덮임을 확인한다. 레이아웃을 바꾸면 목록도 고친다. `--region` 은 지표를 재는 영역(비율)이고 마스크는 비교에서 빼는 영역이다.
 6. **느슨하게 했으면 재검증.** 임계값·마스크·준비 신호를 바꾼 뒤에는 "달라야 하는 쌍이 다르다고 나오는지" 를 같은 세트로 한 번 돌려 확인하고 결과를 계획서에 한 줄 남긴다.
 

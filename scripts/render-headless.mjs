@@ -14,7 +14,8 @@
  * - renderShot: 크기마다 새 device → 렌더러(target 옵션, 오프스크린 텍스처) → 기록 되풀이 → 두 프레임 → 읽어 PNG
  * - compareShot: 기준 PNG 와 장면의 judge 임계값마다 pixelmatch(마스크 = verify-scenes.json mask, CSS px × dpr) → 같음/다름
  * - sanity: 재검증 쌍(base-walk ↔ base-walk-ao0)은 달라야 한다
- * - main: 요약 한 줄 + index.json, --refresh-baseline 이면 기준 폴더(docs/render-checks/headless-baseline/)와 manifest(커밋·webgpu·GPU·날짜)
+ * - main: 요약 한 줄 + index.json, --refresh-baseline 이면 기준 폴더(docs/render-checks/headless-baseline/)와 manifest(커밋·webgpu·GPU·macOS·날짜).
+ *   비교할 때 기준의 macOS(os, 옛 기준은 어댑터 설명에서)·어댑터 설명이 지금과 다르면 비교하지 않고 종료 코드 2(verify-select 의 headlessEnvStop)
  *
  * 설치(선택, D1): npm --prefix scripts/headless install  (webgpu 0.6.2 고정, Mac 바이너리. 루트 package.json 에는 없다)
  * 사용:
@@ -32,6 +33,7 @@ import path from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 import { deserialize, serialize } from "node:v8"
 import { isMainThread, parentPort, Worker as NodeWorker, workerData } from "node:worker_threads"
+import { headlessEnvStop, osVersion } from "./verify-select.mjs"
 
 const SELF_FILE = fileURLToPath(import.meta.url)
 const ROOT = path.resolve(path.dirname(SELF_FILE), "..")
@@ -351,6 +353,14 @@ async function main() {
         console.error(`헤드리스 기준이 없습니다(${a.baseline}/manifest.json). node scripts/render-headless.mjs --refresh-baseline 으로 먼저 찍으세요`)
         return 2
     }
+    // 기준 환경: macOS(Metal 드라이버)·어댑터가 기준과 다르면 비교하지 않고 멈춘다(VERIFY.md 7절, headless-check-plan 9.2). OS 는 여기서, 어댑터는 Dawn 을 띄운 뒤
+    const os = osVersion()
+    const baseline = a.refresh ? null : JSON.parse(readFileSync(manifestFile, "utf8"))
+    const osStop = baseline && headlessEnvStop(baseline, os)
+    if (osStop) {
+        console.error(`실행하지 못함: ${osStop}`)
+        return 2
+    }
     const outRel = a.refresh ? a.baseline : (a.out ?? defaultOut())
     const outDir = path.resolve(ROOT, outRel)
     if (a.refresh && existsSync(baselineDir)) {
@@ -376,9 +386,12 @@ async function main() {
     const info = probe.info ?? {}
     const adapter = { vendor: info.vendor, architecture: info.architecture, device: info.device, description: info.description }
     const webgpuVersion = JSON.parse(readFileSync(path.join(HEADLESS_DIR, "node_modules/webgpu/package.json"), "utf8")).version
-    const baseline = a.refresh ? null : JSON.parse(readFileSync(manifestFile, "utf8"))
+    const adapterStop = baseline && headlessEnvStop(baseline, os, adapter)
+    if (adapterStop) {
+        console.error(`실행하지 못함: ${adapterStop}`)
+        return 2
+    }
     if (baseline && baseline.webgpu !== webgpuVersion) console.log(`주의: 기준의 webgpu ${baseline.webgpu} ≠ 지금 ${webgpuVersion}. 차이가 나면 기준을 다시 찍으세요(--refresh-baseline)`)
-    if (baseline && baseline.adapter?.description !== adapter.description) console.log(`주의: 기준 GPU(${baseline.adapter?.description}) ≠ 지금(${adapter.description}). 기계가 다르면 비교하지 않는 것이 원칙(VERIFY.md 7절)`)
     console.log(`헤드리스 2겹: Dawn webgpu ${webgpuVersion} · ${adapter.description ?? adapter.vendor} · 장면 ${scenes.length} × 크기 ${sizes.length} · 데이터 해시 ${b.dataHash} → ${outRel}`)
 
     const results = []
@@ -456,7 +469,7 @@ async function main() {
     const seconds = Math.round((performance.now() - started) / 100) / 10
     const commit = git("rev-parse", "--short", "HEAD")
     const dirty = git("status", "--porcelain", "--", "src", "scripts/headless", "scripts/render-headless.mjs") ? "+dirty" : ""
-    const index = { createdAt: new Date().toISOString(), commit: commit + dirty, webgpu: webgpuVersion, adapter, node: process.version, dpr: DPR, sizes: a.sizes, dataHash: b.dataHash, seconds, dataMs, renderMs, results, sanity, failures }
+    const index = { createdAt: new Date().toISOString(), commit: commit + dirty, webgpu: webgpuVersion, adapter, os, node: process.version, dpr: DPR, sizes: a.sizes, dataHash: b.dataHash, seconds, dataMs, renderMs, results, sanity, failures }
     writeFileSync(path.join(outDir, "index.json"), JSON.stringify(index, null, 1))
     if (a.refresh) {
         const manifest = {
@@ -466,6 +479,7 @@ async function main() {
             createdAt: index.createdAt,
             webgpu: webgpuVersion,
             adapter,
+            os,
             node: process.version,
             dpr: DPR,
             sizes: a.sizes,
@@ -474,7 +488,7 @@ async function main() {
             shots: results.filter((r) => !r.error).length,
             complete: failures.length === 0 && scenes.length === SCENES.scenes.length,
             failures,
-            policy: "화면·워커 출력이 바뀐 커밋 뒤, 또는 webgpu 버전·기계가 바뀌면 HEAD 에서 다시 찍는다(VERIFY.md 6절). Chrome 업데이트와 무관. 기계마다 따로(git 제외)",
+            policy: "화면·워커 출력이 바뀐 커밋 뒤, 또는 webgpu 버전·기계·macOS(Metal 드라이버)가 바뀌면 HEAD 에서 다시 찍는다(어댑터·OS 가 다르면 실행이 멈춘다, VERIFY.md 6절). Chrome 업데이트와 무관. 기계마다 따로(git 제외)",
         }
         writeFileSync(manifestFile, JSON.stringify(manifest, null, 2))
     }

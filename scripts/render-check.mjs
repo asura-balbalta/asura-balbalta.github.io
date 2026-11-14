@@ -41,6 +41,7 @@ import path from "node:path"
 import { chromium } from "playwright"
 import pixelmatch from "pixelmatch"
 import { PNG } from "pngjs"
+import { osText, osVersion, sameOs } from "./verify-select.mjs"
 
 /**
  * 비교에서 빼는 기본 영역. 둘러보기 화면의 변하는 UI: HUD(위 가운데), 파라미터 표(왼쪽 위), 미니맵·조절 패널(오른쪽),
@@ -371,7 +372,7 @@ const capture = async (args) => {
     } finally {
         await browser.close()
     }
-    const index = { createdAt: new Date().toISOString(), browser: browserInfo, base: args.base, region: args.region, stable: args.stable, settle: args.settle, results }
+    const index = { createdAt: new Date().toISOString(), browser: browserInfo, os: osVersion(), base: args.base, region: args.region, stable: args.stable, settle: args.settle, results }
     await writeFile(path.join(args.out, "index.json"), JSON.stringify(index, null, 2))
     console.log(`끝. ${results.length}장, ${path.join(args.out, "index.json")}`)
 }
@@ -435,6 +436,8 @@ const compare = async (args) => {
     const envA = `${before.browser?.name} ${before.browser?.version}`
     const envB = `${after.browser?.name} ${after.browser?.version}`
     if (envA !== envB) throw new Error(`브라우저가 달라 비교하지 않습니다: before ${envA}, after ${envB}`)
+    // macOS(Metal 드라이버)가 다른 캡처도 비교하지 않는다(2026-11-14). 옛 index(os 없음)끼리의 손 비교는 막지 않는다(verify 는 기준 manifest 로 따로 막는다)
+    if (before.os && after.os && !sameOs(before.os, after.os)) throw new Error(`macOS 가 달라 비교하지 않습니다: before ${osText(before.os)}, after ${osText(after.os)}`)
     const masks = [...(args.defaultMasks ? DEFAULT_MASKS : []), ...args.masks]
     const diffDir = path.join(afterDir, "diff")
     await mkdir(diffDir, { recursive: true })

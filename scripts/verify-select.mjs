@@ -17,12 +17,13 @@
  * - classify: 파일마다 분류표의 처음 맞는 규칙 → 분류(없으면 unknown)
  * - makePlan: 분류 → 골든 여부·캡처 범위(smoke/레이어/full)·장면 목록
  * - printPlan: 계획 출력(예상 시간 포함)
- * - checkEnv: 서버·dist 빌드 시각·기준 폴더·Chrome/Node 버전
+ * - checkEnv: 서버·dist 빌드 시각·기준 폴더·Chrome/Node 버전·기준 환경(osVersion·headlessEnvStop·browserEnvStop: macOS·어댑터·Chrome 이
+ *   기준과 다르면 그 층만 비교 없이 멈추고 종료 코드 2. 골든은 OS 무관이라 그대로 돈다. render-headless·render-check 도 import)
  * - runGolden: 골든 만들기 + 기준과 비교(tile-golden --compare, 실패면 종료 코드 1)
  * - runHeadless: render-headless 로 그리고 기준과 비교(그 index.json 의 판정·재검증을 읽는다)
  * - runCaptures: render-check 캡처 → 기준과 비교(임계값마다 compare-t<값>.json)
  * - judge: 장면별 judge 임계값으로 같음/다름, 재검증 쌍 확인 → 요약 표, verify.json
- * - refreshBaseline: 골든 + 헤드리스 전체 + 브라우저 전체 캡처를 기준 폴더로, manifest.json 에 커밋·Chrome·webgpu·Node
+ * - refreshBaseline: 골든 + 헤드리스 전체 + 브라우저 전체 캡처를 기준 폴더로, manifest.json 에 커밋·Chrome·macOS·webgpu·Node
  *
  * 사용:
  *   npm run verify                         # 작업 트리 ↔ HEAD(추적 안 된 파일 포함). 골든 + 헤드리스
@@ -39,9 +40,10 @@
  */
 import { spawnSync, execFileSync } from "node:child_process"
 import { createHash } from "node:crypto"
-import { existsSync, readFileSync, statSync, readdirSync, renameSync, copyFileSync, writeFileSync, mkdirSync } from "node:fs"
+import { existsSync, readFileSync, statSync, readdirSync, renameSync, copyFileSync, writeFileSync, mkdirSync, realpathSync } from "node:fs"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
+import { isMainThread } from "node:worker_threads"
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
 const MAP = JSON.parse(readFileSync(path.join(ROOT, "scripts/verify-map.json"), "utf8"))
@@ -183,6 +185,57 @@ const chromeVersion = () => {
     }
 }
 
+// ---- 기준 환경(macOS·Chrome·GPU 어댑터). render-headless·render-check 도 이 함수들을 쓴다(2026-11-14, docs/headless-check-plan.md 9.2) ----
+
+/** 지금 macOS 버전(sw_vers ProductVersion·BuildVersion). 못 읽으면 null(macOS 밖) */
+export const osVersion = () => {
+    try {
+        const read = (flag) => execFileSync("sw_vers", [flag], { encoding: "utf8" }).trim()
+        return { version: read("-productVersion"), build: read("-buildVersion") }
+    } catch {
+        return null
+    }
+}
+/** 기준 manifest·index 의 OS. 옛 헤드리스 기록(os 없음)은 어댑터 설명 "Metal driver on macOS Version 26.6.2 (Build 25G83)" 에서 읽는다 */
+export const recordedOs = (m) => {
+    if (m?.os) return m.os
+    const r = /macOS Version ([\d.]+) \(Build (\w+)\)/.exec(m?.adapter?.description ?? "")
+    return r ? { version: r[1], build: r[2] } : null
+}
+export const osText = (o) => (o ? `macOS ${o.version} (${o.build})` : "OS 기록 없음")
+export const sameOs = (a, b) => a.version === b.version && a.build === b.build
+const newerVersion = (a, b) => {
+    const x = a.split(".").map(Number)
+    const y = b.split(".").map(Number)
+    for (let i = 0; i < Math.max(x.length, y.length); i++) if ((x[i] ?? 0) !== (y[i] ?? 0)) return (x[i] ?? 0) > (y[i] ?? 0)
+    return false
+}
+const REFRESH_HINT = "HEAD 에서 npm run verify -- --refresh-baseline"
+const osStop = (base, now) =>
+    `macOS 가 ${newerVersion(now.version, base.version) ? "올라갔습니다" : "기준과 다릅니다"}(기준 ${osText(base)}, 지금 ${osText(now)}). 드라이버가 다른 캡처는 비교하지 않습니다(VERIFY.md 7절). ${REFRESH_HINT}`
+
+/**
+ * 헤드리스 기준을 지금 환경과 비교해도 되는지. OS 가 다르거나(옛 기준은 어댑터 설명에서 읽은 OS), 어댑터 설명(기계·드라이버)이 다르면 멈춘다.
+ * @param adapter 지금 Dawn 어댑터. verify-select 는 webgpu 를 띄우지 않아 모른다(→ OS 만, 어댑터는 render-headless 가 본다)
+ * @returns 멈출 이유(문자열) 또는 null
+ */
+export const headlessEnvStop = (m, now, adapter) => {
+    const base = recordedOs(m)
+    if (base && now && !sameOs(base, now)) return osStop(base, now)
+    if (adapter && m?.adapter?.description !== adapter.description)
+        return `GPU 어댑터가 기준과 다릅니다(기준 ${m?.adapter?.description}, 지금 ${adapter.description}). 기계·드라이버가 다른 캡처는 비교하지 않습니다(VERIFY.md 7절). ${REFRESH_HINT}(헤드리스만: node scripts/render-headless.mjs --refresh-baseline)`
+    return null
+}
+/** 브라우저 캡처 기준을 비교해도 되는지: Chrome 버전·OS. os 가 없는 옛 기준은 유효성을 알 수 없어 멈춘다. @returns 멈출 이유 또는 null */
+export const browserEnvStop = (m, now, chrome) => {
+    const stops = []
+    if (chrome && m.browser?.version !== chrome)
+        stops.push(`Chrome 버전이 기준과 다릅니다(기준 ${m.browser?.name} ${m.browser?.version}, 지금 ${chrome}). 버전이 다른 캡처는 비교하지 않습니다(VERIFY.md 7절 4). 변경 전 커밋에서 npm run verify -- --refresh-baseline 으로 기준을 새로 찍으세요`)
+    if (now && !m.os) stops.push(`캡처 기준에 OS 기록이 없어 유효성을 알 수 없습니다(지금 ${osText(now)}). 갱신 필요: ${REFRESH_HINT}`)
+    else if (now && !sameOs(m.os, now)) stops.push(osStop(m.os, now))
+    return stops.length ? stops.join(" / ") : null
+}
+
 const readJson = (file) => (existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : null)
 
 /** dir 아래 가장 늦게 바뀐 파일 시각(ms) */
@@ -197,13 +250,22 @@ const newestMtime = (dir) => {
 }
 
 /**
- * 실행 전 환경 확인. 문제면 EnvError(종료 코드 2).
+ * 실행 전 환경 확인. 문제면 EnvError(종료 코드 2). 기준 환경(OS·Chrome·어댑터)이 바뀐 층은 던지지 않고 stops 에 적어
+ * 그 층만 비교 없이 멈춘다(골든은 그대로 돈다. 끝에 종료 코드 2).
  * @param needs { captures, golden, compare } compare = 기준과 비교할지(기준 갱신이면 false)
+ * @returns { chrome, notes, stops: { browser?, headless? } } notes 는 "갱신 필요(환경이 바뀜)" 가 먼저
  */
 const checkEnv = async (args, needs) => {
     const notes = []
+    const envNotes = []
+    const stops = {}
+    const chrome = chromeVersion()
+    const os = osVersion()
+    // 브라우저 기준 환경을 서버 확인보다 먼저 본다: 어차피 멈출 층이면 서버·빌드가 필요 없다
+    const captureManifest = needs.compare ? readJson(path.resolve(ROOT, args.baseline, "manifest.json")) : null
+    if (needs.captures && needs.compare && captureManifest) stops.browser = browserEnvStop(captureManifest, os, chrome)
     // dryRun: 서버·빌드 검사는 건너뛰고 기준 정보·갱신 권장만 모은다
-    if (needs.captures && !needs.dryRun) {
+    if (needs.captures && !needs.dryRun && !stops.browser) {
         try {
             const res = await fetch(`${args.server}/`)
             if (!res.ok) throw new Error(`HTTP ${res.status}`)
@@ -217,7 +279,6 @@ const checkEnv = async (args, needs) => {
         const distT = Math.max(statSync(distJs).mtimeMs, statSync(path.join(ROOT, "dist/terrainTileBuild.worker.js")).mtimeMs)
         if (srcT > distT) notes.push(`경고: src 코드가 dist 보다 ${Math.round((srcT - distT) / 1000)}초 새롭습니다. npm run build 를 안 했으면 캡처는 옛 빌드입니다(Ctrl+C 뒤 빌드)`)
     }
-    const chrome = chromeVersion()
     /**
      * 기준 커밋이 HEAD 와 다를 때, 그 사이 커밋이 출력에 닿는 파일(ui·docs·none 밖)을 건드렸으면 갱신을 권한다(2026-10-31 질문 by @nanangqq).
      * 배포 커밋(호스팅 캐시만)·문서·검증 스크립트만 바뀐 커밋 뒤에는 기준이 그대로 유효하므로 조용히 넘어간다
@@ -234,19 +295,28 @@ const checkEnv = async (args, needs) => {
         if (touching.length > 0) notes.push(`주의: ${label} 기준 커밋 ${m.commit} 이후 출력에 닿는 파일이 바뀐 커밋이 있습니다(${touching.slice(0, 3).map((c) => c.file).join(", ")}${touching.length > 3 ? ` 외 ${touching.length - 3}` : ""}). 차이가 이전 커밋 탓일 수 있으니 HEAD 에서 --refresh-baseline 을 권합니다`)
     }
     if (needs.captures && needs.compare) {
-        const m = readJson(path.resolve(ROOT, args.baseline, "manifest.json"))
+        const m = captureManifest
         if (!m) throw new EnvError(`캡처 기준이 없습니다(${args.baseline}/manifest.json). npm run verify -- --refresh-baseline 으로 HEAD 에서 먼저 찍으세요`)
         staleNote(m, "캡처")
-        if (chrome && m.browser?.version !== chrome)
-            throw new EnvError(`Chrome 버전이 기준과 다릅니다(기준 ${m.browser?.name} ${m.browser?.version}, 지금 ${chrome}). 버전이 다른 캡처는 비교하지 않습니다(VERIFY.md 7절 4). 변경 전 커밋에서 npm run verify -- --refresh-baseline 으로 기준을 새로 찍으세요`)
-        if (m.complete === false) throw new EnvError(`캡처 기준이 불완전합니다(${args.baseline}/manifest.json errors). --refresh-baseline 다시`)
-        notes.push(`캡처 기준: ${m.commit} ${m.browser?.name} ${m.browser?.version}, ${m.shots}장 (${m.createdAt})`)
+        if (stops.browser) envNotes.push(`갱신 필요(환경이 바뀜) — 브라우저 기준: ${stops.browser}`)
+        else if (m.complete === false) throw new EnvError(`캡처 기준이 불완전합니다(${args.baseline}/manifest.json errors). --refresh-baseline 다시`)
+        notes.push(`캡처 기준: ${m.commit} ${m.browser?.name} ${m.browser?.version} ${osText(m.os)}, ${m.shots}장 (${m.createdAt})`)
+    } else if (captureManifest) {
+        // 이번 실행에 브라우저 층이 없어도, 기준이 무효면 알린다(갱신 때 같이 찍을지 판단용)
+        const s = browserEnvStop(captureManifest, os, chrome)
+        if (s) envNotes.push(`갱신 필요(환경이 바뀜) — 브라우저 기준(이번 실행에는 없음): ${s}`)
     }
+    const headlessManifest = needs.compare ? readJson(path.resolve(ROOT, args.headlessBaseline, "manifest.json")) : null
     if (needs.headless && needs.compare) {
-        const m = readJson(path.resolve(ROOT, args.headlessBaseline, "manifest.json"))
+        const m = headlessManifest
         if (!m) throw new EnvError(`헤드리스 기준이 없습니다(${args.headlessBaseline}/manifest.json). HEAD 에서 npm run verify -- --refresh-baseline(전체) 또는 node scripts/render-headless.mjs --refresh-baseline(헤드리스만)으로 먼저 찍으세요`)
         staleNote(m, "헤드리스")
+        stops.headless = headlessEnvStop(m, os)
+        if (stops.headless) envNotes.push(`갱신 필요(환경이 바뀜) — 헤드리스 기준: ${stops.headless}`)
         notes.push(`헤드리스 기준: ${m.commit} webgpu ${m.webgpu} ${m.adapter?.description ?? ""}, ${m.shots}장 (${m.createdAt})`)
+    } else if (headlessManifest && WEBGPU_INSTALLED) {
+        const s = headlessEnvStop(headlessManifest, os)
+        if (s) envNotes.push(`갱신 필요(환경이 바뀜) — 헤드리스 기준(이번 실행에는 없음): ${s}`)
     }
     if (needs.golden && needs.compare) {
         const m = readJson(path.resolve(ROOT, args.golden, "manifest.json"))
@@ -255,7 +325,7 @@ const checkEnv = async (args, needs) => {
         if (m.node !== process.version) notes.push(`주의: 골든 기준의 Node ${m.node} ≠ 지금 ${process.version}. 수학 함수 차이로 다를 수 있으니 차이가 나면 기준 커밋에서 --refresh-baseline`)
         notes.push(`골든 기준: ${m.commit} Node ${m.node} (${m.createdAt})`)
     }
-    return { chrome, notes }
+    return { chrome, os, notes: [...envNotes, ...notes], stops }
 }
 
 // ---- 실행 ----
@@ -294,8 +364,10 @@ const shotName = (size, params) => {
 const runHeadless = (args, scenes, outDir) => {
     const hOut = path.join(outDir, "headless")
     const code = runNode("scripts/render-headless.mjs", ["--scenes", scenes.map((s) => s.id).join(","), "--baseline", args.headlessBaseline, "--out", hOut, "--quiet"])
+    // 종료 코드 2 = 실행 못 함(어댑터가 기준과 다름 등 환경). 차이(1)가 아니라 환경 중단으로 센다
+    if (code === 2) return { code, index: null, failures: [], envStop: `render-headless 가 비교하지 않고 멈춤(종료 코드 2). 위 출력 확인` }
     const index = readJson(path.join(hOut, "index.json"))
-    const failures = code === 2 || !index ? [`헤드리스를 실행하지 못함(종료 코드 ${code}). 위 출력 확인`] : index.failures.map((f) => `헤드리스 ${f}`)
+    const failures = !index ? [`헤드리스를 실행하지 못함(종료 코드 ${code}). 위 출력 확인`] : index.failures.map((f) => `헤드리스 ${f}`)
     return { code, index, failures }
 }
 
@@ -363,10 +435,11 @@ const judge = (scenes, outDir, compares) => {
 
 const pct = (r) => (r === undefined ? "-" : `${r.px} px ${(r.ratio * 100).toFixed(4)}%${r.judged ? "" : "(참고)"}`)
 
-const printSummary = (golden, judged, outDir, headless = null) => {
+const printSummary = (golden, judged, outDir, headless = null, browserStop = null) => {
     console.log("\n== 요약 ==")
     if (golden) console.log(`1겹 도엽 골든: ${golden.ok ? "같음" : golden.built ? "다름(위 tile-golden 비교 출력)" : `만들기 실패(종료 코드 ${golden.code})`}`)
-    if (headless?.skipped) console.log(`2겹 헤드리스: ${headless.skipped}`)
+    if (headless?.envStop) console.log(`2겹 헤드리스: 비교하지 않음 — ${headless.envStop}`)
+    else if (headless?.skipped) console.log(`2겹 헤드리스: ${headless.skipped}`)
     else if (headless?.index) {
         const rows = headless.index.results
         const same = rows.filter((r) => r.verdict === "같음").length
@@ -374,6 +447,7 @@ const printSummary = (golden, judged, outDir, headless = null) => {
         for (const r of rows.filter((x) => x.verdict !== "같음")) console.log(`  ${r.scene.padEnd(22)} ${r.size.padEnd(9)} ${r.error ? "실패" : Object.entries(r.compare ?? {}).map(([t, c]) => `t${t} ${c.px} px ${(c.ratio * 100).toFixed(4)}%`).join(" ")} ${r.verdict ?? ""}`)
         for (const s of headless.index.sanity) console.log(`  재검증 ${s.on} ↔ ${s.off} ${s.size}: ${Object.entries(s.ratios).map(([t, v]) => `t${t} ${(v * 100).toFixed(3)} %`).join(" ")} ${s.different ? "다름(정상)" : "같음(무뎌짐?)"}`)
     } else if (headless) console.log(`2겹 헤드리스: 실행 못 함(종료 코드 ${headless.code})`)
+    if (browserStop) console.log(`3겹 브라우저 캡처: 비교하지 않음 — ${browserStop}`)
     if (judged) {
         const ts = Object.keys(judged.compares).sort((a, b) => b - a)
         console.log(`3겹 브라우저 캡처 ${judged.rows.length}장 (${outDir})`)
@@ -401,7 +475,7 @@ const refreshBaseline = async (args) => {
     const dirty = changedFiles({ base: "working" }).files.map(classify).filter((c) => !["none", "script"].includes(c.cls)).map((c) => `${c.cls} ${c.file}`)
     if (dirty.length && !args.allowDirty)
         throw new EnvError(`기준은 커밋된 코드에서 찍습니다. 출력에 닿는 커밋 안 된 변경이 있습니다:\n  ${dirty.join("\n  ")}\n커밋하거나 되돌린 뒤 다시(일부러면 --allow-dirty)`)
-    const { chrome } = await checkEnv(args, { captures: true, golden: true, compare: false })
+    const { chrome, os } = await checkEnv(args, { captures: true, golden: true, compare: false })
     const commit = git("rev-parse", "--short", "HEAD") + (dirty.length ? "+dirty" : "")
     const subject = git("log", "-1", "--format=%s")
     const shots = SCENES.scenes.length * SCENES.sizes.length
@@ -416,7 +490,7 @@ const refreshBaseline = async (args) => {
     if (gCode !== 0) throw new EnvError(`골든을 만들지 못했습니다(종료 코드 ${gCode})`)
     const g = readJson(path.resolve(ROOT, args.golden, "golden.json"))
     const gMeta = g.meta
-    writeFileSync(path.resolve(ROOT, args.golden, "manifest.json"), JSON.stringify({ kind: "golden-baseline", commit, subject, createdAt: new Date().toISOString(), node: process.version, records: Object.keys(g.records).length, goldenCommit: gMeta.commit, workerDirty: gMeta.workerDirty, policy: "화면·워커 출력이 바뀐 커밋 뒤, 또는 Chrome 이 올라가면 HEAD 에서 다시 찍는다(VERIFY.md 6절). 배포·문서·스크립트만의 커밋 뒤에는 그대로. 기계마다 따로(git 제외)" }, null, 2))
+    writeFileSync(path.resolve(ROOT, args.golden, "manifest.json"), JSON.stringify({ kind: "golden-baseline", commit, subject, createdAt: new Date().toISOString(), node: process.version, os, records: Object.keys(g.records).length, goldenCommit: gMeta.commit, workerDirty: gMeta.workerDirty, policy: "화면·워커 출력이 바뀐 커밋 뒤 HEAD 에서 다시 찍는다(VERIFY.md 6절). 골든(워커 출력, CPU)은 Chrome·macOS 업데이트와 무관하다(os 는 참고용 기록, 비교에 쓰지 않음). macOS(Metal 드라이버)가 올라가면 헤드리스·브라우저 기준만 둘 다 다시. 배포·문서·스크립트만의 커밋 뒤에는 그대로. 기계마다 따로(git 제외)" }, null, 2))
 
     // 2) 헤드리스 전체(기준 폴더를 옮기고 manifest 를 쓰는 것은 render-headless 가 한다)
     if (headless) {
@@ -435,6 +509,7 @@ const refreshBaseline = async (args) => {
         createdAt: new Date().toISOString(),
         browser: index?.browser ?? null,
         chromeInstalled: chrome,
+        os: index?.os ?? os,
         node: process.version,
         sizes: SCENES.sizes,
         scenes: SCENES.scenes.map((s) => s.id),
@@ -442,7 +517,7 @@ const refreshBaseline = async (args) => {
         shots: index?.results.length ?? 0,
         complete: cCode === 0 && errors.length === 0,
         errors,
-        policy: "커밋 뒤 HEAD 에서, 그리고 Chrome 이 올라가면 다시 찍는다(VERIFY.md 6절). 기계마다 따로(git 제외)",
+        policy: "화면·워커 출력이 바뀐 커밋 뒤 HEAD 에서, 그리고 Chrome 이나 macOS(Metal 드라이버)가 올라가면 다시 찍는다(실행이 버전·OS 차이로 멈춘다, VERIFY.md 6절). 기계마다 따로(git 제외)",
     }
     writeFileSync(path.resolve(ROOT, args.baseline, "manifest.json"), JSON.stringify(manifest, null, 2))
     console.log(`\n기준 갱신 ${manifest.complete ? "완료" : "불완전"}: 골든 ${args.golden}, 캡처 ${args.baseline} (${manifest.shots}장, ${manifest.browser?.name} ${manifest.browser?.version})`)
@@ -483,16 +558,24 @@ const main = async () => {
         console.log("검증할 것이 없습니다.")
         return 0
     }
-    const { notes } = await checkEnv(args, { captures: doBrowser, headless: doHeadless, golden: plan.golden, compare: true })
+    const { notes, stops } = await checkEnv(args, { captures: doBrowser, headless: doHeadless, golden: plan.golden, compare: true })
     for (const n of notes) console.log(n)
     const outRel = args.out ?? defaultOut()
     const outDir = path.resolve(ROOT, outRel)
     mkdirSync(outDir, { recursive: true })
 
+    // 기준 환경이 바뀐 층(stops)은 비교하지 않고 건너뛴다. 골든은 그대로 돈다
     const golden = plan.golden ? runGolden(args, outDir) : null
-    const headless = doHeadless ? runHeadless(args, plan.scenes, outDir) : plan.scenes.length > 0 ? { skipped: args.headless ? "건너뜀(webgpu 미설치)" : "건너뜀(--no-headless)" } : null
+    const headless = doHeadless
+        ? stops.headless
+            ? { envStop: stops.headless }
+            : runHeadless(args, plan.scenes, outDir)
+        : plan.scenes.length > 0
+          ? { skipped: args.headless ? "건너뜀(webgpu 미설치)" : "건너뜀(--no-headless)" }
+          : null
+    const envStops = [...(headless?.envStop ? [`헤드리스: ${headless.envStop}`] : []), ...(doBrowser && stops.browser ? [`브라우저: ${stops.browser}`] : [])]
     let judged = null
-    if (doBrowser) {
+    if (doBrowser && !stops.browser) {
         const cCode = capture(plan.scenes, outDir)
         if (cCode !== 0) console.log(`render-check 캡처 종료 코드 ${cCode}(장별 실패는 아래 판정에 나온다)`)
         const thresholds = [...new Set(plan.scenes.flatMap((s) => s.judge))]
@@ -500,12 +583,17 @@ const main = async () => {
         const compares = compareAll(path.resolve(ROOT, args.baseline), outDir, thresholds)
         judged = { ...judge(plan.scenes, outDir, compares), compares }
     }
-    printSummary(golden, judged, outRel, headless)
+    printSummary(golden, judged, outRel, headless, doBrowser ? stops.browser : null)
     const failures = [...(golden && !golden.ok ? ["도엽 골든이 기준과 다름"] : []), ...(headless?.failures ?? []), ...(judged?.failures ?? [])]
     writeFileSync(
         path.join(outDir, "verify.json"),
-        JSON.stringify({ createdAt: new Date().toISOString(), head: git("rev-parse", "--short", "HEAD"), source, files: classified, plan: { golden: plan.golden, mode: plan.mode, layers: plan.layers, scenes: plan.scenes.map((s) => s.id) }, golden, headless: headless?.index ? { dir: "headless", seconds: headless.index.seconds, results: headless.index.results.map(({ info, ...r }) => r), sanity: headless.index.sanity } : (headless ?? null), rows: judged?.rows ?? [], sanity: judged?.sanity ?? [], failures }, null, 2),
+        JSON.stringify({ createdAt: new Date().toISOString(), head: git("rev-parse", "--short", "HEAD"), source, files: classified, plan: { golden: plan.golden, mode: plan.mode, layers: plan.layers, scenes: plan.scenes.map((s) => s.id) }, golden, headless: headless?.index ? { dir: "headless", seconds: headless.index.seconds, results: headless.index.results.map(({ info, ...r }) => r), sanity: headless.index.sanity } : (headless ?? null), rows: judged?.rows ?? [], sanity: judged?.sanity ?? [], failures, envStops }, null, 2),
     )
+    if (envStops.length) {
+        if (failures.length) console.log(`\n예상 밖 차이 ${failures.length}건:\n  ${failures.join("\n  ")}`)
+        console.log(`\n실행하지 못함(기준 환경이 바뀜, 비교하지 않은 층 ${envStops.length}):\n  ${envStops.join("\n  ")}`)
+        return 2
+    }
     if (failures.length) {
         console.log(`\n예상 밖 차이 ${failures.length}건:\n  ${failures.join("\n  ")}\n→ diff PNG 를 보고, 다르면 안 되는 곳이면 VERIFY.md 3절(재현 → 좁히기 → 수치)`)
         return 1
@@ -514,9 +602,11 @@ const main = async () => {
     return 0
 }
 
-main()
-    .then((code) => process.exit(code))
-    .catch((err) => {
-        console.error(err instanceof EnvError ? `\n실행하지 못함: ${err.message}` : err)
-        process.exit(2)
-    })
+// render-headless·render-check 가 위의 환경 함수를 import 할 때는 돌지 않는다
+if (isMainThread && process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url))
+    main()
+        .then((code) => process.exit(code))
+        .catch((err) => {
+            console.error(err instanceof EnvError ? `\n실행하지 못함: ${err.message}` : err)
+            process.exit(2)
+        })
