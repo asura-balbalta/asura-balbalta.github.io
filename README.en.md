@@ -8,6 +8,11 @@ A WebGPU viewer that renders Korean terrain, buildings, roads, water, forest and
 downloads the 1K map sheets inside it, builds a terrain TIN, drapes buildings, roads and water on top, and paints forest and green areas onto the terrain. You can walk around in first person and export
 to STL, SKP, 3DM or GLB. It runs from static files with no server of its own.
 
+The service itself lives at **<https://asrbbt.world>**. This repository is public for two purposes:
+
+- **Running it locally**: clone the code and run it as is, or change it however you like (see "Run" below).
+- **A record of earlier versions**: the commit history keeps how the service has changed. For tagged versions, the app as it was at that tag stays available at `https://asura-balbalta.github.io/<tag>/` (for example `/v0.1.1/`).
+
 ## Features
 
 | Area | What it does |

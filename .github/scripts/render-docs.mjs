@@ -21,6 +21,8 @@ if (!outDir) {
 }
 const repo = process.env.GITHUB_REPOSITORY || "asura-balbalta/asura-balbalta.github.io"
 const ref = process.env.GITHUB_SHA || "main"
+/** 서비스의 본 주소. 문서 위의 "앱 열기" 가 가는 곳이다(이 사이트의 /<태그>/ 는 이전 버전 기록이고 버전 줄에서 간다) */
+const SERVICE_URL = "https://asrbbt.world"
 
 /** 변환할 문서. src 는 저장소 루트 기준, out 은 출력 폴더 기준 */
 const DOCS = [
@@ -103,7 +105,7 @@ pre { background: var(--code); padding: 14px 16px; border-radius: 6px; overflow-
 blockquote { margin: 12px 0; padding: 0 1em; color: var(--muted); border-left: 4px solid var(--line); }
 `
 
-/** 변환한 조각을 한 페이지로 감싼다. 위에 앱(최신 버전)·저장소로 가는 줄과 버전 목록을 둔다. root 면 옛 앱 주소 넘김을 넣는다 */
+/** 변환한 조각을 한 페이지로 감싼다. 위에 서비스 본 주소·저장소로 가는 줄과 버전 목록을 둔다. root 면 옛 앱 주소 넘김을 넣는다 */
 function page(doc, body, versions, root) {
     return `<!doctype html>
 <html lang="${doc.lang}">
@@ -114,7 +116,7 @@ function page(doc, body, versions, root) {
 ${root ? ROOT_REDIRECT : ""}<style>${CSS}</style>
 </head>
 <body>
-<nav><a href="latest/">${doc.lang === "en" ? "Open the app" : "앱 열기"}</a> · <a href="https://github.com/${repo}">GitHub</a>${versionLine(doc, versions)}</nav>
+<nav><a href="${SERVICE_URL}">${doc.lang === "en" ? "Open the app" : "앱 열기"}</a> · <a href="https://github.com/${repo}">GitHub</a>${versionLine(doc, versions)}</nav>
 <main>
 ${body}
 </main>
