@@ -11,7 +11,7 @@ to STL, SKP, 3DM or GLB. It runs from static files with no server of its own.
 The service itself lives at **<https://asrbbt.world>**. This repository is public for two purposes:
 
 - **Running it locally**: clone the code and run it as is, or change it however you like (see "Run" below).
-- **A record of earlier versions**: the commit history keeps how the service has changed. For tagged versions, the app as it was at that tag stays available at `https://asura-balbalta.github.io/<tag>/` (for example `/v0.1.1/`).
+- **A record of earlier versions**: the commit history keeps how the service has changed. For tagged versions, the app as it was at that tag stays available at `https://asura-balbalta.github.io/<tag>/` (for example `/v0.0.1/`).
 
 ## Features
 
@@ -93,7 +93,7 @@ with your own and register your domain.
 - References in commit messages and comments such as `docs/…`, "계획서 N절" (plan, section N) or "보고서" (report) point to the private working notes (plans, measurements, captures). They are not in this repository. `by @nanangqq` in code comments names the person who made that decision or check.
 - Commit messages are in Korean, in the form `type(scope): one sentence`.
 - Deployment: pushing a `v*` tag makes GitHub Actions build and publish to GitHub Pages (`.github/workflows/pages.yml`). Pushing to main does not deploy.
-- Each tag gets its own path on the deployed site: `/v0.1.1/` is the app at that tag, and `/latest/` redirects to the highest version. Every deploy rebuilds all `v*` tags and publishes them together (`.github/scripts/build-site.mjs`).
+- Each tag gets its own path on the deployed site: `/v0.0.1/` is the app at that tag, and `/latest/` redirects to the highest version. Every deploy rebuilds all `v*` tags and publishes them together (`.github/scripts/build-site.mjs`).
 - The site root (`/`) is this document in Korean (same as `/readme.html`; English is `/readme.en.html`). The third-party notices are at `/third-party.html` (converted by `.github/scripts/render-docs.mjs`).
 - Issues are welcome. Pull requests are applied by hand in the private repository and arrive here as replayed commits, so they land as equivalent commits rather than merge commits.
 
